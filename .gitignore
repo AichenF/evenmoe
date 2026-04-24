@@ -1,0 +1,12 @@
+.DS_Store
+.claude/settings.local.json
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# proposal/PoC visualizations and working notes live outside git
+poc-plan.html
+proposal-moe-load-balancer.md
+docs/
