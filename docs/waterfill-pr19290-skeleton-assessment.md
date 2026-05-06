@@ -27,7 +27,7 @@ PR #19290 可以放进当前 skeleton，但不能把 SGLang 里的
 
 - `RoutingRequest.logical_topk_ids` 可以承载 remap 前的 logical TopK。
 - `RoutingRequest.current_rank_load` 可以承载 dynamic Waterfill 的当前 batch 全局 rank load。
-- `RoutingRequest.prior_rank_load` 可以承载 EPLB / historical rank-load prior。
+- `RoutingLoadView.prior_rank_load` 可以承载 EPLB / historical rank-load prior，并作为 L2 长持 state 供 policy 读取。
 - `RoutingDecision.shared_expert_rank` 可以表达 core 的 Waterfill 决策: shared expert 应该 dispatch 到哪个 EP rank。
 - `PlacementSnapshot.logical_to_physical_candidates` / `physical_to_rank_map` 可以支持 LPLB 或 future routed-replica policy。
 - `SGLangRoutingAdapter` 的方向正确: build `RoutingRequest` -> call core router -> materialize `RoutingDecision` back into SGLang layout。
@@ -43,6 +43,7 @@ Core 只定义稳定、框架中立的 API。
 - `RoutingStage`: optional runtime context。
 - `RoutingPolicyConfig`: policy 名称和通用 stage gating。
 - `RoutingRequest`: logical TopK、placement、rank-load 输入。
+- `RoutingLoadView` / `RoutingLoadProvider`: prior rank-load 等 L2 长持 load state。
 - `RoutingDecision`: framework-neutral routing decision。
 
 不应该进入 core:
@@ -60,7 +61,7 @@ Waterfill policy 应该只实现框架无关的决策:
 ```text
 input:
   logical_topk_ids
-  current_rank_load or prior_rank_load
+  request-local current_rank_load or load-source prior_rank_load
   optional token mask
   source rank / candidate rank view
 
@@ -79,7 +80,7 @@ SGLang adapter 负责所有 SGLang/DeepEP 细节:
 - 在 SGLang logical id 被 `_post_process_topk_ids` remap 成 physical id 之前捕获 logical TopK，或显式接管 remap。
 - 从 `ExpertLocationMetadata` / `ExpertLocationDispatchInfo` 构造 `PlacementSnapshot`。
 - 如果走 dynamic Waterfill，在 adapter 内做 EP all-reduce，填充 `RoutingRequest.current_rank_load`。
-- 如果走 static Waterfill，从 EPLB metadata 读取 rank load，填充 `RoutingRequest.prior_rank_load`。
+- 如果走 static Waterfill，从 EPLB metadata 读取 rank load，暴露为 `RoutingLoadView.prior_rank_load`。
 - 把 `RoutingDecision.shared_expert_rank` materialize 成 DeepEP shared expert id。
 - 把 routed ids remap 成 DeepEP interleaved layout。
 - 追加 DeepEP dispatch 需要的第 9 列。
@@ -192,7 +193,7 @@ rank-load 内容，`DeepEPWaterfillBalancer` 后续读到的就是更新后的�
 
 Skeleton 版仍需要把语义写清楚:
 
-- `RoutingRequest.prior_rank_load` 可以是 live tensor/reference；core policy 读取字段内容，
+- `RoutingLoadView.prior_rank_load` 可以是 live tensor/reference；core policy 通过 provider/source 读取字段内容，
   不要求 adapter 每次 deep copy。
 - 如果某个 framework 像 PR 一样原地更新 rank-load buffer，adapter 可以长期持有这个
   reference，不需要每次重新 load。
@@ -214,11 +215,15 @@ class RoutingRequest:
     placement: PlacementSnapshot
     stage: Optional[RoutingStage] = None
     current_rank_load: Optional[TensorLike] = None
-    prior_rank_load: Optional[TensorLike] = None
     token_count: Optional[TensorLike] = None
     lb_token_mask: Optional[TensorLike] = None
     routed_scaling_factor: float = 1.0
     policy: RoutingPolicyConfig = field(default_factory=RoutingPolicyConfig)
+
+
+@dataclass(frozen=True)
+class RoutingLoadView:
+    prior_rank_load: Optional[TensorLike] = None
 ```
 
 ```python

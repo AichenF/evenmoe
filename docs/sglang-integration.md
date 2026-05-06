@@ -89,7 +89,7 @@ class SGLangPlacementView:
     rank_load: Optional[Tensor] = None
 ```
 
-`rank_load` 不是 main 上已有字段；它来自 Waterfill PR。虽然它挂在 `ExpertLocationMetadata` 上，adapter 转换时仍应把它拆到 L2 `RoutingRequest.prior_rank_load`，不要放进 `PlacementSnapshot`。
+`rank_load` 不是 main 上已有字段；它来自 Waterfill PR。虽然它挂在 `ExpertLocationMetadata` 上，adapter 转换时仍应把它拆到 L2 `RoutingLoadView.prior_rank_load`，不要放进 `PlacementSnapshot`。
 
 `physical_to_rank_map` 可以由 SGLang adapter 从 global physical expert id 和 `num_local_physical_experts` 推导。它是 placement/topology 信息，不是负载信息；L2 rank-load 字段的语义在 `L2 Prefill Interface` 小节说明。
 
@@ -101,7 +101,7 @@ class SGLangPlacementView:
 | `logical_to_all_physical_map_num_valid` | `PlacementSnapshot.logical_to_physical_count` | replica 有效数量 |
 | `physical_to_rank_map` | `PlacementSnapshot.physical_to_rank_map` | physical expert 到 EP rank 的映射，可选 helper |
 | `logical_to_rank_dispatch_physical_map` | `PlacementSnapshot.default_physical_for_logical` | SGLang static dispatch 的 baseline remap，可选 |
-| `rank_load` | `RoutingRequest.prior_rank_load` | EPLB / 历史 per-rank 水位线，可选；不是 placement 字段 |
+| `rank_load` | `RoutingLoadView.prior_rank_load` | EPLB / 历史 per-rank 水位线，可选；不是 placement 字段 |
 | `physical_to_logical_map`、`num_local_physical_experts` | adapter-only | 主要用于派生上述字段，不建议变成 core contract |
 
 ## Waterfill PR Intrusion
@@ -261,11 +261,21 @@ class RoutingRequest:
     placement: PlacementSnapshot
     stage: Optional[Literal["prefill", "decode", "mixed", "idle", "speculative"]]
     current_rank_load: Optional[Tensor]
-    prior_rank_load: Optional[Tensor]
     token_count: Optional[Tensor]
     lb_token_mask: Optional[Tensor]
     routed_scaling_factor: float
     policy: RoutingPolicyConfig
+
+
+@dataclass
+class RoutingLoadView:
+    current_rank_load: Optional[Tensor]
+    prior_rank_load: Optional[Tensor]
+
+
+class RoutingLoadProvider:
+    def load_view(self, layer_id: int) -> RoutingLoadView:
+        ...
 
 
 @dataclass
@@ -290,7 +300,7 @@ class TokenRouter:
         ...
 ```
 
-`logical_topk_ids` 不是 logical expert 的聚合分布。shared-expert Waterfill 最终需要的是 per-rank load，而不是必须需要 `physical_to_rank_map`。SGLang adapter 可以直接把 EPLB `rank_load` 映射成 `RoutingRequest.prior_rank_load`，也可以像 PR dynamic path 一样从 post-remap physical top-k 统计 routed counts 并 all-reduce 成 `RoutingRequest.current_rank_load`。只有当 core/adapter 要从 framework-neutral physical top-k 自己推导 rank load 时，才需要 `physical_to_rank_map`；只用 logical expert count 直接估算 rank load 会丢失 replicas 和 rank placement 信息。
+`logical_topk_ids` 不是 logical expert 的聚合分布。shared-expert Waterfill 最终需要的是 per-rank load，而不是必须需要 `physical_to_rank_map`。SGLang adapter 可以把 EPLB `rank_load` 作为 long-lived live reference 暴露成 `RoutingLoadView.prior_rank_load`，也可以像 PR dynamic path 一样从 post-remap physical top-k 统计 routed counts 并 all-reduce 成 `RoutingRequest.current_rank_load`。只有当 core/adapter 要从 framework-neutral physical top-k 自己推导 rank load 时，才需要 `physical_to_rank_map`；只用 logical expert count 直接估算 rank load 会丢失 replicas 和 rank placement 信息。
 
 PR dynamic path 之所以能不传 `physical_to_rank_map`，是因为它依赖 SGLang/DeepEP physical id 的分段编号规则: 同一个 rank 上的 physical experts 连续排列，所以 `target_rank = expert_id // experts_per_rank`。例如 `experts_per_rank = 4` 时，physical id `0..3` 属于 rank 0，`4..7` 属于 rank 1。这个规则属于 SGLang/DeepEP adapter 细节，不应变成 core 假设。
 
@@ -298,7 +308,7 @@ PR dynamic path 之所以能不传 `physical_to_rank_map`，是因为它依赖 S
 
 ```text
 Waterfill-only static:
-  EPLB rank_load -> prior_rank_load -> Waterfill
+  EPLB rank_load -> RoutingLoadView.prior_rank_load -> Waterfill
 
 Waterfill-only dynamic:
   baseline routed physical top-k -> all-reduce routed counts -> current_rank_load -> Waterfill
@@ -312,12 +322,12 @@ LPLB + Waterfill:
 
 也就是说，组合策略里 EP group 通信应该发生在 LPLB 之前，并由 LPLB 和 Waterfill 共享一次通信结果；Waterfill 不应再单独做第二次 dynamic all-reduce。
 
-这里的两个 rank-load 字段语义不同，且不要求同时提供:
+这里的两个 rank-load 来源语义不同，且不要求同时提供:
 
 | 字段 | 来源 | 用法 |
 |---|---|---|
-| `current_rank_load` | 当前 batch/window 的 routed top-k 统计，dynamic path 需要 EP all-reduce | dynamic Waterfill 的当前负载输入 |
-| `prior_rank_load` | EPLB `rank_load` / 历史 logical_count 推导出的 per-rank 水位线 | static Waterfill 的负载估计 |
+| `RoutingRequest.current_rank_load` | 当前 batch/window 的 routed top-k 统计，dynamic path 需要 EP all-reduce | dynamic Waterfill 的当前负载输入 |
+| `RoutingLoadView.prior_rank_load` | EPLB `rank_load` / 历史 logical_count 推导出的 per-rank 水位线 | static Waterfill 的长持负载估计 |
 
 POC 默认应选择 static 或 dynamic 其中一种模式。
 
@@ -408,7 +418,7 @@ PR 中不属于 generic TopK hook 本身的改动，也不是“什么都不放�
 | PR 改动点 | POC 归属 | 处理方式 |
 |---|---|---|
 | Waterfill rank-selection policy | Core | 从 `DeepEPWaterfillBalancer` 中拆出 framework-independent policy |
-| `ExpertLocationMetadata.rank_load` | Adapter | 映射成 `RoutingRequest.prior_rank_load`；优先保留 PR 的 live reference 语义，只有 rank-load 对象被替换时才刷新 handle |
+| `ExpertLocationMetadata.rank_load` | Adapter | 映射成 `RoutingLoadView.prior_rank_load`；优先保留 PR 的 live reference 语义，只有 rank-load 对象被替换时才刷新 handle |
 | EP all-reduce | Adapter | Waterfill-only dynamic 可单独 all-reduce；`LPLB + Waterfill` 在 LPLB 前通信一次并共享 |
 | DeepEP interleaved id / shared expert route column / empty output | Adapter | 把 core decision materialize 成 `StandardTopKOutput` |
 | `ModelRunner._prepare_moe_topk()` | SGLang integration glue/runtime | 复用遍历和注入模式，注入 generic adapter/router |
@@ -423,7 +433,7 @@ PR 中不属于 generic TopK hook 本身的改动，也不是“什么都不放�
 | `model_runner.py` | 借鉴 PR 的 `_prepare_moe_topk()`，在 `load_model()` 后遍历 TopK modules 并注入 SGLang routing adapter/router；rebalance 后需要刷新 placement view，rank-load 则保留 live reference 或在对象替换时刷新 handle | runtime prepare、EP rank/world、模型遍历都属于 SGLang adapter 层 |
 | `topk.py` / `_post_process_topk_ids` 或等价 TopK hook | 在 PR 新增的 TopK Waterfill apply 落点上扩展 `moe_lb_context`；在 logical ids 被 SGLang remap 成 physical ids 前调用 adapter，或允许 adapter 接管 remap | generic L2 必须看到 logical top-k，同时必须 stage-aware；当前 PR 的 Waterfill 是 stage-less global path |
 | `deepseek_v2.py::forward_deepep` | 只构造并传递最小 `SGLangRoutingContext`，包含 optional stage / `num_token_non_padded` / optional token mask；fallback 方案才在这里直接调用 adapter | stage gating 由 core policy config 判断，避免把 forward path 变成 routing 编排层 |
-| `expert_location.py` / adapter | 从 `ExpertLocationMetadata` 提供 per-layer `SGLangPlacementView`；把 placement mapping 转成 `PlacementSnapshot`，把 `rank_load` 映射成 `RoutingRequest.prior_rank_load` | L1/L2 边界需要拆清: placement 归 L1，rank load 归 L2 routing |
+| `expert_location.py` / adapter | 从 `ExpertLocationMetadata` 提供 per-layer `SGLangPlacementView`；把 placement mapping 转成 `PlacementSnapshot`，把 `rank_load` 映射成 `RoutingLoadView.prior_rank_load` | L1/L2 边界需要拆清: placement 归 L1，rank load 归 L2 routing |
 | `eplb_manager.py` | runtime rebalance 后通知/刷新 router placement view，或让 router lazy read global metadata；如果 rank-load 是原地更新的 live buffer，不需要重新 load；如果对象被替换，则同步刷新 handle | L2 需要看到 SGLang EPLB 最新 placement 和 rank-load |
 | `layers/moe/deepep_waterfill.py` 或新模块 | 保留 Waterfill kernels，但剥离 SGLang global/env/TopK 类型依赖 | 后续抽独立模块 |
 

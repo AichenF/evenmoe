@@ -1,14 +1,15 @@
 """Core framework-neutral contracts."""
 
 from moe_load_balancer.core.l1 import PlacementPlanner, PlacementProvider
-from moe_load_balancer.core.l2 import TokenRouter
+from moe_load_balancer.core.l2 import RoutingLoadProvider, TokenRouter
 from moe_load_balancer.core.types import (
     PlacementPlan,
     PlacementRequest,
     PlacementSnapshot,
     PlacementStats,
     RoutingDecision,
-    RoutingLoadSnapshot,
+    RoutingLoadView,
+    RoutingPolicyConfig,
     RoutingRequest,
     RoutingStage,
     TensorLike,
@@ -22,7 +23,9 @@ __all__ = [
     "PlacementSnapshot",
     "PlacementStats",
     "RoutingDecision",
-    "RoutingLoadSnapshot",
+    "RoutingLoadProvider",
+    "RoutingLoadView",
+    "RoutingPolicyConfig",
     "RoutingRequest",
     "RoutingStage",
     "TensorLike",

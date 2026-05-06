@@ -6,7 +6,8 @@ from moe_load_balancer import (
     PlacementProvider,
     PlacementSnapshot,
     RoutingDecision,
-    RoutingLoadSnapshot,
+    RoutingLoadProvider,
+    RoutingLoadView,
     RoutingPolicyConfig,
     RoutingRequest,
     RoutingStage,
@@ -14,6 +15,7 @@ from moe_load_balancer import (
 )
 from moe_load_balancer.adapters.sglang import (
     SGLangPlacementAdapter,
+    SGLangRoutingLoadProvider,
     SGLangRoutingAdapter,
     SGLangRoutingContext,
 )
@@ -25,6 +27,14 @@ class _PassthroughRouter:
             routed_physical_topk_ids=request.logical_topk_ids,
             topk_weights=request.topk_weights,
         )
+
+
+class _LoadProvider:
+    def __init__(self, view: RoutingLoadView):
+        self._view = view
+
+    def load_view(self, layer_id: int) -> RoutingLoadView:
+        return self._view
 
 
 def _placement(num_logical: int = 2, num_physical: int = 2) -> PlacementSnapshot:
@@ -139,8 +149,8 @@ class TestFrozenDataclasses:
         with pytest.raises(FrozenInstanceError):
             decision.routed_physical_topk_ids = [[1]]  # type: ignore[misc]
 
-    def test_routing_load_snapshot_is_frozen(self):
-        snapshot = RoutingLoadSnapshot(current_rank_load=[1, 2])
+    def test_routing_load_view_is_frozen(self):
+        snapshot = RoutingLoadView(current_rank_load=[1, 2])
         with pytest.raises(FrozenInstanceError):
             snapshot.current_rank_load = [3, 4]  # type: ignore[misc]
 
@@ -150,11 +160,19 @@ class TestProtocolConformance:
     def test_local_router_satisfies_token_router(self):
         assert isinstance(_PassthroughRouter(), TokenRouter)
 
+    def test_local_load_provider_satisfies_provider(self):
+        provider = _LoadProvider(RoutingLoadView(prior_rank_load=[1, 2]))
+        assert isinstance(provider, RoutingLoadProvider)
+
     def test_sglang_placement_adapter_satisfies_provider(self):
         # Construction succeeds without SGLang installed; isinstance against
         # a runtime_checkable Protocol verifies the method shape only.
         adapter = SGLangPlacementAdapter(metadata_source=object())
         assert isinstance(adapter, PlacementProvider)
+
+    def test_sglang_load_provider_satisfies_provider(self):
+        provider = SGLangRoutingLoadProvider(metadata_source=object())
+        assert isinstance(provider, RoutingLoadProvider)
 
 
 @pytest.mark.unit
@@ -198,6 +216,7 @@ class TestTokenRouterProtocol:
     def test_rank_load_fields_can_be_live_references(self):
         current_rank_load = [1, 2]
         prior_rank_load = [10, 20]
+        load_view = RoutingLoadView(prior_rank_load=prior_rank_load)
         request = RoutingRequest(
             layer_id=0,
             logical_topk_ids=[[0]],
@@ -205,14 +224,13 @@ class TestTokenRouterProtocol:
             placement=_placement(num_logical=1, num_physical=1),
             policy="waterfill",
             current_rank_load=current_rank_load,
-            prior_rank_load=prior_rank_load,
         )
 
         current_rank_load[1] = 3
         prior_rank_load[0] = 30
 
         assert request.current_rank_load == [1, 3]
-        assert request.prior_rank_load == [30, 20]
+        assert load_view.prior_rank_load == [30, 20]
 
     def test_request_rejects_positional_construction(self):
         with pytest.raises(TypeError):
@@ -238,3 +256,8 @@ class TestSGLangAdapterStubs:
         assert context.policy == RoutingPolicyConfig(name="disabled")
         with pytest.raises(NotImplementedError):
             adapter.route_topk(layer_id=0, logical_topk_output=None, context=context)
+
+    def test_load_provider_is_unimplemented(self):
+        provider = SGLangRoutingLoadProvider(metadata_source=object())
+        with pytest.raises(NotImplementedError):
+            provider.load_view(layer_id=0)

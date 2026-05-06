@@ -4,16 +4,22 @@ from typing import Any
 
 from moe_load_balancer.adapters.sglang.context import SGLangRoutingContext
 from moe_load_balancer.core.l1 import PlacementProvider
-from moe_load_balancer.core.l2 import TokenRouter
+from moe_load_balancer.core.l2 import RoutingLoadProvider, TokenRouter
 from moe_load_balancer.core.types import RoutingDecision, RoutingRequest
 
 
 class SGLangRoutingAdapter:
     """TopK-level adapter that calls the framework-neutral TokenRouter."""
 
-    def __init__(self, router: TokenRouter, placement_provider: PlacementProvider):
+    def __init__(
+        self,
+        router: TokenRouter,
+        placement_provider: PlacementProvider,
+        load_provider: RoutingLoadProvider | None = None,
+    ):
         self._router = router
         self._placement_provider = placement_provider
+        self._load_provider = load_provider
 
     def route_topk(
         self,

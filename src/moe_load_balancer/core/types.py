@@ -155,12 +155,17 @@ class PlacementPlan:
 
 
 @dataclass(frozen=True)
-class RoutingLoadSnapshot:
+class RoutingLoadView:
     """Optional L2 load view shared by routing policies.
 
     This is intentionally broader than rank load. LP/LB-style policies may need
     per-expert or per-rank/per-expert statistics, while shared-expert Waterfill
     can often consume only rank load.
+
+    This is a view/reference contract, not a deep-copy snapshot. Adapters may
+    expose long-lived live tensors here, such as SGLang EPLB ``rank_load``.
+    Policies can keep a ``RoutingLoadProvider`` and read this view when routing
+    instead of receiving stable prior load through every ``RoutingRequest``.
     """
 
     current_rank_load: Optional[TensorLike] = None
@@ -178,7 +183,6 @@ class RoutingRequest:
         logical_topk_ids:   ``[num_tokens, top_k]`` logical expert ids.
         topk_weights:       ``[num_tokens, top_k]`` matching gate weights.
         current_rank_load: ``[ep_size]`` current-batch/window rank load.
-        prior_rank_load:  ``[ep_size]`` EPLB-derived prior rank load.
         token_count:      scalar or ``[1]`` total live tokens.
         lb_token_mask:    ``[num_tokens]`` bool mask of LB-eligible tokens.
 
@@ -187,12 +191,11 @@ class RoutingRequest:
     Stage-based routing enablement belongs to
     ``policy.should_run_for_stage(request.stage)``.
 
-    Rank-load fields are tensor-like references supplied by adapters. The core
-    contract does not require deep-copy snapshot semantics: if an adapter passes
-    a live mutable tensor/reference and the framework updates it in place, core
-    policies should observe the latest contents when they read the field. If the
-    framework replaces the rank-load object instead of mutating it in place, the
-    adapter must rebuild the request or refresh its own runtime handle.
+    ``current_rank_load`` is per-request dynamic state supplied by adapters.
+    Stable or slowly changing prior load, such as EPLB-derived ``rank_load``,
+    belongs in an L2 ``RoutingLoadProvider`` or policy state. That avoids
+    repeatedly threading the same live prior through every request while still
+    allowing policies to observe in-place framework updates.
     """
 
     layer_id: int
@@ -201,7 +204,6 @@ class RoutingRequest:
     placement: PlacementSnapshot
     stage: Optional[RoutingStage] = None
     current_rank_load: Optional[TensorLike] = None
-    prior_rank_load: Optional[TensorLike] = None
     token_count: Optional[TensorLike] = None
     lb_token_mask: Optional[TensorLike] = None
     routed_scaling_factor: float = 1.0
