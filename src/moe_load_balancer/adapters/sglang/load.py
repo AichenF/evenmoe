@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from moe_load_balancer.core.l2 import RoutingLoadProvider
 from moe_load_balancer.core.types import RoutingLoadView
 
 
-class SGLangRoutingLoadProvider:
+class SGLangRoutingLoadProvider(RoutingLoadProvider):
     """Exposes SGLang runtime load state to L2 policies.
 
     This provider is the adapter-owned place to hold SGLang-specific live
