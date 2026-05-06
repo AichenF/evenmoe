@@ -163,7 +163,7 @@ class RoutingLoadSnapshot:
     can often consume only rank load.
     """
 
-    routed_rank_load: Optional[TensorLike] = None
+    current_rank_load: Optional[TensorLike] = None
     prior_rank_load: Optional[TensorLike] = None
     physical_expert_load: Optional[TensorLike] = None
     rank_expert_load: Optional[TensorLike] = None
@@ -177,10 +177,10 @@ class RoutingRequest:
     Tensor shapes (when supplied):
         logical_topk_ids:   ``[num_tokens, top_k]`` logical expert ids.
         topk_weights:       ``[num_tokens, top_k]`` matching gate weights.
-        routed_rank_load:   ``[ep_size]`` current-batch rank load.
-        prior_rank_load:    ``[ep_size]`` EPLB-derived prior rank load.
-        token_count:        scalar or ``[1]`` total live tokens.
-        lb_token_mask:      ``[num_tokens]`` bool mask of LB-eligible tokens.
+        current_rank_load: ``[ep_size]`` current-batch/window rank load.
+        prior_rank_load:  ``[ep_size]`` EPLB-derived prior rank load.
+        token_count:      scalar or ``[1]`` total live tokens.
+        lb_token_mask:    ``[num_tokens]`` bool mask of LB-eligible tokens.
 
     ``stage`` is optional runtime context. It lets framework adapters describe
     the current request phase, but algorithms are not required to branch on it.
@@ -200,7 +200,7 @@ class RoutingRequest:
     topk_weights: TensorLike
     placement: PlacementSnapshot
     stage: Optional[RoutingStage] = None
-    routed_rank_load: Optional[TensorLike] = None
+    current_rank_load: Optional[TensorLike] = None
     prior_rank_load: Optional[TensorLike] = None
     token_count: Optional[TensorLike] = None
     lb_token_mask: Optional[TensorLike] = None

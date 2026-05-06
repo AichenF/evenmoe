@@ -154,7 +154,7 @@ class MoELoadBalancer:
         ...
 ```
 
-`logical_topk_ids` 是 token-level top-k，不是 logical expert 聚合分布。L2 必须结合 `PlacementSnapshot` 中的 physical/rank mapping 计算 routed rank load；shared-expert Waterfill 不能只看 logical expert count。
+`logical_topk_ids` 是 token-level top-k，不是 logical expert 聚合分布。L2 如果要从 routed top-k 推导当前 per-rank load，必须结合 `PlacementSnapshot` 中的 physical/rank mapping；shared-expert Waterfill 不能只看 logical expert count。
 
 SGLang adapter 另提供 `PlacementProvider.snapshot(layer_id) -> PlacementSnapshot`。SGLang 可以有 `modify_topk()` / `route_topk()` 这样的局部 helper，但它应被视为 `route_tokens()` 在 SGLang TopK 数据结构上的 adapter，不是架构级接口。
 

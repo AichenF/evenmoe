@@ -138,7 +138,7 @@ class RoutingRequest:
     topk_weights: Tensor
     placement: PlacementSnapshot
     stage: Optional[Literal["prefill", "decode", "mixed", "idle", "speculative"]]
-    routed_rank_load: Optional[Tensor]
+    current_rank_load: Optional[Tensor]
     prior_rank_load: Optional[Tensor]
     token_count: Optional[Tensor]
     lb_token_mask: Optional[Tensor]
@@ -168,7 +168,7 @@ class TokenRouter:
 关键语义:
 
 - `logical_topk_ids` 是 token-level logical top-k ids，不是聚合后的 logical expert 分布。
-- LPLB / routed-replica 决策需要 `PlacementSnapshot`。shared-expert Waterfill 本身只需要 per-rank load；这个 load 由 adapter 作为 `routed_rank_load` / `prior_rank_load` 放进 L2 `RoutingRequest`。
+- LPLB / routed-replica 决策需要 `PlacementSnapshot`。shared-expert Waterfill 本身只需要 per-rank load；这个 load 由 adapter 作为 `current_rank_load` / `prior_rank_load` 放进 L2 `RoutingRequest`。
 - `stage` 是 optional runtime context，不是每个算法必须使用的分类轴。某个 policy 是否允许在当前 stage 运行，由 core 级 `RoutingPolicyConfig.enabled_stages` 统一判断；`enabled_stages=None` 表示该 policy 不做 stage gating，并允许 `stage=None`。显式列出 stage 则要求调用方提供已知 stage。
 - `lb_token_mask` 用于 mixed batch。如果没有可靠 mask，当前 POC 对 `MIXED` 直接 bypass。
 - `routed_physical_topk_ids` 使用 `PlacementSnapshot` 定义的框架中立 physical expert namespace，不是 DeepEP interleaved id。
@@ -180,16 +180,16 @@ class TokenRouter:
 
 | 字段                 | 含义                                                                                | 什么时候需要                                                    |
 | ------------------ | --------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| `routed_rank_load` | L2 动态负载: 当前 batch / 当前 routing window 里，routed experts 已经落到各 EP rank 的 token load | dynamic shared-expert Waterfill 的直接输入                     |
+| `current_rank_load` | L2 动态负载: 当前 batch / 当前 routing window 里，routed experts 已经落到各 EP rank 的 token load | dynamic shared-expert Waterfill 的直接输入                     |
 | `prior_rank_load`  | L2 先验负载: EPLB / 历史统计给出的 per-rank 水位线，不代表当前 batch 已经实际 routed 的 token 数            | static shared-expert Waterfill 的输入                         |
 
 
-`routed_rank_load` 和 `prior_rank_load` 不要求同时提供:
+`current_rank_load` 和 `prior_rank_load` 不要求同时提供:
 
 
 | Waterfill 模式          | 使用哪个 load                                         | 语义                                                         |
 | --------------------- | ------------------------------------------------- | ---------------------------------------------------------- |
-| dynamic               | `routed_rank_load`                                | 根据当前 batch/window 的实际 routed counts 给 shared expert 选 rank |
+| dynamic               | `current_rank_load`                                | 根据当前 batch/window 的实际 routed counts 给 shared expert 选 rank |
 | static / PR static 对齐 | `prior_rank_load`                                 | 使用 EPLB 历史水位线作为当前 rank load 估计，避免每次 all-reduce             |
 
 
@@ -205,7 +205,7 @@ Waterfill-only dynamic:
   baseline EPLB routed physical top-k
   -> adapter counts routed load
   -> EP all-reduce once
-  -> RoutingRequest.routed_rank_load
+  -> RoutingRequest.current_rank_load
   -> shared-expert Waterfill
 
 LPLB + Waterfill:
@@ -213,7 +213,7 @@ LPLB + Waterfill:
   -> EP all-reduce once before LPLB
   -> global per-rank / per-expert load snapshot
   -> LPLB chooses routed physical top-k
-  -> derive post-LPLB routed_rank_load
+  -> derive post-LPLB current_rank_load
   -> shared-expert Waterfill reuses that rank load
 ```
 
@@ -225,7 +225,7 @@ physical expert id 4..7   -> rank 1
 physical expert id 8..11  -> rank 2
 ```
 
-所以 PR 里可以用 `target_rank = expert_id // experts_per_rank` 从 physical id 直接推出 rank，然后统计每个 rank 的 routed load。框架解耦接口不能假设所有 backend 都这样编号；如果 adapter 已经用框架自己的规则算好 `routed_rank_load`，Waterfill core 就不需要 `physical_to_rank_map`。
+所以 PR 里可以用 `target_rank = expert_id // experts_per_rank` 从 physical id 直接推出 rank，然后统计每个 rank 的 routed load。框架解耦接口不能假设所有 backend 都这样编号；如果 adapter 已经用框架自己的规则算好 `current_rank_load`，Waterfill core 就不需要 `physical_to_rank_map`。
 
 组合策略的通信边界要特别明确: `lplb_then_shared_expert_waterfill` 不应该让 LPLB 做一次 EP group 通信、Waterfill 再做一次动态 all-reduce。全局负载通信应发生在 LPLB 之前，并被 LPLB 和 Waterfill 共享；Waterfill 消费的是 LPLB 决策后的 post-LPLB rank load。
 
@@ -390,7 +390,7 @@ TopK / _post_process_topk_ids
 
 | 部分                    | 归属      | 内容                                                                                                                                                                                                     |
 | --------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Waterfill core policy | core    | 根据 `routed_rank_load`、optional `prior_rank_load`、candidate ranks 和 local preference，选择每个 token 的 shared expert target rank                                                                             |
+| Waterfill core policy | core    | 根据 `current_rank_load`、optional `prior_rank_load`、candidate ranks 和 local preference，选择每个 token 的 shared expert target rank                                                                             |
 | DeepEP/SGLang wrapper | adapter | 处理 `StandardTopKOutput`、SGLang global metadata、live rank-load reference / object-replacement refresh、EP all-reduce、DeepEP interleaved id、把 core 的 shared route materialize 成 DeepEP expanded TopK 第 9 列，以及注入到 `TopK` 的 runtime object |
 
 

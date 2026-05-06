@@ -196,7 +196,7 @@ TopK.forward:
 
    | 部分 | 归属 | 内容 |
    |---|---|---|
-   | Waterfill core policy | core | 输入 routed rank load / optional prior rank load / candidate ranks，输出 shared expert target rank |
+   | Waterfill core policy | core | 输入 current rank load / optional prior rank load / candidate ranks，输出 shared expert target rank |
    | DeepEP/SGLang wrapper | adapter | 负责 SGLang runtime prepare、static cache、EP collective、`StandardTopKOutput` rewrite、DeepEP interleaved id，以及把 core 输出的 shared route materialize 成 DeepEP expanded TopK 第 9 列 |
 
    这里要区分 semantic expansion 和 layout materialization。`top_k=8 -> routed top-k + shared route` 这个语义扩展可以属于 core；DeepEP dispatch 需要的 `[num_tokens, 9]` expanded TopK 是具体 layout。core 决定 shared route 应该发到哪个 EP rank、权重是多少；adapter 决定它在 `StandardTopKOutput.topk_ids/topk_weights` 里怎么编码。
@@ -260,7 +260,7 @@ class RoutingRequest:
     topk_weights: Tensor
     placement: PlacementSnapshot
     stage: Optional[Literal["prefill", "decode", "mixed", "idle", "speculative"]]
-    routed_rank_load: Optional[Tensor]
+    current_rank_load: Optional[Tensor]
     prior_rank_load: Optional[Tensor]
     token_count: Optional[Tensor]
     lb_token_mask: Optional[Tensor]
@@ -290,7 +290,7 @@ class TokenRouter:
         ...
 ```
 
-`logical_topk_ids` 不是 logical expert 的聚合分布。shared-expert Waterfill 最终需要的是 per-rank load，而不是必须需要 `physical_to_rank_map`。SGLang adapter 可以直接把 EPLB `rank_load` 映射成 `RoutingRequest.prior_rank_load`，也可以像 PR dynamic path 一样从 post-remap physical top-k 统计 routed counts 并 all-reduce 成 `RoutingRequest.routed_rank_load`。只有当 core/adapter 要从 framework-neutral physical top-k 自己推导 rank load 时，才需要 `physical_to_rank_map`；只用 logical expert count 直接估算 rank load 会丢失 replicas 和 rank placement 信息。
+`logical_topk_ids` 不是 logical expert 的聚合分布。shared-expert Waterfill 最终需要的是 per-rank load，而不是必须需要 `physical_to_rank_map`。SGLang adapter 可以直接把 EPLB `rank_load` 映射成 `RoutingRequest.prior_rank_load`，也可以像 PR dynamic path 一样从 post-remap physical top-k 统计 routed counts 并 all-reduce 成 `RoutingRequest.current_rank_load`。只有当 core/adapter 要从 framework-neutral physical top-k 自己推导 rank load 时，才需要 `physical_to_rank_map`；只用 logical expert count 直接估算 rank load 会丢失 replicas 和 rank placement 信息。
 
 PR dynamic path 之所以能不传 `physical_to_rank_map`，是因为它依赖 SGLang/DeepEP physical id 的分段编号规则: 同一个 rank 上的 physical experts 连续排列，所以 `target_rank = expert_id // experts_per_rank`。例如 `experts_per_rank = 4` 时，physical id `0..3` 属于 rank 0，`4..7` 属于 rank 1。这个规则属于 SGLang/DeepEP adapter 细节，不应变成 core 假设。
 
@@ -301,13 +301,13 @@ Waterfill-only static:
   EPLB rank_load -> prior_rank_load -> Waterfill
 
 Waterfill-only dynamic:
-  baseline routed physical top-k -> all-reduce routed counts -> routed_rank_load -> Waterfill
+  baseline routed physical top-k -> all-reduce routed counts -> current_rank_load -> Waterfill
 
 LPLB + Waterfill:
   all-reduce global per-rank / per-expert load before LPLB
   -> LPLB chooses routed physical top-k
-  -> derive post-LPLB routed_rank_load
-  -> Waterfill consumes post-LPLB routed_rank_load
+  -> derive post-LPLB current_rank_load
+  -> Waterfill consumes post-LPLB current_rank_load
 ```
 
 也就是说，组合策略里 EP group 通信应该发生在 LPLB 之前，并由 LPLB 和 Waterfill 共享一次通信结果；Waterfill 不应再单独做第二次 dynamic all-reduce。
@@ -316,7 +316,7 @@ LPLB + Waterfill:
 
 | 字段 | 来源 | 用法 |
 |---|---|---|
-| `routed_rank_load` | 当前 batch/window 的 routed top-k 统计，dynamic path 需要 EP all-reduce | dynamic Waterfill 的当前负载输入 |
+| `current_rank_load` | 当前 batch/window 的 routed top-k 统计，dynamic path 需要 EP all-reduce | dynamic Waterfill 的当前负载输入 |
 | `prior_rank_load` | EPLB `rank_load` / 历史 logical_count 推导出的 per-rank 水位线 | static Waterfill 的负载估计 |
 
 POC 默认应选择 static 或 dynamic 其中一种模式。

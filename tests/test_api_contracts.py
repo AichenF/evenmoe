@@ -140,9 +140,9 @@ class TestFrozenDataclasses:
             decision.routed_physical_topk_ids = [[1]]  # type: ignore[misc]
 
     def test_routing_load_snapshot_is_frozen(self):
-        snapshot = RoutingLoadSnapshot(routed_rank_load=[1, 2])
+        snapshot = RoutingLoadSnapshot(current_rank_load=[1, 2])
         with pytest.raises(FrozenInstanceError):
-            snapshot.routed_rank_load = [3, 4]  # type: ignore[misc]
+            snapshot.current_rank_load = [3, 4]  # type: ignore[misc]
 
 
 @pytest.mark.unit
@@ -196,6 +196,7 @@ class TestTokenRouterProtocol:
         assert request.policy == RoutingPolicyConfig(name="waterfill")
 
     def test_rank_load_fields_can_be_live_references(self):
+        current_rank_load = [1, 2]
         prior_rank_load = [10, 20]
         request = RoutingRequest(
             layer_id=0,
@@ -203,11 +204,14 @@ class TestTokenRouterProtocol:
             topk_weights=[[1.0]],
             placement=_placement(num_logical=1, num_physical=1),
             policy="waterfill",
+            current_rank_load=current_rank_load,
             prior_rank_load=prior_rank_load,
         )
 
+        current_rank_load[1] = 3
         prior_rank_load[0] = 30
 
+        assert request.current_rank_load == [1, 3]
         assert request.prior_rank_load == [30, 20]
 
     def test_request_rejects_positional_construction(self):

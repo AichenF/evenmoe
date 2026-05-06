@@ -26,7 +26,7 @@ PR #19290 可以放进当前 skeleton，但不能把 SGLang 里的
 当前 skeleton 的几个核心设计和 PR #19290 是匹配的:
 
 - `RoutingRequest.logical_topk_ids` 可以承载 remap 前的 logical TopK。
-- `RoutingRequest.routed_rank_load` 可以承载 dynamic Waterfill 的当前 batch 全局 rank load。
+- `RoutingRequest.current_rank_load` 可以承载 dynamic Waterfill 的当前 batch 全局 rank load。
 - `RoutingRequest.prior_rank_load` 可以承载 EPLB / historical rank-load prior。
 - `RoutingDecision.shared_expert_rank` 可以表达 core 的 Waterfill 决策: shared expert 应该 dispatch 到哪个 EP rank。
 - `PlacementSnapshot.logical_to_physical_candidates` / `physical_to_rank_map` 可以支持 LPLB 或 future routed-replica policy。
@@ -60,7 +60,7 @@ Waterfill policy 应该只实现框架无关的决策:
 ```text
 input:
   logical_topk_ids
-  routed_rank_load or prior_rank_load
+  current_rank_load or prior_rank_load
   optional token mask
   source rank / candidate rank view
 
@@ -78,7 +78,7 @@ SGLang adapter 负责所有 SGLang/DeepEP 细节:
 
 - 在 SGLang logical id 被 `_post_process_topk_ids` remap 成 physical id 之前捕获 logical TopK，或显式接管 remap。
 - 从 `ExpertLocationMetadata` / `ExpertLocationDispatchInfo` 构造 `PlacementSnapshot`。
-- 如果走 dynamic Waterfill，在 adapter 内做 EP all-reduce，填充 `RoutingRequest.routed_rank_load`。
+- 如果走 dynamic Waterfill，在 adapter 内做 EP all-reduce，填充 `RoutingRequest.current_rank_load`。
 - 如果走 static Waterfill，从 EPLB metadata 读取 rank load，填充 `RoutingRequest.prior_rank_load`。
 - 把 `RoutingDecision.shared_expert_rank` materialize 成 DeepEP shared expert id。
 - 把 routed ids remap 成 DeepEP interleaved layout。
@@ -174,7 +174,7 @@ Core 不应该 import 或调用 SGLang communication APIs。
 ```text
 adapter local count
   -> adapter EP all-reduce
-  -> RoutingRequest.routed_rank_load
+  -> RoutingRequest.current_rank_load
   -> core Waterfill policy
 ```
 
@@ -213,7 +213,7 @@ class RoutingRequest:
     topk_weights: TensorLike
     placement: PlacementSnapshot
     stage: Optional[RoutingStage] = None
-    routed_rank_load: Optional[TensorLike] = None
+    current_rank_load: Optional[TensorLike] = None
     prior_rank_load: Optional[TensorLike] = None
     token_count: Optional[TensorLike] = None
     lb_token_mask: Optional[TensorLike] = None
