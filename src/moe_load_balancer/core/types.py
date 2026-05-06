@@ -164,8 +164,10 @@ class RoutingLoadView:
 
     This is a view/reference contract, not a deep-copy snapshot. Adapters may
     expose long-lived live tensors here, such as SGLang EPLB ``rank_load``.
-    Policies can keep a ``RoutingLoadProvider`` and read this view when routing
-    instead of receiving stable prior load through every ``RoutingRequest``.
+    For live sources, adapters should preserve object identity/storage and only
+    map framework field names to this dataclass. Policies can keep a
+    ``RoutingLoadProvider`` and read this view when routing instead of receiving
+    stable prior load through every ``RoutingRequest``.
     """
 
     current_rank_load: Optional[TensorLike] = None

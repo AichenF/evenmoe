@@ -208,7 +208,7 @@ Shared-expert Waterfill 的 rank-load 来源按 policy 分开:
 ```text
 Waterfill-only static:
   SGLang EPLB rank_load
-  -> SGLangRoutingLoadProvider / RoutingLoadView.prior_rank_load
+  -> SGLangRoutingLoadProvider no-copy wrapper / RoutingLoadView.prior_rank_load
   -> shared-expert Waterfill
 
 Waterfill-only dynamic:
@@ -360,7 +360,7 @@ PR 里不是所有改动都进入 generic TopK adapter hook。它们分成三类
 |---|---|---|
 | Waterfill rank-selection policy | Core | 从 `DeepEPWaterfillBalancer` 中抽出 framework-independent policy: 输入 rank load / candidate ranks，输出 shared expert 应落在哪个 rank |
 | `DeepEPWaterfillBalancer` / `deepep_waterfill.py` 中的 SGLang/DeepEP 包装 | Adapter | 保留 `StandardTopKOutput`、DeepEP physical id layout、shared route column materialization、empty output handling 等框架相关部分 |
-| `ExpertLocationMetadata.rank_load` | Adapter | 由 SGLang adapter 读取并暴露成 `RoutingLoadView.prior_rank_load`；优先保留 PR 的 live reference 语义，对象被替换时才刷新 handle |
+| `ExpertLocationMetadata.rank_load` | Adapter | 由 SGLang adapter no-copy 暴露成 `RoutingLoadView.prior_rank_load`；优先保留 PR 的 live reference 语义，对象被替换时才刷新 handle |
 | EP all-reduce | Adapter | 通信由 SGLang adapter 做；`LPLB + Waterfill` 时在 LPLB 前做一次并共享结果，Waterfill 不再重复通信 |
 | `ModelRunner._prepare_moe_topk()` 注入 balancer | SGLang integration glue/runtime | 复用 prepare/inject 生命周期，但注入 generic SGLang routing adapter/router |
 | `server_args.py` backend / shared-fusion guard | SGLang integration glue/config | 新 POC 开关复用这些合法性检查；backend、fusion、`deepep_mode` 不进入 core |

@@ -80,7 +80,7 @@ SGLang adapter 负责所有 SGLang/DeepEP 细节:
 - 在 SGLang logical id 被 `_post_process_topk_ids` remap 成 physical id 之前捕获 logical TopK，或显式接管 remap。
 - 从 `ExpertLocationMetadata` / `ExpertLocationDispatchInfo` 构造 `PlacementSnapshot`。
 - 如果走 dynamic Waterfill，在 adapter 内做 EP all-reduce，填充 `RoutingRequest.current_rank_load`。
-- 如果走 static Waterfill，从 EPLB metadata 读取 rank load，暴露为 `RoutingLoadView.prior_rank_load`。
+- 如果走 static Waterfill，从 EPLB metadata 读取 rank load，no-copy 暴露为 `RoutingLoadView.prior_rank_load`。
 - 把 `RoutingDecision.shared_expert_rank` materialize 成 DeepEP shared expert id。
 - 把 routed ids remap 成 DeepEP interleaved layout。
 - 追加 DeepEP dispatch 需要的第 9 列。
@@ -193,8 +193,8 @@ rank-load 内容，`DeepEPWaterfillBalancer` 后续读到的就是更新后的�
 
 Skeleton 版仍需要把语义写清楚:
 
-- `RoutingLoadView.prior_rank_load` 可以是 live tensor/reference；core policy 通过 provider/source 读取字段内容，
-  不要求 adapter 每次 deep copy。
+- `RoutingLoadView.prior_rank_load` 可以是 live tensor/reference；core policy 通过 provider/source 读取字段内容。
+  对 PR 这种原地更新的 rank-load buffer，adapter 只能做字段映射或 wrapper，不能复制到新 storage。
 - 如果某个 framework 像 PR 一样原地更新 rank-load buffer，adapter 可以长期持有这个
   reference，不需要每次重新 load。
 - 如果某个 framework 不是原地更新，而是替换成新的 tensor/list/object，adapter 才需要

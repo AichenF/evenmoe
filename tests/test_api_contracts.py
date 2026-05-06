@@ -229,6 +229,8 @@ class TestTokenRouterProtocol:
         current_rank_load[1] = 3
         prior_rank_load[0] = 30
 
+        assert request.current_rank_load is current_rank_load
+        assert load_view.prior_rank_load is prior_rank_load
         assert request.current_rank_load == [1, 3]
         assert load_view.prior_rank_load == [30, 20]
 
