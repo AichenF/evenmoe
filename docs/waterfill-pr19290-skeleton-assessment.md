@@ -181,16 +181,25 @@ adapter local count
 组合 LPLB + Waterfill 时，也应该共享一次通信结果，避免 LPLB 和 Waterfill 各做一次
 all-reduce。
 
-### 6. Static rank load cache 有刷新问题
+### 6. Static rank load cache 的真实边界
 
 PR 在 `ExpertLocationMetadata` 上新增 `rank_load`，并在 `update(...)` 中同步。
-但 `DeepEPWaterfillBalancer.update_static_weights()` 当前只在 prepare 阶段调用一次。
+这里需要注意: PR 的 static Waterfill path 传入的是 `rank_load` 的指针/引用，
+不是每次复制出来的一份旧数组。只要 SGLang 在 rebalance/update 时原地更新这块
+rank-load 内容，`DeepEPWaterfillBalancer` 后续读到的就是更新后的值。因此在 PR
+当前实现里，把 `rank_load` 保存到 balancer 里是合理的，不能把它简单归类成
+"prepare 一次后必然 stale" 的问题。
 
-Skeleton 版应避免长期缓存旧 static rank load，建议:
+Skeleton 版仍需要把语义写清楚:
 
-- adapter lazy-read 最新 `ExpertLocationMetadata` / `PlacementSnapshot`；
-- 或在 SGLang rebalance 后显式刷新 adapter/runtime state；
-- 加测试确认 `prior_rank_load` 真的影响 Waterfill 决策，而不是只作为 static path 开关。
+- `RoutingRequest.prior_rank_load` 可以是 live tensor/reference；core policy 读取字段内容，
+  不要求 adapter 每次 deep copy。
+- 如果某个 framework 像 PR 一样原地更新 rank-load buffer，adapter 可以长期持有这个
+  reference，不需要每次重新 load。
+- 如果某个 framework 不是原地更新，而是替换成新的 tensor/list/object，adapter 才需要
+  在 rebalance 后刷新 runtime handle，或者每次 route 前 lazy-read 最新对象。
+- 测试应确认 `prior_rank_load` 真的影响 Waterfill 决策，同时确认 live reference 语义
+  不会被 skeleton 误改成 deep-copy snapshot。
 
 ## Skeleton Adjustments
 

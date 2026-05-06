@@ -186,6 +186,13 @@ class RoutingRequest:
     the current request phase, but algorithms are not required to branch on it.
     Stage-based routing enablement belongs to
     ``policy.should_run_for_stage(request.stage)``.
+
+    Rank-load fields are tensor-like references supplied by adapters. The core
+    contract does not require deep-copy snapshot semantics: if an adapter passes
+    a live mutable tensor/reference and the framework updates it in place, core
+    policies should observe the latest contents when they read the field. If the
+    framework replaces the rank-load object instead of mutating it in place, the
+    adapter must rebuild the request or refresh its own runtime handle.
     """
 
     layer_id: int

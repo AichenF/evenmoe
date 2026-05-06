@@ -195,6 +195,21 @@ class TestTokenRouterProtocol:
 
         assert request.policy == RoutingPolicyConfig(name="waterfill")
 
+    def test_rank_load_fields_can_be_live_references(self):
+        prior_rank_load = [10, 20]
+        request = RoutingRequest(
+            layer_id=0,
+            logical_topk_ids=[[0]],
+            topk_weights=[[1.0]],
+            placement=_placement(num_logical=1, num_physical=1),
+            policy="waterfill",
+            prior_rank_load=prior_rank_load,
+        )
+
+        prior_rank_load[0] = 30
+
+        assert request.prior_rank_load == [30, 20]
+
     def test_request_rejects_positional_construction(self):
         with pytest.raises(TypeError):
             RoutingRequest(0, [[0]], [[1.0]], _placement())  # type: ignore[misc]

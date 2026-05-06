@@ -184,9 +184,9 @@ TopK.forward:
 
    之前文档里的 "DeepEP normal-only" 已经过期。最终 PR 文档、help 文案和 unit test 都确认 Waterfill 支持 `deepep_mode=auto`、`normal` 或 `low_latency`，并建议 production decode 用 `auto` 或 `low_latency` 保留 CUDA graph。最终文档还明确: 默认使用 static EPLB rank-load metadata，设置 `SGLANG_DISABLE_STATIC_WATERFILL=1` 才强制 dynamic all-reduce。POC 不应再默认拒绝 `low_latency`；只有具体 adapter path 尚未验证时才单独加 guard。
 
-3. **`rank_load` metadata 已同步，但 balancer static cache 仍需要刷新策略**
+3. **`rank_load` metadata 已同步，PR 的指针式 static path 是合理的**
 
-   最终 PR 已把 `rank_load` 计算放进 `ExpertLocationMetadata.init_by_eplb(...)`，但只接受 3D `logical_count`；mapping-only init 没有 static rank load，会 fallback 到 dynamic Waterfill。`ExpertLocationMetadata.update(...)` 会同步 `rank_load`。新的缺口是 `DeepEPWaterfillBalancer.update_static_weights()` 目前只在 `ModelRunner._prepare_moe_topk()` 阶段调用一次，且已有 `static_rank_load` 后会直接返回。如果 POC 依赖 runtime EPLB + static Waterfill mode，adapter 需要在 rebalance 后刷新 `prior_rank_load`，或避免长期缓存旧 static rank load。
+   最终 PR 已把 `rank_load` 计算放进 `ExpertLocationMetadata.init_by_eplb(...)`，但只接受 3D `logical_count`；mapping-only init 没有 static rank load，会 fallback 到 dynamic Waterfill。`ExpertLocationMetadata.update(...)` 会同步 `rank_load`。关键点是 PR 里的 balancer 持有的是 `rank_load` 指针/引用；只要 SGLang 更新的是同一个 buffer 的内容，`DeepEPWaterfillBalancer` 不需要每次重新 load 数据，也不会因为 prepare 阶段只设置一次而天然 stale。POC adapter 应保留这种 live-reference 语义。只有当某个 framework 替换了 rank-load 对象本身，而不是原地更新内容时，adapter 才需要在 rebalance 后刷新 `prior_rank_load` handle，或在 route 前 lazy-read 最新对象。
 
 4. **算法文件直接依赖 SGLang 类型**
 
@@ -408,7 +408,7 @@ PR 中不属于 generic TopK hook 本身的改动，也不是“什么都不放�
 | PR 改动点 | POC 归属 | 处理方式 |
 |---|---|---|
 | Waterfill rank-selection policy | Core | 从 `DeepEPWaterfillBalancer` 中拆出 framework-independent policy |
-| `ExpertLocationMetadata.rank_load` | Adapter | 映射成 `RoutingRequest.prior_rank_load`，rebalance 后刷新 |
+| `ExpertLocationMetadata.rank_load` | Adapter | 映射成 `RoutingRequest.prior_rank_load`；优先保留 PR 的 live reference 语义，只有 rank-load 对象被替换时才刷新 handle |
 | EP all-reduce | Adapter | Waterfill-only dynamic 可单独 all-reduce；`LPLB + Waterfill` 在 LPLB 前通信一次并共享 |
 | DeepEP interleaved id / shared expert route column / empty output | Adapter | 把 core decision materialize 成 `StandardTopKOutput` |
 | `ModelRunner._prepare_moe_topk()` | SGLang integration glue/runtime | 复用遍历和注入模式，注入 generic adapter/router |
@@ -420,11 +420,11 @@ PR 中不属于 generic TopK hook 本身的改动，也不是“什么都不放�
 | Area | 必要改动 | 原因 |
 |---|---|---|
 | `server_args.py` | 新增 POC 开关，例如 `--enable-moe-load-balancer` / `--moe-lb-policy waterfill`；借鉴 PR 自动切到 DeepEP、强制 shared fusion；与 PR 对齐时允许 `deepep_mode=auto/normal/low_latency`，只有具体 adapter 不支持时再显式 guard | 控制入口和非法组合保护 |
-| `model_runner.py` | 借鉴 PR 的 `_prepare_moe_topk()`，在 `load_model()` 后遍历 TopK modules 并注入 SGLang routing adapter/router；rebalance 后需要刷新 adapter placement view / static rank load cache | runtime prepare、EP rank/world、模型遍历都属于 SGLang adapter 层 |
+| `model_runner.py` | 借鉴 PR 的 `_prepare_moe_topk()`，在 `load_model()` 后遍历 TopK modules 并注入 SGLang routing adapter/router；rebalance 后需要刷新 placement view，rank-load 则保留 live reference 或在对象替换时刷新 handle | runtime prepare、EP rank/world、模型遍历都属于 SGLang adapter 层 |
 | `topk.py` / `_post_process_topk_ids` 或等价 TopK hook | 在 PR 新增的 TopK Waterfill apply 落点上扩展 `moe_lb_context`；在 logical ids 被 SGLang remap 成 physical ids 前调用 adapter，或允许 adapter 接管 remap | generic L2 必须看到 logical top-k，同时必须 stage-aware；当前 PR 的 Waterfill 是 stage-less global path |
 | `deepseek_v2.py::forward_deepep` | 只构造并传递最小 `SGLangRoutingContext`，包含 optional stage / `num_token_non_padded` / optional token mask；fallback 方案才在这里直接调用 adapter | stage gating 由 core policy config 判断，避免把 forward path 变成 routing 编排层 |
 | `expert_location.py` / adapter | 从 `ExpertLocationMetadata` 提供 per-layer `SGLangPlacementView`；把 placement mapping 转成 `PlacementSnapshot`，把 `rank_load` 映射成 `RoutingRequest.prior_rank_load` | L1/L2 边界需要拆清: placement 归 L1，rank load 归 L2 routing |
-| `eplb_manager.py` | runtime rebalance 后通知/刷新 router placement view，或让 router lazy read global metadata；如果使用 static rank-load cache，需要同步刷新 | L2 需要看到 SGLang EPLB 最新 placement |
+| `eplb_manager.py` | runtime rebalance 后通知/刷新 router placement view，或让 router lazy read global metadata；如果 rank-load 是原地更新的 live buffer，不需要重新 load；如果对象被替换，则同步刷新 handle | L2 需要看到 SGLang EPLB 最新 placement 和 rank-load |
 | `layers/moe/deepep_waterfill.py` 或新模块 | 保留 Waterfill kernels，但剥离 SGLang global/env/TopK 类型依赖 | 后续抽独立模块 |
 
 ## Non-Goals In This File
