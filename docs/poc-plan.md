@@ -169,7 +169,7 @@ class TokenRouter:
 
 - `logical_topk_ids` 是 token-level logical top-k ids，不是聚合后的 logical expert 分布。
 - LPLB / routed-replica 决策需要 `PlacementSnapshot`。shared-expert Waterfill 本身只需要 per-rank load；这个 load 由 adapter 作为 `routed_rank_load` / `prior_rank_load` 放进 L2 `RoutingRequest`。
-- `stage` 是 optional runtime context，不是每个算法必须使用的分类轴。某个 policy 是否允许在当前 stage 运行，由 core 级 `RoutingPolicyConfig.enabled_stages` 统一判断；`enabled_stages=None` 表示该 policy 不做 stage gating。
+- `stage` 是 optional runtime context，不是每个算法必须使用的分类轴。某个 policy 是否允许在当前 stage 运行，由 core 级 `RoutingPolicyConfig.enabled_stages` 统一判断；`enabled_stages=None` 表示该 policy 不做 stage gating，并允许 `stage=None`。显式列出 stage 则要求调用方提供已知 stage。
 - `lb_token_mask` 用于 mixed batch。如果没有可靠 mask，当前 POC 对 `MIXED` 直接 bypass。
 - `routed_physical_topk_ids` 使用 `PlacementSnapshot` 定义的框架中立 physical expert namespace，不是 DeepEP interleaved id。
 - `shared_expert_rank` 表达 shared expert route 的目标 EP rank；这是 `top_k=8 -> routed top-k + shared route` 的框架中立语义，SGLang adapter 再把它 materialize 成 DeepEP expanded TopK 的第 9 列。

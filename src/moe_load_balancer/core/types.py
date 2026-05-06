@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from types import MappingProxyType
 from typing import Any, ClassVar, Mapping, Optional
 
 TensorLike = Any
@@ -41,6 +42,8 @@ class RoutingPolicyConfig:
     routing policy. Any other name identifies a registered policy.
     ``enabled_stages=None`` means the policy is not gated by stage. If a set is
     provided, a request without stage information is not eligible by default.
+    An explicit set containing every stage is stricter than ``None`` because it
+    still rejects requests with unknown stage.
     The policy implementation may still ignore ``RoutingRequest.stage`` after
     this common gating decision.
     """
@@ -52,6 +55,7 @@ class RoutingPolicyConfig:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
         if self.enabled_stages is None:
             return
         enabled_stages = frozenset(

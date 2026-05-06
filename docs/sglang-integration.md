@@ -250,7 +250,7 @@ class SGLangPlacementAdapter:
 
 ### L2 Prefill Interface
 
-L2 core 应以 logical TopK 为输入，在 DeepEP dispatch 前由 adapter 改写 physical routing。`stage` 是 optional runtime context；某个 policy 是否只在 prefill、只在 decode、两者都运行或不按 stage gating，由 core 级 policy config 表达。当前某个 SGLang POC 可以选择只在纯 prefill/extend token slice 开启，但这不是 Waterfill 算法或 core API 的限制。
+L2 core 应以 logical TopK 为输入，在 DeepEP dispatch 前由 adapter 改写 physical routing。`stage` 是 optional runtime context；某个 policy 是否只在 prefill、只在 decode、两者都运行或不按 stage gating，由 core 级 policy config 表达。`enabled_stages=None` 允许 `stage=None`，显式 stage set 则要求 stage 已知。当前某个 SGLang POC 可以选择只在纯 prefill/extend token slice 开启，但这不是 Waterfill 算法或 core API 的限制。
 
 ```python
 @dataclass

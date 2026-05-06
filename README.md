@@ -51,7 +51,7 @@ class MoELoadBalancer:
         ...
 ```
 
-`PlacementProvider` 在 SGLang POC 中由 EPLB adapter 实现；`RoutingRequest` 使用框架中立的数据，例如 logical top-k ids、top-k weights、placement snapshot 和 optional stage；`RoutingPolicyConfig.enabled_stages` 是 core 级通用 stage gating，`None` 表示该算法不按 stage 限制。`RoutingDecision` 返回框架中立的 routing decision，再由 adapter 写成 physical/interleaved expert id 或 shared expert slot。SGLang 里的 `StandardTopKOutput`、`ExpertLocationMetadata`、process group、DeepEP interleaved id 等只能出现在 adapter/helper 中，不能成为项目级主接口。
+`PlacementProvider` 在 SGLang POC 中由 EPLB adapter 实现；`RoutingRequest` 使用框架中立的数据，例如 logical top-k ids、top-k weights、placement snapshot 和 optional stage；`RoutingPolicyConfig.enabled_stages` 是 core 级通用 stage gating，`None` 表示该算法不按 stage 限制，也允许 `stage=None`。显式列出所有 stage 则仍要求调用方提供已知 stage。`RoutingDecision` 返回框架中立的 routing decision，再由 adapter 写成 physical/interleaved expert id 或 shared expert slot。SGLang 里的 `StandardTopKOutput`、`ExpertLocationMetadata`、process group、DeepEP interleaved id 等只能出现在 adapter/helper 中，不能成为项目级主接口。
 
 ## Repository Skeleton
 

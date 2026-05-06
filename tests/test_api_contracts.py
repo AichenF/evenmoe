@@ -72,6 +72,15 @@ class TestRoutingPolicyConfig:
         assert policy.allows_stage(RoutingStage.DECODE)
         assert not policy.should_run_for_stage(RoutingStage.PREFILL)
 
+    def test_explicit_all_stage_set_still_requires_known_stage(self):
+        policy = RoutingPolicyConfig(
+            name="waterfill",
+            enabled_stages=frozenset(RoutingStage),
+        )
+
+        assert policy.allows_stage(RoutingStage.PREFILL)
+        assert not policy.allows_stage(None)
+
     def test_enabled_stages_gate_request_stage(self):
         policy = RoutingPolicyConfig(
             name="waterfill",
@@ -98,6 +107,13 @@ class TestRoutingPolicyConfig:
     def test_from_value_rejects_unsupported_types(self):
         with pytest.raises(TypeError):
             RoutingPolicyConfig.from_value(None)  # type: ignore[arg-type]
+
+    def test_metadata_is_read_only(self):
+        policy = RoutingPolicyConfig(name="waterfill", metadata={"mode": "static"})
+
+        assert policy.metadata["mode"] == "static"
+        with pytest.raises(TypeError):
+            policy.metadata["mode"] = "dynamic"  # type: ignore[index]
 
 
 @pytest.mark.unit

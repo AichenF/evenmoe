@@ -22,4 +22,7 @@ class SGLangRoutingContext:
     lb_token_mask: Optional[TensorLike] = None
 
     def __post_init__(self) -> None:
+        # Keep adapter construction compatible with older string policy call
+        # sites. RoutingRequest repeats this coercion so adapter callers cannot
+        # accidentally bypass core-side validation.
         object.__setattr__(self, "policy", RoutingPolicyConfig.from_value(self.policy))

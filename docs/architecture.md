@@ -21,7 +21,7 @@
 - **Framework independent**: 核心模块不 import 推理框架内部类型。
 - **Orthogonal layers**: L1/L2/L3 可独立开关，也可组合使用。
 - **Lossless correctness**: 不改变 router top-k 逻辑 expert；routed expert 重映射只能在同一逻辑 expert 的物理副本内选择，shared expert Waterfill 只能追加等价的 shared dispatch slot。
-- **Stage aware but not stage-bound**: prefill 和 decode 的优化目标可能不同，但不是所有算法都必须按 stage 分叉。`RoutingRequest.stage` 是 optional runtime context；`RoutingPolicyConfig.enabled_stages` 是 core 级通用 gating，允许一个 policy 只在 prefill、只在 decode、两者都运行，或完全不按 stage 限制。当前 SGLang POC 只复用 SGLang EPLB 作为 L1 placement source；新的 L1 optimizer、Metro 留作后续。
+- **Stage aware but not stage-bound**: prefill 和 decode 的优化目标可能不同，但不是所有算法都必须按 stage 分叉。`RoutingRequest.stage` 是 optional runtime context；`RoutingPolicyConfig.enabled_stages` 是 core 级通用 gating，允许一个 policy 只在 prefill、只在 decode、两者都运行，或完全不按 stage 限制。`enabled_stages=None` 不要求 stage 已知；显式 stage set 要求 `request.stage` 已知且匹配。当前 SGLang POC 只复用 SGLang EPLB 作为 L1 placement source；新的 L1 optimizer、Metro 留作后续。
 - **Product path**: SGLang first validation，TensorRT-LLM MoE plugin productization。
 
 ## Core Vs Adapter Boundary

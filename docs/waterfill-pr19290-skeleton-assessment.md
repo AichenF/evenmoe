@@ -109,6 +109,8 @@ Skeleton 应该这样处理:
 - `RoutingRequest.stage: Optional[RoutingStage] = None`。
 - `RoutingPolicyConfig.enabled_stages` 是 core 级 gating。
 - `enabled_stages=None` 表示 policy 不按 stage 限制。
+- 显式列出所有 stage 和 `enabled_stages=None` 不完全等价: 前者仍要求
+  `request.stage` 已知，后者允许 `stage=None`。
 - `enabled_stages={PREFILL}` 表示只在 prefill 运行。
 - `enabled_stages={DECODE}` 表示只在 decode 运行。
 - `enabled_stages={PREFILL, DECODE}` 表示两者都运行。
