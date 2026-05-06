@@ -3,19 +3,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from moe_load_balancer.core.types import RoutingStage, TensorLike
+from moe_load_balancer.core.types import RoutingPolicyConfig, RoutingStage, TensorLike
 
 
 @dataclass(frozen=True)
 class SGLangRoutingContext:
     """Minimal per-forward context passed from SGLang model code to TopK.
 
-    ``stage`` is normalized to :class:`RoutingStage` at the adapter boundary —
-    upstream callers may pass strings, but should funnel them through
-    :meth:`RoutingStage.from_str` before constructing this dataclass.
+    ``stage`` is optional runtime context. Upstream callers that have stage
+    information should normalize it with :meth:`RoutingStage.from_str` before
+    constructing this dataclass; callers without reliable stage information can
+    leave it as ``None``.
     """
 
-    stage: RoutingStage
-    policy: str
+    policy: RoutingPolicyConfig | str
+    stage: Optional[RoutingStage] = None
     num_token_non_padded: Optional[TensorLike] = None
     lb_token_mask: Optional[TensorLike] = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "policy", RoutingPolicyConfig.from_value(self.policy))

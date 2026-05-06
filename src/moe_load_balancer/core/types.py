@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Mapping, Optional
+from typing import Any, ClassVar, Mapping, Optional
 
 TensorLike = Any
 
@@ -31,6 +31,68 @@ class RoutingStage(str, Enum):
                 f"got {type(value).__name__}."
             )
         return cls(value.lower())
+
+
+@dataclass(frozen=True)
+class RoutingPolicyConfig:
+    """Framework-neutral policy selection and gating configuration.
+
+    ``name="disabled"`` is the conservative default and should not run a
+    routing policy. Any other name identifies a registered policy.
+    ``enabled_stages=None`` means the policy is not gated by stage. If a set is
+    provided, a request without stage information is not eligible by default.
+    The policy implementation may still ignore ``RoutingRequest.stage`` after
+    this common gating decision.
+    """
+
+    DISABLED: ClassVar[str] = "disabled"
+
+    name: str = DISABLED
+    enabled_stages: Optional[frozenset[RoutingStage]] = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.enabled_stages is None:
+            return
+        enabled_stages = frozenset(
+            RoutingStage.from_str(stage) for stage in self.enabled_stages
+        )
+        if not enabled_stages:
+            raise ValueError("RoutingPolicyConfig.enabled_stages cannot be empty.")
+        object.__setattr__(self, "enabled_stages", enabled_stages)
+
+    @classmethod
+    def from_value(
+        cls, value: "RoutingPolicyConfig | str"
+    ) -> "RoutingPolicyConfig":
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, str):
+            return cls(name=value)
+        raise TypeError(
+            "RoutingPolicyConfig.from_value expects RoutingPolicyConfig or str, "
+            f"got {type(value).__name__}."
+        )
+
+    @property
+    def is_disabled(self) -> bool:
+        return self.name == self.DISABLED
+
+    def allows_stage(self, stage: Optional[RoutingStage]) -> bool:
+        if self.enabled_stages is None:
+            return True
+        if stage is None:
+            return False
+        return stage in self.enabled_stages
+
+    def should_run_for_stage(self, stage: Optional[RoutingStage]) -> bool:
+        """Return whether this policy should run for this request stage.
+
+        Ungated policies run even when stage is unknown. Stage-gated policies
+        require a known stage that appears in ``enabled_stages``.
+        """
+
+        return (not self.is_disabled) and self.allows_stage(stage)
 
 
 @dataclass(frozen=True)
@@ -104,7 +166,7 @@ class RoutingLoadSnapshot:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class RoutingRequest:
     """Framework-neutral L2 routing request.
 
@@ -115,20 +177,28 @@ class RoutingRequest:
         prior_rank_load:    ``[ep_size]`` EPLB-derived prior rank load.
         token_count:        scalar or ``[1]`` total live tokens.
         lb_token_mask:      ``[num_tokens]`` bool mask of LB-eligible tokens.
+
+    ``stage`` is optional runtime context. It lets framework adapters describe
+    the current request phase, but algorithms are not required to branch on it.
+    Stage-based routing enablement belongs to
+    ``policy.should_run_for_stage(request.stage)``.
     """
 
     layer_id: int
-    stage: RoutingStage
     logical_topk_ids: TensorLike
     topk_weights: TensorLike
     placement: PlacementSnapshot
+    stage: Optional[RoutingStage] = None
     routed_rank_load: Optional[TensorLike] = None
     prior_rank_load: Optional[TensorLike] = None
     token_count: Optional[TensorLike] = None
     lb_token_mask: Optional[TensorLike] = None
     routed_scaling_factor: float = 1.0
-    policy: str = "disabled"
+    policy: RoutingPolicyConfig | str = field(default_factory=RoutingPolicyConfig)
     metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "policy", RoutingPolicyConfig.from_value(self.policy))
 
 
 @dataclass(frozen=True)

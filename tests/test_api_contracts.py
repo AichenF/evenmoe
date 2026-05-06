@@ -7,6 +7,7 @@ from moe_load_balancer import (
     PlacementSnapshot,
     RoutingDecision,
     RoutingLoadSnapshot,
+    RoutingPolicyConfig,
     RoutingRequest,
     RoutingStage,
     TokenRouter,
@@ -57,6 +58,46 @@ class TestRoutingStage:
     def test_from_str_rejects_non_string(self):
         with pytest.raises(TypeError):
             RoutingStage.from_str(None)  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+class TestRoutingPolicyConfig:
+    def test_default_policy_is_not_stage_gated(self):
+        policy = RoutingPolicyConfig()
+
+        assert policy.name == "disabled"
+        assert policy.is_disabled
+        assert policy.allows_stage(None)
+        assert policy.allows_stage(RoutingStage.PREFILL)
+        assert policy.allows_stage(RoutingStage.DECODE)
+        assert not policy.should_run_for_stage(RoutingStage.PREFILL)
+
+    def test_enabled_stages_gate_request_stage(self):
+        policy = RoutingPolicyConfig(
+            name="waterfill",
+            enabled_stages=frozenset({RoutingStage.PREFILL, RoutingStage.DECODE}),
+        )
+
+        assert policy.allows_stage(RoutingStage.PREFILL)
+        assert policy.allows_stage(RoutingStage.DECODE)
+        assert not policy.allows_stage(RoutingStage.MIXED)
+        assert not policy.allows_stage(None)
+        assert policy.should_run_for_stage(RoutingStage.PREFILL)
+        assert not policy.should_run_for_stage(RoutingStage.MIXED)
+
+    def test_enabled_stages_rejects_empty_set(self):
+        with pytest.raises(ValueError):
+            RoutingPolicyConfig(name="waterfill", enabled_stages=frozenset())
+
+    def test_from_value_accepts_string_policy_names(self):
+        policy = RoutingPolicyConfig.from_value("waterfill")
+
+        assert policy.name == "waterfill"
+        assert not policy.is_disabled
+
+    def test_from_value_rejects_unsupported_types(self):
+        with pytest.raises(TypeError):
+            RoutingPolicyConfig.from_value(None)  # type: ignore[arg-type]
 
 
 @pytest.mark.unit
@@ -114,6 +155,34 @@ class TestTokenRouterProtocol:
         assert decision.routed_physical_topk_ids == request.logical_topk_ids
         assert decision.topk_weights == request.topk_weights
 
+    def test_stage_is_optional_context(self):
+        request = RoutingRequest(
+            layer_id=0,
+            logical_topk_ids=[[0]],
+            topk_weights=[[1.0]],
+            placement=_placement(num_logical=1, num_physical=1),
+            policy=RoutingPolicyConfig(name="waterfill"),
+        )
+
+        assert request.stage is None
+        assert request.policy.allows_stage(request.stage)
+        assert request.policy.should_run_for_stage(request.stage)
+
+    def test_request_coerces_string_policy_for_compatibility(self):
+        request = RoutingRequest(
+            layer_id=0,
+            logical_topk_ids=[[0]],
+            topk_weights=[[1.0]],
+            placement=_placement(num_logical=1, num_physical=1),
+            policy="waterfill",
+        )
+
+        assert request.policy == RoutingPolicyConfig(name="waterfill")
+
+    def test_request_rejects_positional_construction(self):
+        with pytest.raises(TypeError):
+            RoutingRequest(0, [[0]], [[1.0]], _placement())  # type: ignore[misc]
+
 
 @pytest.mark.unit
 class TestSGLangAdapterStubs:
@@ -127,6 +196,10 @@ class TestSGLangAdapterStubs:
             router=_PassthroughRouter(),
             placement_provider=SGLangPlacementAdapter(metadata_source=object()),
         )
-        context = SGLangRoutingContext(stage=RoutingStage.PREFILL, policy="disabled")
+        context = SGLangRoutingContext(
+            policy="disabled",
+            stage=RoutingStage.PREFILL,
+        )
+        assert context.policy == RoutingPolicyConfig(name="disabled")
         with pytest.raises(NotImplementedError):
             adapter.route_topk(layer_id=0, logical_topk_output=None, context=context)
