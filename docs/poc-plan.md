@@ -30,7 +30,7 @@ SGLang EPLB placement metadata
 | Core module  | framework-independent API            | 不 import SGLang 类型，不直接调用 SGLang process group / all-reduce |
 
 
-PR #19290 最终 head `4e76f923a` 把 Waterfill 定成 **server arg 全局开关 + TopK 自发现 + ModelRunner 注入** 的结构: `--enable-deepep-waterfill` 会自动切到 DeepEP 并强制 shared expert fusion；`TopK.__init__` 读取全局 server args 决定是否进入 Waterfill routed-only TopK；`ModelRunner._prepare_moe_topk()` 在模型加载后构造并注入 `DeepEPWaterfillBalancer`；`TopK.forward_*()` 最后调用 `expand_topk()`。这证明 TopK remap 边界是合适的工程落点，也说明 runtime 对象初始化应留在 SGLang 侧；但 PR 的实现仍是 SGLang/DeepEP-specific、无 stage/context 的全局 feature，不等于当前 POC 的 framework-independent interface。
+PR #19290 latest head `43fe3d965` 把 Waterfill 定成 **server arg 全局开关 + TopK 自发现 + ModelRunner 注入** 的结构: `--enable-deepep-waterfill` 会自动切到 DeepEP 并强制 shared expert fusion；`TopK.__init__` 读取全局 server args 决定是否进入 Waterfill routed-only TopK；`ModelRunner._prepare_moe_topk()` 在模型加载后构造并注入 `DeepEPWaterfillBalancer`；`TopK.forward_*()` 最后调用 `expand_topk()`。latest head 已删除 `static_rank_load`，static path 改为当前 local routed counts 的 no-all-reduce path。这证明 TopK remap 边界是合适的工程落点，也说明 runtime 对象初始化应留在 SGLang 侧；但 PR 的实现仍是 SGLang/DeepEP-specific、无 stage/context 的全局 feature，不等于当前 POC 的 framework-independent interface。
 
 ## Relationship To SGLang Integration Doc
 
@@ -178,7 +178,7 @@ class TokenRouter:
 关键语义:
 
 - `logical_topk_ids` 是 token-level logical top-k ids，不是聚合后的 logical expert 分布。
-- LPLB / routed-replica 决策需要 `PlacementSnapshot`。shared-expert Waterfill 本身只需要 per-rank load。当前 batch/window 的即时负载可以由 adapter 放进 `RoutingRequest.current_rank_load`；EPLB / history 这类先验水位线应由 L2 `RoutingLoadProvider` 作为长持 state 提供给 policy。
+- LPLB / routed-replica 决策需要 `PlacementSnapshot`。shared-expert Waterfill 本身只需要 per-rank load。latest PR #19290 已删除 `static_rank_load`，因此 PR 对齐的 Waterfill 不再消费 EPLB/history 水位线；static path 用当前 local routed counts，dynamic path 用 all-reduced current effective load。EPLB / history 这类先验水位线仍可由 L2 `RoutingLoadProvider` 作为长持 state 提供给其他 policy。
 - `stage` 是 optional runtime context，不是每个算法必须使用的分类轴。某个 policy 是否允许在当前 stage 运行，由 core 级 `RoutingPolicyConfig.enabled_stages` 统一判断；`enabled_stages=None` 表示该 policy 不做 stage gating，并允许 `stage=None`。显式列出 stage 则要求调用方提供已知 stage。
 - `lb_token_mask` 用于 mixed batch。如果没有可靠 mask，当前 POC 对 `MIXED` 直接 bypass。
 - `routed_physical_topk_ids` 使用 `PlacementSnapshot` 定义的框架中立 physical expert namespace，不是 DeepEP interleaved id。
@@ -190,31 +190,32 @@ L2 中两个 rank-load 来源的区别:
 
 | 字段                 | 含义                                                                                | 什么时候需要                                                    |
 | ------------------ | --------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| `RoutingRequest.current_rank_load` | L2 动态负载: 当前 batch / 当前 routing window 里，routed experts 已经落到各 EP rank 的 token load | dynamic shared-expert Waterfill 的直接输入                     |
-| `RoutingLoadView.prior_rank_load`  | L2 先验负载: EPLB / 历史统计给出的 per-rank 水位线，不代表当前 batch 已经实际 routed 的 token 数            | static shared-expert Waterfill 的长持输入                         |
+| `RoutingRequest.current_rank_load` | 当前 batch / 当前 routing window 里，routed experts 已经落到各 EP rank 的 token load | latest PR shared-expert Waterfill 的直接输入 |
+| `RoutingLoadView.prior_rank_load`  | L2 先验负载: EPLB / 历史统计给出的 per-rank 水位线，不代表当前 batch 已经实际 routed 的 token 数 | 不再是 latest PR Waterfill 的必需输入，保留给其他 policy |
 
 
-`current_rank_load` 和 `prior_rank_load` 不要求同时提供，也不要求来自同一个对象:
+`current_rank_load` 和 `prior_rank_load` 不要求同时提供，也不要求来自同一个对象。对齐 latest PR #19290 时，Waterfill 只需要 `current_rank_load`:
 
 
 | Waterfill 模式          | 使用哪个 load                                         | 语义                                                         |
 | --------------------- | ------------------------------------------------- | ---------------------------------------------------------- |
 | dynamic               | `RoutingRequest.current_rank_load`                                | 根据当前 batch/window 的实际 routed counts 给 shared expert 选 rank |
-| static / PR static 对齐 | `RoutingLoadProvider.load_view(layer_id).prior_rank_load`                                 | 使用 EPLB 历史水位线作为当前 rank load 估计，避免每次 all-reduce             |
+| static / PR static 对齐 | `RoutingRequest.current_rank_load` | 使用当前 local routed counts，避免每次 all-reduce |
 
 
 Shared-expert Waterfill 的 rank-load 来源按 policy 分开:
 
 ```text
 Waterfill-only static:
-  SGLang EPLB rank_load
-  -> SGLangRoutingLoadProvider no-copy wrapper / RoutingLoadView.prior_rank_load
+  baseline EPLB routed physical top-k
+  -> adapter counts local routed load
+  -> RoutingRequest.current_rank_load
   -> shared-expert Waterfill
 
 Waterfill-only dynamic:
   baseline EPLB routed physical top-k
   -> adapter counts routed load
-  -> EP all-reduce once
+  -> EP all-reduce routed counts and token counts once
   -> RoutingRequest.current_rank_load
   -> shared-expert Waterfill
 
@@ -340,7 +341,6 @@ ModelRunner.initialize
     traverse TopK modules
     construct DeepEPWaterfillBalancer with EP rank/world + layer_id
     inject it into TopK.deepep_waterfill_balancer
-    call update_static_weights()
 
 TopK.forward / empty_topk_output
   select routed experts
@@ -360,7 +360,7 @@ PR 里不是所有改动都进入 generic TopK adapter hook。它们分成三类
 |---|---|---|
 | Waterfill rank-selection policy | Core | 从 `DeepEPWaterfillBalancer` 中抽出 framework-independent policy: 输入 rank load / candidate ranks，输出 shared expert 应落在哪个 rank |
 | `DeepEPWaterfillBalancer` / `deepep_waterfill.py` 中的 SGLang/DeepEP 包装 | Adapter | 保留 `StandardTopKOutput`、DeepEP physical id layout、shared route column materialization、empty output handling 等框架相关部分 |
-| `ExpertLocationMetadata.rank_load` | Adapter | 由 SGLang adapter no-copy 暴露成 `RoutingLoadView.prior_rank_load`；优先保留 PR 的 live reference 语义，对象被替换时才刷新 handle |
+| current routed rank load | Adapter | latest PR 的 static path 统计 local routed counts；dynamic path all-reduce current routed counts/token counts；不再依赖 `ExpertLocationMetadata.rank_load` |
 | EP all-reduce | Adapter | 通信由 SGLang adapter 做；`LPLB + Waterfill` 时在 LPLB 前做一次并共享结果，Waterfill 不再重复通信 |
 | `ModelRunner._prepare_moe_topk()` 注入 balancer | SGLang integration glue/runtime | 复用 prepare/inject 生命周期，但注入 generic SGLang routing adapter/router |
 | `server_args.py` backend / shared-fusion guard | SGLang integration glue/config | 新 POC 开关复用这些合法性检查；backend、fusion、`deepep_mode` 不进入 core |
@@ -400,8 +400,8 @@ TopK / _post_process_topk_ids
 
 | 部分                    | 归属      | 内容                                                                                                                                                                                                     |
 | --------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Waterfill core policy | core    | 根据 request-local `current_rank_load`、load-source `prior_rank_load`、candidate ranks 和 local preference，选择每个 token 的 shared expert target rank                                                                             |
-| DeepEP/SGLang wrapper | adapter | 处理 `StandardTopKOutput`、SGLang global metadata、live rank-load reference / object-replacement refresh、EP all-reduce、DeepEP interleaved id、把 core 的 shared route materialize 成 DeepEP expanded TopK 第 9 列，以及注入到 `TopK` 的 runtime object |
+| Waterfill core policy | core    | 根据 request-local `current_rank_load`、可选 `prior_rank_load`、candidate ranks 和 local preference，选择每个 token 的 shared expert target rank                                                                             |
+| DeepEP/SGLang wrapper | adapter | 处理 `StandardTopKOutput`、SGLang placement metadata、local/global rank-load 统计、EP all-reduce、DeepEP interleaved id、把 core 的 shared route materialize 成 DeepEP expanded TopK 第 9 列，以及注入到 `TopK` 的 runtime object |
 
 
 结论: Waterfill/Balance 的框架无关决策属于 core；PR 中和 SGLang/DeepEP 对象、通信、layout 绑定的包装部分属于 adapter。
@@ -492,7 +492,7 @@ Waterfill 语义必须写清楚:
 | P0  | 接口与侵入点确认                | core/adapter 边界、ID-space contract、stage-aware hook 方案                       |
 | P1  | SGLang adapter skeleton | `PlacementSnapshot` 导入、logical TopK 捕获、routing decision 回写                  |
 | P2  | L2 最小切片         | shared-expert Waterfill facade、LPLB facade 占位、stage gating、logits parity                 |
-| P3  | EPLB baseline 对齐        | init/rebalance 路径、placement snapshot 刷新、`rank_load` -> `RoutingLoadView.prior_rank_load` 处理 |
+| P3  | EPLB baseline 对齐        | init/rebalance 路径、placement snapshot 刷新、当前 routed rank-load 统计路径 |
 | P4  | 组合实验                    | shared-expert Waterfill、LPLB、组合策略、routing 开销                                |
 | P5  | 汇总 benchmark            | SGLang POC prototype + benchmark 报告                                         |
 
@@ -535,7 +535,7 @@ Waterfill 语义必须写清楚:
 | ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | TopK hook 无 stage 导致配置受限 policy 误触发                                   | 使用 stage-aware TopK hook；`forward_deepep` 只传最小 context；core `enabled_stages` 统一 gating                                        |
 | PR 最终 ModelRunner/TopK Waterfill path 是 stage-less global feature | 只复用 prepare/inject 模式、TopK-level 落点和 Waterfill kernel 思路；POC 另加 `moe_lb_context` 和 adapter 边界 |
-| rank-load source 的更新语义不一致                                        | PR 的 static path 持有 live `rank_load` 指针/引用，原地更新不会 stale；如果某个 framework 替换对象本身，adapter 需要刷新 handle 或 lazy-read 最新对象 |
+| rank-load source 的 scope/生命周期不一致                                        | core 保留 request-local `current_rank_load` 和 long-lived `prior_rank_load` 两类输入；latest PR Waterfill 只用当前 routed rank load，其他算法仍可通过 provider 使用历史水位线 |
 | `forward_deepep` 过度承载 routing                                     | 不在这里做完整 routing；只作为 fallback                                                                  |
 | SGLang remap 后 logical id 丢失                                      | 在 `_post_process_topk_ids` 的 `topk_ids_logical_to_physical(...)` 前调用 adapter                  |
 | shared-expert Waterfill 和 routed-replica Waterfill 混淆             | 当前只实现 PR 对齐的 shared-expert Waterfill；routed-replica 单独作为 future work                          |
