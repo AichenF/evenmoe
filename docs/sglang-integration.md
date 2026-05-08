@@ -4,9 +4,9 @@
 
 本轮分析范围:
 
-- 本地 SGLang main: `../sglang`，commit `fdfe53e87`。
+- 本地 SGLang main: `../sglang`，`origin/main` commit `d32e28394`。
 - Waterfill PR: <https://github.com/sgl-project/sglang/pull/19290>，local branch `pr-19290-waterfill`，commit `43fe3d965`。
-  本次相对上一轮 `4e76f923a` 新增检查了 latest PR head，重点是 `static_rank_load` / `ExpertLocationMetadata.rank_load` 已删除后的接口影响。
+  本次直接 fetch 了 GitHub PR ref `refs/pull/19290/head`，当前 head 仍是 `43fe3d965`；除 `static_rank_load` / `ExpertLocationMetadata.rank_load` 删除外，也重新检查了 server args、TopK empty path、DeepSeek fusion gate、low-batch Waterfill 分支和 dynamic all-reduce 语义。
 - 分析对象: SGLang 现有 EPLB 实现，以及 Waterfill PR 对 SGLang 的代码侵入。
 
 当前版本暂未展开 LPLB 对 SGLang 的完整代码侵入分析。LPLB 仍是后续需要补齐的 L2 prefill 方向；本轮先保留算法接口和组合入口，具体 SGLang 改动点后续由同事补充。
@@ -113,7 +113,7 @@ PR #19290 的目标是 DeepEP Waterfill: 把 shared expert 当作第 9 个 route
 | `server_args.py` | 新增 `enable_deepep_waterfill`；启用时如果 `moe_a2a_backend != deepep` 会自动 override 成 `deepep`，并强制 shared expert fusion；文档声明支持 `deepep_mode=auto`、`normal` 或 `low_latency` | 配置层侵入 |
 | `environ.py` | 新增 `SGLANG_DISABLE_STATIC_WATERFILL`；latest PR 中它的含义是禁用 no-all-reduce static local path，强制走 dynamic all-reduce path | 调试/策略开关 |
 | `eplb/expert_location.py` | latest PR 已删除 `ExpertLocationMetadata.rank_load` 及其 init/update 逻辑；EPLB metadata 继续只作为 placement source | EPLB 侵入下降 |
-| `layers/moe/deepep_waterfill.py` | 新增 Triton kernels 和 `DeepEPWaterfillBalancer`；删除 `WaterfillTopK` wrapper；latest PR 已删除 `static_rank_load` bind/cache，static path 每次基于当前 local routed counts 构造 plan | 新算法文件，但目前直接 import SGLang env、`StandardTopKOutput` 和 EP all-reduce |
+| `layers/moe/deepep_waterfill.py` | 新增 Triton kernels 和 `DeepEPWaterfillBalancer`；删除 `WaterfillTopK` wrapper；latest PR 已删除 `static_rank_load` bind/cache，static path 每次基于当前 local routed counts 构造 plan；low-batch static 直接 local expansion，dynamic low-batch 先参与 all-reduce 再 local expansion | 新算法文件，但目前直接 import SGLang env、`StandardTopKOutput` 和 EP all-reduce |
 | `layers/moe/topk.py` | 不新增 constructor 参数；当 `num_fused_shared_experts > 0` 时读取 global `server_args.enable_deepep_waterfill`，启用后把 base TopK 改成 routed-only、强制 STANDARD output，并在 forward / empty path 后调用 `expand_topk()`；如果启用但未 prepare 会报错 | Waterfill 主执行点在 TopK，但激活源是全局 server arg，balancer 构造已移出 TopK |
 | `model_executor/model_runner.py` | 新增 `_prepare_moe_topk()`；`load_model()` 后遍历 TopK modules，构造并注入 `DeepEPWaterfillBalancer` | runtime prepare/injection 入口 |
 | `models/deepseek_v2.py` | 移除模型侧 `_enable_deepep_waterfill` 逻辑；`TopK` 仍按普通 shared-fusion 形态构造；`enforce_shared_experts_fusion` 现在作为通用 fusion override 通过 disable checks | 模型路径侵入继续下降，但仍只覆盖 DeepSeek V2/V3/R1 系列 |
@@ -165,6 +165,7 @@ TopK.forward:
 - `DeepEPWaterfillBalancer` 根据 routed experts 的 rank load，为 shared expert 选择目标 rank。
 - latest PR 中 static Waterfill 不再读取 EPLB `rank_load`；它基于当前 rank 的 local routed counts 构造 `WaterfillDispatchPlan(rank_load=local_routed_counts, allow_all_ranks=True, target_total=0)`，避免 runtime all-reduce。
 - dynamic 路径现在通过 SGLang 的 `moe_expert_parallel_all_reduce()` 聚合 routed counts 和本 rank token 数，保证 decode/extend 都参与同一 EP all-reduce。
+- low-batch 语义需要保留: static low-batch 可以跳过 dispatch-plan setup 直接 local shared expansion；dynamic low-batch 仍必须先做 all-reduce 以保持 EP ranks 参与一致，然后再 local expansion，避免 collective 次序不一致。
 - 算法文件内部会把 routed expert id remap 成 DeepEP interleaved layout，并写入 shared expert id。
 
 ### Important Gaps For Our POC
@@ -187,7 +188,7 @@ TopK.forward:
 
 4. **算法文件直接依赖 SGLang 类型**
 
-   最终 PR 把 `DeepEPWaterfillBalancer` 的构造移到 `ModelRunner._prepare_moe_topk()`，TopK 只保存并调用已注入的 balancer；Waterfill 激活则由 `TopK` 读取 global server args。依赖仍是 SGLang-specific: `model_runner.py` 读取 EP rank/world 和模型 config，`topk.py` 读取 global server args，`deepep_waterfill.py` 依赖 `envs`、`StandardTopKOutput` 和 `moe_expert_parallel_all_reduce()`，并访问 global expert location metadata / EP group。抽独立模块时，这些应移到 SGLang adapter。
+   最终 PR 把 `DeepEPWaterfillBalancer` 的构造移到 `ModelRunner._prepare_moe_topk()`，TopK 只保存并调用已注入的 balancer；Waterfill 激活则由 `TopK` 读取 global server args。依赖仍是 SGLang-specific: `model_runner.py` 读取 EP rank/world 和模型 config，`topk.py` 读取 global server args，`deepep_waterfill.py` 依赖 `envs`、`StandardTopKOutput`、DeepEP expert-id layout 和 `moe_expert_parallel_all_reduce()` / EP group。抽独立模块时，这些应移到 SGLang adapter。
 
    因此这里应该按两层理解 PR 的 `DeepEPWaterfillBalancer`:
 
@@ -309,6 +310,7 @@ Waterfill-only static:
 
 Waterfill-only dynamic:
   baseline routed physical top-k -> all-reduce routed counts + token counts -> current_rank_load -> Waterfill
+  low-batch still participates in all-reduce, then falls back to local shared expansion
 
 LPLB + Waterfill:
   all-reduce global per-rank / per-expert load before LPLB

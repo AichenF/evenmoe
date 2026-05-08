@@ -218,6 +218,7 @@ Waterfill-only dynamic:
   -> EP all-reduce routed counts and token counts once
   -> RoutingRequest.current_rank_load
   -> shared-expert Waterfill
+  low-batch dynamic still participates in the all-reduce before local expansion
 
 LPLB + Waterfill:
   logical_topk_ids / local routed counts
@@ -361,7 +362,7 @@ PR 里不是所有改动都进入 generic TopK adapter hook。它们分成三类
 | Waterfill rank-selection policy | Core | 从 `DeepEPWaterfillBalancer` 中抽出 framework-independent policy: 输入 rank load / candidate ranks，输出 shared expert 应落在哪个 rank |
 | `DeepEPWaterfillBalancer` / `deepep_waterfill.py` 中的 SGLang/DeepEP 包装 | Adapter | 保留 `StandardTopKOutput`、DeepEP physical id layout、shared route column materialization、empty output handling 等框架相关部分 |
 | current routed rank load | Adapter | latest PR 的 static path 统计 local routed counts；dynamic path all-reduce current routed counts/token counts；不再依赖 `ExpertLocationMetadata.rank_load` |
-| EP all-reduce | Adapter | 通信由 SGLang adapter 做；`LPLB + Waterfill` 时在 LPLB 前做一次并共享结果，Waterfill 不再重复通信 |
+| EP all-reduce | Adapter | 通信由 SGLang adapter 做；dynamic low-batch 也要先参与 all-reduce 再 local expansion，避免 collective 顺序不一致；`LPLB + Waterfill` 时在 LPLB 前做一次并共享结果，Waterfill 不再重复通信 |
 | `ModelRunner._prepare_moe_topk()` 注入 balancer | SGLang integration glue/runtime | 复用 prepare/inject 生命周期，但注入 generic SGLang routing adapter/router |
 | `server_args.py` backend / shared-fusion guard | SGLang integration glue/config | 新 POC 开关复用这些合法性检查；backend、fusion、`deepep_mode` 不进入 core |
 | `TopK.__init__` 读取 global `enable_deepep_waterfill` | SGLang integration glue / TopK wiring | 不把 global flag 当成 core interface；只保留“base TopK 输出 routed-only columns”的 shape 约束，并由 POC hook/context 控制是否 route |
