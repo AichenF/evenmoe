@@ -401,7 +401,7 @@ TopK / _post_process_topk_ids
 
 | 部分                    | 归属      | 内容                                                                                                                                                                                                     |
 | --------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Waterfill core policy | core    | 根据 request-local `current_rank_load`、可选 `prior_rank_load`、candidate ranks 和 local preference，选择每个 token 的 shared expert target rank                                                                             |
+| Waterfill core policy | core    | 根据 request-local `current_rank_load`、candidate ranks 和 local preference，选择每个 token 的 shared expert target rank                                                                             |
 | DeepEP/SGLang wrapper | adapter | 处理 `StandardTopKOutput`、SGLang placement metadata、local/global rank-load 统计、EP all-reduce、DeepEP interleaved id、把 core 的 shared route materialize 成 DeepEP expanded TopK 第 9 列，以及注入到 `TopK` 的 runtime object |
 
 
