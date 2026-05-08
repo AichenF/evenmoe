@@ -163,11 +163,11 @@ class RoutingLoadView:
     can often consume only rank load.
 
     This is a view/reference contract, not a deep-copy snapshot. Adapters may
-    expose long-lived live tensors here, such as SGLang EPLB ``rank_load``.
-    For live sources, adapters should preserve object identity/storage and only
-    map framework field names to this dataclass. Policies can keep a
-    ``RoutingLoadProvider`` and read this view when routing instead of receiving
-    stable prior load through every ``RoutingRequest``.
+    expose long-lived live tensors here when a framework provides that kind of
+    load state. For live sources, adapters should preserve object
+    identity/storage and only map framework field names to this dataclass.
+    Policies can keep a ``RoutingLoadProvider`` and read this view when routing
+    instead of receiving stable prior load through every ``RoutingRequest``.
     """
 
     current_rank_load: Optional[TensorLike] = None
@@ -193,11 +193,11 @@ class RoutingRequest:
     Stage-based routing enablement belongs to
     ``policy.should_run_for_stage(request.stage)``.
 
-    ``current_rank_load`` is per-request dynamic state supplied by adapters.
-    Stable or slowly changing prior load, such as EPLB-derived ``rank_load``,
-    belongs in an L2 ``RoutingLoadProvider`` or policy state. That avoids
-    repeatedly threading the same live prior through every request while still
-    allowing policies to observe in-place framework updates.
+    ``current_rank_load`` is per-request state supplied by adapters. Stable or
+    slowly changing prior load, if a policy needs it, belongs in an L2
+    ``RoutingLoadProvider`` or policy state. That avoids repeatedly threading
+    the same live prior through every request while still allowing policies to
+    observe in-place framework updates.
     """
 
     layer_id: int
