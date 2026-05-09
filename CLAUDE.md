@@ -6,9 +6,22 @@
 
 - Google Doc: https://docs.google.com/document/d/1xeDxh2sH1atr6DBnoO6QkXjZ8EKTcWa4emsq4Hk76Dw/edit?tab=t.0#heading=h.d3248k5k32jx
 
+## Required Reading Before Any Design Or Refactor
+
+任何对 `core/`、`policies/`、`adapters/` 边界、接口、类型的设计或重构讨论，**必须先读以下文档**。它们是 Stage 2 已交付的架构合约，不是 Waterfill-specific 或可选参考。任何"删/改 core 类型/协议"的提议都必须先证明不违反这几份文档。
+
+- `README.md` — 项目意图、三层正交能力、当前 POC 范围、Repository Skeleton。
+- `docs/architecture.md` — **Stage 2 架构合约**：framework-decoupled 模块边界、L1/L2/L3 责任、Canonical API（`RoutingRequest` / `RoutingDecision` / `TokenRouter` / `RoutingPolicyConfig` / `RoutingLoadProvider` / `RoutingLoadView` / `PlacementSnapshot`）、stage-aware-but-not-stage-bound 原则、core vs adapter 边界、Module Boundary 长期布局。
+- `docs/skeleton.md` — repo directory layout 约定、L1/L2/adapter extension points、API boundary 规则（"Do not import SGLang from `core/` or `policies/`"）、how to add SGLang entrypoint findings。
+- `docs/sglang-integration.md` — SGLang 现有 EPLB flow、PR #19290 改动归属（哪些归 core / 哪些归 adapter / 哪些归 SGLang glue）、Recommended POC Interface、ID-Space Contract、Intrusion Map。
+- `docs/poc-plan.md` — POC 阶段范围、L1 EPLB-only / L2 Waterfill+LPLB / L3 不做 / Metro 不做的边界。
+
+读完后再判断"这个抽象是不是死代码"——很多东西现在 Waterfill 用不到，但是 architecture.md 里给 LPLB / Metro / 历史水位线类算法预留的 hook，不能因为单算法用不到就砍。
+
 ## Agent Workflow
 
 - 每次 coding agent 完成文件修改后，都必须检查 diff/status，并创建 git commit。
+- 涉及 `core/` 任何类型/协议的删除或改名，先阅读上一节列出的所有文档，并在改动说明里指出"哪一份文档的哪一节支持这次改动"。
 
 ## Correct Project Shape
 
