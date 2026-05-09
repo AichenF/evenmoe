@@ -88,7 +88,7 @@ class SGLangPlacementView:
     logical_to_rank_dispatch_physical_map: Optional[Tensor]
 ```
 
-最新 PR head 已删除 `ExpertLocationMetadata.rank_load` 和 balancer 里的 `static_rank_load` 缓存，因此当前 Waterfill 接入不再需要从 EPLB metadata 暴露 long-lived rank-load view。L2 仍然可以保留 `RoutingLoadProvider` 作为其他算法或未来历史水位线的扩展点，但 PR #19290 对齐路径应把 rank load 当作 request-local input 处理。
+最新 PR head 已删除 `ExpertLocationMetadata.rank_load` 和 balancer 里的 `static_rank_load` 缓存，因此当前 Waterfill 接入不再需要从 EPLB metadata 暴露 long-lived rank-load view。L2 仍然可以保留 `RoutingLoadHistoryProvider` 作为其他算法或未来历史水位线的扩展点，但 PR #19290 对齐路径把 rank load 当作 request-local input 处理（通过 canonical 字段 `routed_rank_load` / `active_rank_token_count` 流转，不走 metadata）。
 
 `physical_to_rank_map` 可以由 SGLang adapter 从 global physical expert id 和 `num_local_physical_experts` 推导。它是 placement/topology 信息，不是负载信息；L2 rank-load 字段的语义在 `L2 Prefill Interface` 小节说明。
 
@@ -172,9 +172,9 @@ TopK.forward:
 
 1. **PR TopK Waterfill path 仍没有 stage 输入**
 
-   latest PR head `43fe3d965` 已把 Waterfill 从模型侧 wrapper 整理成 `server_args` 全局开关 + `ModelRunner._prepare_moe_topk()` + `TopK._apply_deepep_waterfill()`，但 `TopK.forward_*()` 仍只接收 `num_token_non_padded` 和 `expert_location_dispatch_info`，没有 `forward_batch.forward_mode`、stage 或 token mask。如果 policy config 限制只在 prefill 或只在 decode 启用，就不能直接复用 `--enable-deepep-waterfill` 作为最终 POC 接口；否则不匹配的 stage 仍可能进入 L2。这个改动说明 TopK remap 边界是好落点，但 POC 还需要显式 `moe_lb_context`。
+   latest PR head `43fe3d965` 已把 Waterfill 从模型侧 wrapper 整理成 `server_args` 全局开关 + `ModelRunner._prepare_moe_topk()` + `TopK._apply_deepep_waterfill()`，但 `TopK.forward_*()` 仍只接收 `num_token_non_padded` 和 `expert_location_dispatch_info`，没有 `forward_batch.forward_mode`、stage 或 token mask。如果 policy config 限制只在 prefill 或只在 decode 启用，就不能直接复用 `--enable-deepep-waterfill` 作为最终 POC 接口；否则不匹配的 stage 仍可能进入 L2。这个改动说明 TopK remap 边界是好落点，但 POC 还需要 `forward_batch` 真正流转到 TopK 这一层。
 
-   本文档里的 `SGLangRoutingContext` 就是这个 `moe_lb_context` 的 proposed adapter-only dataclass；它不是 SGLang 当前已有类型。
+   POC 的解法：把整个 SGLang `ForwardBatch` 直接传给 adapter `WaterfillRuntime.expand_topk(..., forward_batch=fb)`；adapter 内部调用 `_resolve_stage_from_forward_batch` / `_resolve_lb_token_mask` / `_resolve_num_token_non_padded` 抽字段，不需要 SGLang 侧定义新的 staging dataclass（Waterfill 完整覆盖于 core 已有的 `RoutingRequest`）。
 
    不建议让 `TopK` 自己去全局读取 batch 信息。当前可见的 `get_forward_context()` 只在 piecewise CUDA graph runner 的 `set_forward_context(...)` 作用域内设置，不覆盖普通 eager/cuda graph forward，也不是 MoE TopK 的稳定 contract。`num_token_non_padded` 只能处理 padding，不能区分 `EXTEND`、`MIXED`、`DECODE`、`TARGET_VERIFY` 或 draft extend。`ExpertDistributionRecorder.with_forward_pass(...)` 虽然接收 `ForwardBatch`，但它是统计采集路径，没有提供 TopK 可依赖的 batch getter。
 
@@ -182,9 +182,9 @@ TopK.forward:
 
    之前文档里的 "DeepEP normal-only" 已经过期。最终 PR 文档、help 文案和 unit test 都确认 Waterfill 支持 `deepep_mode=auto`、`normal` 或 `low_latency`，并建议 production decode 用 `auto` 或 `low_latency` 保留 CUDA graph。latest PR 中 `SGLANG_DISABLE_STATIC_WATERFILL=1` 的含义是禁用 no-all-reduce static local path，强制 dynamic all-reduce。POC 不应再默认拒绝 `low_latency`；只有具体 adapter path 尚未验证时才单独加 guard。
 
-3. **`static_rank_load` 已删除，Waterfill 的 load input 应回到 request-local**
+3. **`static_rank_load` 已删除，Waterfill 的 load input 走 canonical raw 字段**
 
-   latest PR 删除了 `ExpertLocationMetadata.rank_load`、`DeepEPWaterfillBalancer.static_rank_load` 和 prepare 阶段的 bind/update 调用。当前 PR 的 static path 不是历史水位线模式，而是 "local current routed counts, no all-reduce" 模式；dynamic path 则是 "all-reduced current routed counts + per-rank active token count"。因此 POC 的 Waterfill 接口不应再把 `RoutingLoadView.prior_rank_load` 作为 PR static path 的必需输入。`RoutingLoadProvider` 可以保留给 LPLB、历史统计或其他算法，但 shared-expert Waterfill 对齐最新 PR 时应消费 `RoutingRequest.current_rank_load`。
+   latest PR 删除了 `ExpertLocationMetadata.rank_load`、`DeepEPWaterfillBalancer.static_rank_load` 和 prepare 阶段的 bind/update 调用。当前 PR 的 static path 不是历史水位线模式，而是 "local current routed counts, no all-reduce" 模式；dynamic path 则是 "all-reduced current routed counts + per-rank active token count"。因此 POC 的 Waterfill 接口不应再把 `RoutingLoadHistory.historical_rank_load` 作为 PR static path 的必需输入。`RoutingLoadHistoryProvider` 可以保留给 LPLB、历史统计或其他算法，但 shared-expert Waterfill 对齐最新 PR 时消费 canonical 顶层字段 `RoutingRequest.routed_rank_load`（static / dynamic 都设）和 `RoutingRequest.active_rank_token_count`（dynamic 设、static None）。
 
 4. **算法文件直接依赖 SGLang 类型**
 
@@ -256,9 +256,10 @@ class RoutingRequest:
     layer_id: int
     logical_topk_ids: Tensor
     topk_weights: Tensor
-    placement: PlacementSnapshot
+    placement: Optional[PlacementSnapshot]
     stage: Optional[Literal["prefill", "decode", "mixed", "idle", "speculative"]]
-    current_rank_load: Optional[Tensor]
+    routed_rank_load: Optional[Tensor]                  # per-rank routed expert assignment count
+    active_rank_token_count: Optional[Tensor]           # per-rank active token count (dynamic only)
     token_count: Optional[Tensor]
     lb_token_mask: Optional[Tensor]
     routed_scaling_factor: float
@@ -266,21 +267,23 @@ class RoutingRequest:
 
 
 @dataclass
-class RoutingLoadView:
-    current_rank_load: Optional[Tensor]
-    prior_rank_load: Optional[Tensor]
+class RoutingLoadHistory:
+    live_rank_load: Optional[Tensor]
+    historical_rank_load: Optional[Tensor]
+    historical_expert_load: Optional[Tensor]
+    historical_rank_expert_load: Optional[Tensor]
 
 
-class RoutingLoadProvider:
-    def load_view(self, layer_id: int) -> RoutingLoadView:
+class RoutingLoadHistoryProvider:
+    def load_history(self, layer_id: int) -> RoutingLoadHistory:
         ...
 
 
 @dataclass
 class RoutingPolicyConfig:
     name: str
-    # None means this policy is not gated by stage.
     enabled_stages: Optional[set[Literal["prefill", "decode", "mixed", "idle", "speculative"]]]
+    metadata: Mapping[str, Any]   # per-policy stable config (immutable scalars only)
 
 
 @dataclass
@@ -298,7 +301,12 @@ class TokenRouter:
         ...
 ```
 
-`logical_topk_ids` 不是 logical expert 的聚合分布。shared-expert Waterfill 最终需要的是 per-rank load，而不是必须需要 `physical_to_rank_map`。latest PR 中 static path 从当前 post-remap physical top-k 统计 local routed counts，dynamic path 在此基础上做 EP all-reduce 并加入每 rank active token count。POC adapter 因此应把 Waterfill 所需的 load 放到 `RoutingRequest.current_rank_load`，并由 adapter/policy mode 明确它是 local 还是 global 语义。只有当 core/adapter 要从 framework-neutral physical top-k 自己推导 rank load 时，才需要 `physical_to_rank_map`；只用 logical expert count 直接估算 rank load 会丢失 replicas 和 rank placement 信息。
+`logical_topk_ids` 不是 logical expert 的聚合分布。shared-expert Waterfill 最终需要的是 per-rank load，而不是必须需要 `physical_to_rank_map`。latest PR 中 static path 从当前 post-remap physical top-k 统计 local routed counts，dynamic path 在此基础上做 EP all-reduce 并加入每 rank active token count。POC adapter 因此把 Waterfill 所需的两个 raw 输入放到 canonical 字段 `RoutingRequest.routed_rank_load`（per-rank routed slot 计数）和 `RoutingRequest.active_rank_token_count`（per-rank active token，仅 dynamic 模式提供）：
+
+- Static 模式：adapter 设 `routed_rank_load = local_routed_counts`，`active_rank_token_count = None`。
+- Dynamic 模式：adapter 设 `routed_rank_load = global_routed_counts`（post-AR），`active_rank_token_count = local_tokens_per_rank`（post-AR）。
+
+policy 内部根据 `active_rank_token_count` 是否为 `None` 区分模式。只有当 core/adapter 要从 framework-neutral physical top-k 自己推导 rank load 时，才需要 `physical_to_rank_map`；只用 logical expert count 直接估算 rank load 会丢失 replicas 和 rank placement 信息。
 
 PR dynamic path 之所以能不传 `physical_to_rank_map`，是因为它依赖 SGLang/DeepEP physical id 的分段编号规则: 同一个 rank 上的 physical experts 连续排列，所以 `target_rank = expert_id // experts_per_rank`。例如 `experts_per_rank = 4` 时，physical id `0..3` 属于 rank 0，`4..7` 属于 rank 1。这个规则属于 SGLang/DeepEP adapter 细节，不应变成 core 假设。
 
@@ -306,17 +314,20 @@ PR dynamic path 之所以能不传 `physical_to_rank_map`，是因为它依赖 S
 
 ```text
 Waterfill-only static:
-  baseline routed physical top-k -> local routed counts -> current_rank_load -> Waterfill
+  baseline routed physical top-k -> count_local_routed_per_rank -> RoutingRequest.routed_rank_load (active=None) -> Waterfill
 
 Waterfill-only dynamic:
-  baseline routed physical top-k -> all-reduce routed counts + token counts -> current_rank_load -> Waterfill
+  baseline routed physical top-k -> all-reduce routed counts + token counts
+    -> RoutingRequest.routed_rank_load = global_routed
+       RoutingRequest.active_rank_token_count = local_tokens_per_rank
+    -> Waterfill
   low-batch still participates in all-reduce, then falls back to local shared expansion
 
 LPLB + Waterfill:
   all-reduce global per-rank / per-expert load before LPLB
   -> LPLB chooses routed physical top-k
-  -> derive post-LPLB current_rank_load
-  -> Waterfill consumes post-LPLB current_rank_load
+  -> derive post-LPLB routed_rank_load (+ active_rank_token_count if dynamic)
+  -> Waterfill consumes the post-LPLB canonical fields
 ```
 
 也就是说，组合策略里 EP group 通信应该发生在 LPLB 之前，并由 LPLB 和 Waterfill 共享一次通信结果；Waterfill 不应再单独做第二次 dynamic all-reduce。
@@ -325,77 +336,103 @@ LPLB + Waterfill:
 
 | 字段 | 来源 | 用法 |
 |---|---|---|
-| `RoutingRequest.current_rank_load` | 当前 batch/window 的 routed top-k 统计；static path 可是 local counts，dynamic path 是 all-reduced effective load | latest PR Waterfill 的直接输入 |
-| `RoutingLoadView.prior_rank_load` | 可选历史/先验 per-rank 水位线 | 不再是 latest PR #19290 Waterfill 的必需输入，保留给其他 policy |
+| `RoutingRequest.routed_rank_load` | static: local routed counts；dynamic: post-AR global routed counts | Waterfill 的 raw "A" 输入 |
+| `RoutingRequest.active_rank_token_count` | dynamic only: post-AR per-rank batch size | Waterfill 的 raw "B" 输入；为 None 信号 static 模式 |
+| `RoutingLoadHistory.historical_rank_load` | 可选历史 / 先验 per-rank 水位线 | 不是 PR #19290 Waterfill 的必需输入，保留给其他 policy（LPLB / Metro）|
 
 POC 默认应选择 static 或 dynamic 其中一种模式。
 
-SGLang adapter 可以提供局部 helper，把 core decision 转回 SGLang 对象:
+SGLang adapter 用一个 per-algorithm runtime class 承担"输入 SGLang TopK / 输出 SGLang TopK"的全流程。当前实现是 `WaterfillRuntime`（替代 PR #19290 的 `DeepEPWaterfillBalancer`），住在 `adapters/sglang/waterfill/runtime.py`：
 
 ```python
-@dataclass
-class SGLangRoutingContext:
-    policy: RoutingPolicyConfig
-    stage: Optional[Literal["prefill", "decode", "mixed", "idle", "speculative"]]
-    lb_token_mask: Optional[Tensor]
-    num_token_non_padded: Optional[Tensor]
-
-
-class SGLangRoutingAdapter:
-    def route_topk(
+class WaterfillRuntime:
+    def __init__(
         self,
-        logical_topk_output: StandardTopKOutput,
-        placement: SGLangPlacementView,
-        context: SGLangRoutingContext,
-    ) -> StandardTopKOutput:
+        *,
+        layer_id: int,
+        source_rank: int,
+        world_size: int,
+        num_routed_experts: int,
+        local_preference: float = 1.1,
+        routed_scaling_factor: float = 1.0,
+        enabled_stages: Optional[frozenset[RoutingStage]] = None,
+    ):
         ...
+        self.router = WaterfillL2Router(
+            source_rank=source_rank,
+            local_preference=local_preference,
+            world_size=world_size,
+        )
+
+    def expand_topk(
+        self,
+        topk_output: StandardTopKOutput,
+        num_tokens: int,
+        *,
+        forward_batch=None,         # SGLang ForwardBatch; adapter decomposes internally
+    ) -> StandardTopKOutput:
+        # 1. count_local_routed_per_rank(topk_ids)            -> local_counts
+        # 2. if dynamic: _all_reduce_dynamic_rank_load(...)   -> global, local_tokens
+        # 3. build RoutingRequest(routed_rank_load=..., active_rank_token_count=...,
+        #                         placement=None,
+        #                         policy=RoutingPolicyConfig(name="waterfill",
+        #                             enabled_stages=self.enabled_stages,
+        #                             metadata={"experts_per_rank": ...}))
+        # 4. decision = self.router.route_tokens(request)     -> shared_expert_rank
+        # 5. _expand_topk_with_chosen_rank(...)               -> StandardTopKOutput
 ```
+
+`forward_batch` 整体传进 adapter，由 adapter 内部 `_resolve_stage_from_forward_batch` / `_resolve_lb_token_mask` / `_resolve_num_token_non_padded` 抽出需要的字段——SGLang glue 不需要知道 adapter 用了哪些 `forward_batch` 字段，扩展可消费字段不需要触动 SGLang 代码。
+
+L1 layer 的 `SGLangPlacementAdapter`（producing `PlacementSnapshot` from `ExpertLocationMetadata`）住在 `adapters/sglang/providers.py`，跨 L2 算法共享；GPU 的 load 提取 helper（`count_local_routed_per_rank`，DeepEP layout 假设）住在 `adapters/sglang/load_kernels.py`，同样跨 L2 算法共享。每个 L2 算法 (Waterfill 现在；LPLB / Metro 未来) 拥有一个独立 subpackage `adapters/sglang/<algo>/` 持自己的 runtime + materialize 代码。
 
 推荐插入方式:
 
 下面只描述 online forward data path 的调用顺序，不是完整模块归属清单。完整接入还包括 `server_args` 配置、`ModelRunner` prepare/inject、placement/rank-load refresh、EP communication 和 DeepEP layout writeback。
 
 ```text
-Option A (preferred):
-  DeepseekV2MoE.forward_deepep
-    build minimal SGLangRoutingContext from forward_batch
-    self.topk(..., moe_lb_context=context)
+DeepseekV2MoE.forward_deepep
+  self.topk(hidden_states, router_logits, ..., forward_batch=forward_batch)
 
-  TopK/_post_process_topk_ids
-    logical_topk_ids are available before topk_ids_logical_to_physical(...)
-    placement = placement_adapter.snapshot(
-        layer_id,
-        expert_location_dispatch_info or global ExpertLocationMetadata,
-    )
-    if context allows L2 for this pure prefill/extend batch:
-        adapter calls core route_tokens(logical_topk_ids, placement, context)
-    elif context is MIXED and adapter has an extend-token mask:
-        route only the extend token slice and keep decode tokens unchanged
-    else:
-        bypass L2 and use baseline topk_ids_logical_to_physical(...)
-    adapter applies padding mask + physical/interleaved/shared-slot conversion
+TopK.forward_*(..., forward_batch=forward_batch)
+  topk_output = base TopK select (routed-only when --enable-deepep-waterfill)
+  return self._apply_deepep_waterfill(topk_output, num_tokens, forward_batch=forward_batch)
 
-Option B:
-  DeepseekV2MoE.forward_deepep
-    call TopK in logical-id mode or bypass default expert_location remap
-    call sglang_adapter.route_topk(...) before self.experts(...)
-    use only as a fallback because it is more model-path-specific and higher level
+TopK._apply_deepep_waterfill(topk_output, num_tokens, *, forward_batch)
+  return self.deepep_waterfill_balancer.expand_topk(
+      topk_output, num_tokens, forward_batch=forward_batch,
+  )
+
+WaterfillRuntime.expand_topk(topk_output, num_tokens, *, forward_batch)
+  # adapter decomposes forward_batch internally
+  stage = _resolve_stage_from_forward_batch(forward_batch)
+  lb_token_mask = _resolve_lb_token_mask(forward_batch)
+  num_token_non_padded = _resolve_num_token_non_padded(forward_batch)
+  ...
+  request = RoutingRequest(... stage=stage, lb_token_mask=..., token_count=...,
+                           routed_rank_load=..., active_rank_token_count=...,
+                           policy=RoutingPolicyConfig(name="waterfill",
+                               enabled_stages=self.enabled_stages,
+                               metadata={"experts_per_rank": ...}))
+  decision = self.router.route_tokens(request)
+  return materialize back to StandardTopKOutput
 ```
 
 这个方案拆成两个动作:
 
 | 位置 | 负责什么 | 不负责什么 |
 |---|---|---|
-| `forward_deepep` | 从 `ForwardBatch` 提取 optional stage / token mask，并携带 policy config，构造 `moe_lb_context` | 不做 TopK remap，不做 LPLB/Waterfill routing |
-| `TopK` hook | 在 logical ids 还没被 remap 前，读取 placement metadata，并调用 adapter/core | 不自己猜 stage，不从全局状态隐式读取 `ForwardBatch` |
+| `forward_deepep` | 把 `forward_batch` 透传给 `self.topk(...)` | 不做 TopK remap，不做 LPLB/Waterfill routing，不抽 `forward_batch` 字段 |
+| `TopK` hook | 把 `forward_batch` 进一步透传给 `expand_topk(...)` | 不自己猜 stage，不抽字段 |
+| Adapter `WaterfillRuntime.expand_topk` | 抽 `forward_batch` 字段、做 EP all-reduce、构造 RoutingRequest、调 router、materialize | 不接触 SGLang `forward_deepep` model 层 |
 
-因此 “stage-aware TopK hook” 不是 SGLang 现有名词，而是指 TopK hook 额外拿到 `moe_lb_context` 后再决定是否 route。
+把整个 `forward_batch` 透传到 adapter 的好处是：未来如果 adapter 想消费更多 `forward_batch` 字段（比如 `extend_seq_lens` 等），不需要改 SGLang glue——抽字段全在 adapter 内部。
 
 这样比直接复用 PR 的 `--enable-deepep-waterfill` 路径更适合当前 POC，因为:
 
 - stage guard 清楚，decode、mixed decode tokens 和 Metro 不会被误触发。
 - `forward_batch.num_token_non_padded` 和 `forward_mode` 能显式进入 routing context。
-- `SGLangRoutingContext` 只携带 per-forward 控制信息: optional stage、token mask、policy config。logical->physical mapping 这种 placement 大 tensor 由 adapter 在 TopK hook 处从 `ExpertLocationDispatchInfo` / `ExpertLocationMetadata` 读取，再转换成 `PlacementSnapshot` 传给 core。
+- `forward_batch` 透传给 adapter，由 adapter 抽字段填到 `RoutingRequest` 顶层 (stage / token_count / lb_token_mask) 和 policy.metadata 配置 (experts_per_rank 等)；不必新建 SGLang-side staging dataclass。logical->physical mapping 这种 placement 大 tensor 由 adapter 在 TopK hook 处从 `ExpertLocationDispatchInfo` / `ExpertLocationMetadata` 读取，再转换成 `PlacementSnapshot` 传给 core（Waterfill 不消费 placement，LPLB 接入时会消费）。
 - Waterfill、后续 LPLB 都可以共享同一个 `route_tokens()` 接口。
 - EP all-reduce 是 SGLang runtime 细节，由 adapter 屏蔽；`LPLB + Waterfill` 组合时这次通信应在 LPLB 前发生一次，并把 post-LPLB rank load 传给 Waterfill。
 - logical/physical id 边界清楚，核心算法不会误读 SGLang 已 remap 的 physical ids。
@@ -430,8 +467,8 @@ PR 中不属于 generic TopK hook 本身的改动，也不是“什么都不放�
 |---|---|---|
 | `server_args.py` | 新增 POC 开关，例如 `--enable-moe-load-balancer` / `--moe-lb-policy waterfill`；借鉴 PR 自动切到 DeepEP、强制 shared fusion；与 PR 对齐时允许 `deepep_mode=auto/normal/low_latency`，只有具体 adapter 不支持时再显式 guard | 控制入口和非法组合保护 |
 | `model_runner.py` | 借鉴 PR 的 `_prepare_moe_topk()`，在 `load_model()` 后遍历 TopK modules 并注入 SGLang routing adapter/router；rebalance 后需要刷新或 lazy-read placement view | runtime prepare、EP rank/world、模型遍历都属于 SGLang adapter 层 |
-| `topk.py` / `_post_process_topk_ids` 或等价 TopK hook | 在 PR 新增的 TopK Waterfill apply 落点上扩展 `moe_lb_context`；在 logical ids 被 SGLang remap 成 physical ids 前调用 adapter，或允许 adapter 接管 remap | generic L2 必须看到 logical top-k，同时必须 stage-aware；当前 PR 的 Waterfill 是 stage-less global path |
-| `deepseek_v2.py::forward_deepep` | 只构造并传递最小 `SGLangRoutingContext`，包含 optional stage / `num_token_non_padded` / optional token mask；fallback 方案才在这里直接调用 adapter | stage gating 由 core policy config 判断，避免把 forward path 变成 routing 编排层 |
+| `topk.py` / `_post_process_topk_ids` 或等价 TopK hook | 在 PR 新增的 TopK Waterfill apply 落点上加一个 `forward_batch` kwarg；hook 直接把 `forward_batch` 透传给 `expand_topk(...)`，不抽字段 | generic L2 必须看到 logical top-k，同时必须 stage-aware；adapter 内部抽字段保持 SGLang 侧 glue 不冗长 |
+| `deepseek_v2.py::forward_deepep` | 把 `forward_batch` 透传给 `self.topk(...)`，不抽字段 | stage gating 由 core policy config 判断，由 adapter 在 RoutingRequest 构造时填入 |
 | `expert_location.py` / adapter | 从 `ExpertLocationMetadata` 提供 per-layer `SGLangPlacementView`；把 placement mapping 转成 `PlacementSnapshot` | L1/L2 边界需要拆清: placement 归 L1；Waterfill rank load 由 routing adapter 从当前 TopK 统计 |
 | `eplb_manager.py` | runtime rebalance 后通知/刷新 router placement view，或让 router lazy read global metadata | L2 需要看到 SGLang EPLB 最新 placement |
 | `layers/moe/deepep_waterfill.py` 或新模块 | 保留 Waterfill kernels，但剥离 SGLang global/env/TopK 类型依赖 | 后续抽独立模块 |

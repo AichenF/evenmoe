@@ -1,11 +1,9 @@
-"""L2 routing policy implementations live here."""
+"""L2 routing policy implementations live here.
 
-from moe_load_balancer.policies.l2.waterfill import (
-    SharedExpertWaterfillPolicy,
-    WaterfillPolicyConfig,
-)
+The actual ``WaterfillL2Router`` import lives at
+``moe_load_balancer.policies.l2.waterfill`` and requires ``torch`` and
+``triton``. We avoid eagerly importing it here so dev environments without
+``triton`` can still consume the framework-neutral core contracts.
+"""
 
-__all__ = [
-    "SharedExpertWaterfillPolicy",
-    "WaterfillPolicyConfig",
-]
+__all__: list[str] = []

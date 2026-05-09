@@ -6,19 +6,14 @@ from moe_load_balancer import (
     PlacementProvider,
     PlacementSnapshot,
     RoutingDecision,
-    RoutingLoadProvider,
-    RoutingLoadView,
+    RoutingLoadHistory,
+    RoutingLoadHistoryProvider,
     RoutingPolicyConfig,
     RoutingRequest,
     RoutingStage,
     TokenRouter,
 )
-from moe_load_balancer.adapters.sglang import (
-    SGLangPlacementAdapter,
-    SGLangRoutingLoadProvider,
-    SGLangRoutingAdapter,
-    SGLangRoutingContext,
-)
+from moe_load_balancer.adapters.sglang import SGLangPlacementAdapter
 
 
 class _PassthroughRouter:
@@ -29,11 +24,11 @@ class _PassthroughRouter:
         )
 
 
-class _LoadProvider:
-    def __init__(self, view: RoutingLoadView):
+class _LoadHistoryProvider:
+    def __init__(self, view: RoutingLoadHistory):
         self._view = view
 
-    def load_view(self, layer_id: int) -> RoutingLoadView:
+    def load_history(self, layer_id: int) -> RoutingLoadHistory:
         return self._view
 
 
@@ -119,11 +114,11 @@ class TestRoutingPolicyConfig:
             RoutingPolicyConfig.from_value(None)  # type: ignore[arg-type]
 
     def test_metadata_is_read_only(self):
-        policy = RoutingPolicyConfig(name="waterfill", metadata={"mode": "static"})
+        policy = RoutingPolicyConfig(name="waterfill", metadata={"experts_per_rank": 4})
 
-        assert policy.metadata["mode"] == "static"
+        assert policy.metadata["experts_per_rank"] == 4
         with pytest.raises(TypeError):
-            policy.metadata["mode"] = "dynamic"  # type: ignore[index]
+            policy.metadata["experts_per_rank"] = 8  # type: ignore[index]
 
 
 @pytest.mark.unit
@@ -144,15 +139,24 @@ class TestFrozenDataclasses:
         with pytest.raises(FrozenInstanceError):
             req.layer_id = 1  # type: ignore[misc]
 
+    def test_routing_request_placement_is_optional(self):
+        # Algorithms like Waterfill skip logical->physical translation and pass None.
+        req = RoutingRequest(
+            layer_id=0,
+            logical_topk_ids=[[0]],
+            topk_weights=[[1.0]],
+        )
+        assert req.placement is None
+
     def test_routing_decision_is_frozen(self):
         decision = RoutingDecision(routed_physical_topk_ids=[[0]], topk_weights=[[1.0]])
         with pytest.raises(FrozenInstanceError):
             decision.routed_physical_topk_ids = [[1]]  # type: ignore[misc]
 
-    def test_routing_load_view_is_frozen(self):
-        snapshot = RoutingLoadView(current_rank_load=[1, 2])
+    def test_routing_load_history_is_frozen(self):
+        snapshot = RoutingLoadHistory(historical_rank_load=[1, 2])
         with pytest.raises(FrozenInstanceError):
-            snapshot.current_rank_load = [3, 4]  # type: ignore[misc]
+            snapshot.historical_rank_load = [3, 4]  # type: ignore[misc]
 
 
 @pytest.mark.unit
@@ -160,19 +164,15 @@ class TestProtocolConformance:
     def test_local_router_satisfies_token_router(self):
         assert isinstance(_PassthroughRouter(), TokenRouter)
 
-    def test_local_load_provider_satisfies_provider(self):
-        provider = _LoadProvider(RoutingLoadView(prior_rank_load=[1, 2]))
-        assert isinstance(provider, RoutingLoadProvider)
+    def test_local_load_history_provider_satisfies_protocol(self):
+        provider = _LoadHistoryProvider(RoutingLoadHistory(historical_rank_load=[1, 2]))
+        assert isinstance(provider, RoutingLoadHistoryProvider)
 
     def test_sglang_placement_adapter_satisfies_provider(self):
         # Construction succeeds without SGLang installed; isinstance against
         # a runtime_checkable Protocol verifies the method shape only.
         adapter = SGLangPlacementAdapter(metadata_source=object())
         assert isinstance(adapter, PlacementProvider)
-
-    def test_sglang_load_provider_satisfies_provider(self):
-        provider = SGLangRoutingLoadProvider(metadata_source=object())
-        assert isinstance(provider, RoutingLoadProvider)
 
 
 @pytest.mark.unit
@@ -194,7 +194,6 @@ class TestTokenRouterProtocol:
             layer_id=0,
             logical_topk_ids=[[0]],
             topk_weights=[[1.0]],
-            placement=_placement(num_logical=1, num_physical=1),
             policy=RoutingPolicyConfig(name="waterfill"),
         )
 
@@ -207,32 +206,33 @@ class TestTokenRouterProtocol:
             layer_id=0,
             logical_topk_ids=[[0]],
             topk_weights=[[1.0]],
-            placement=_placement(num_logical=1, num_physical=1),
             policy="waterfill",
         )
 
         assert request.policy == RoutingPolicyConfig(name="waterfill")
 
-    def test_rank_load_fields_can_be_live_references(self):
-        current_rank_load = [1, 2]
-        prior_rank_load = [10, 20]
-        load_view = RoutingLoadView(prior_rank_load=prior_rank_load)
+    def test_load_inputs_can_be_live_references(self):
+        routed_rank_load = [1, 2]
+        active_rank_token_count = [10, 20]
         request = RoutingRequest(
             layer_id=0,
             logical_topk_ids=[[0]],
             topk_weights=[[1.0]],
-            placement=_placement(num_logical=1, num_physical=1),
             policy="waterfill",
-            current_rank_load=current_rank_load,
+            routed_rank_load=routed_rank_load,
+            active_rank_token_count=active_rank_token_count,
         )
 
-        current_rank_load[1] = 3
-        prior_rank_load[0] = 30
+        # Adapters may pass live tensor references; mutating the underlying
+        # sequence after RoutingRequest construction is observable through
+        # the request, by design.
+        routed_rank_load[1] = 3
+        active_rank_token_count[0] = 30
 
-        assert request.current_rank_load is current_rank_load
-        assert load_view.prior_rank_load is prior_rank_load
-        assert request.current_rank_load == [1, 3]
-        assert load_view.prior_rank_load == [30, 20]
+        assert request.routed_rank_load is routed_rank_load
+        assert request.active_rank_token_count is active_rank_token_count
+        assert request.routed_rank_load == [1, 3]
+        assert request.active_rank_token_count == [30, 20]
 
     def test_request_rejects_positional_construction(self):
         with pytest.raises(TypeError):
@@ -240,26 +240,8 @@ class TestTokenRouterProtocol:
 
 
 @pytest.mark.unit
-class TestSGLangAdapterStubs:
+class TestSGLangPlacementAdapterStub:
     def test_placement_adapter_is_unimplemented(self):
         adapter = SGLangPlacementAdapter(metadata_source=object())
         with pytest.raises(NotImplementedError):
             adapter.snapshot(layer_id=0)
-
-    def test_routing_adapter_is_unimplemented(self):
-        adapter = SGLangRoutingAdapter(
-            router=_PassthroughRouter(),
-            placement_provider=SGLangPlacementAdapter(metadata_source=object()),
-        )
-        context = SGLangRoutingContext(
-            policy="disabled",
-            stage=RoutingStage.PREFILL,
-        )
-        assert context.policy == RoutingPolicyConfig(name="disabled")
-        with pytest.raises(NotImplementedError):
-            adapter.route_topk(layer_id=0, logical_topk_output=None, context=context)
-
-    def test_load_provider_is_unimplemented(self):
-        provider = SGLangRoutingLoadProvider(metadata_source=object())
-        with pytest.raises(NotImplementedError):
-            provider.load_view(layer_id=0)

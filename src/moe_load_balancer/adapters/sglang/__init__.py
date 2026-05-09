@@ -1,21 +1,18 @@
-"""SGLang adapter skeleton."""
+"""SGLang adapter package.
 
-from moe_load_balancer.adapters.sglang.context import SGLangRoutingContext
-from moe_load_balancer.adapters.sglang.load import SGLangRoutingLoadProvider
-from moe_load_balancer.adapters.sglang.placement import SGLangPlacementAdapter
-from moe_load_balancer.adapters.sglang.routing import SGLangRoutingAdapter
-from moe_load_balancer.adapters.sglang.waterfill import (
-    SGLangWaterfillDispatchPlan,
-    build_dynamic_waterfill_dispatch_plan,
-    build_static_waterfill_dispatch_plan,
-)
+Top-level convenience exports are limited to symbols that do **not** require
+``torch`` / ``triton`` to import. Callers that need GPU runtime helpers
+(``count_local_routed_per_rank``, ``WaterfillRuntime``) must import them from
+the explicit submodule path so dev environments without ``triton`` can still
+import this package and run the framework-neutral contract tests.
+
+- ``SGLangPlacementAdapter`` (this re-export): pure CPU, no triton.
+- ``moe_load_balancer.adapters.sglang.load_kernels``: needs torch + triton.
+- ``moe_load_balancer.adapters.sglang.waterfill``: needs torch + triton + sglang.
+"""
+
+from moe_load_balancer.adapters.sglang.providers import SGLangPlacementAdapter
 
 __all__ = [
     "SGLangPlacementAdapter",
-    "SGLangRoutingLoadProvider",
-    "SGLangRoutingAdapter",
-    "SGLangRoutingContext",
-    "SGLangWaterfillDispatchPlan",
-    "build_dynamic_waterfill_dispatch_plan",
-    "build_static_waterfill_dispatch_plan",
 ]

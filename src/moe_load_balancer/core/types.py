@@ -46,6 +46,15 @@ class RoutingPolicyConfig:
     still rejects requests with unknown stage.
     The policy implementation may still ignore ``RoutingRequest.stage`` after
     this common gating decision.
+
+    ``metadata`` is for **per-policy stable configuration** (immutable scalars
+    such as algorithm hyperparameters, layout assumptions, mode hints).
+    Tensors must NOT be placed in ``metadata``: per-step tensor inputs flow
+    through ``RoutingRequest`` top-level fields (``current``-batch state) or
+    ``RoutingLoadHistoryProvider`` (long-lived load views). Putting a tensor
+    here would create misleading immutability semantics because the frozen
+    dataclass + ``MappingProxyType`` wrapper does not prevent in-place updates
+    to the wrapped tensor, only to the dictionary slot.
     """
 
     DISABLED: ClassVar[str] = "disabled"
@@ -155,25 +164,32 @@ class PlacementPlan:
 
 
 @dataclass(frozen=True)
-class RoutingLoadView:
-    """Optional L2 load view shared by routing policies.
+class RoutingLoadHistory:
+    """Long-lived L2 load view exposed by a ``RoutingLoadHistoryProvider``.
 
-    This is intentionally broader than rank load. LP/LB-style policies may need
-    per-expert or per-rank/per-expert statistics, while shared-expert Waterfill
-    can often consume only rank load.
+    This view captures load state that persists across batches (live tensor
+    references the framework maintains continuously, EWMA / aggregated
+    historical statistics, per-expert and per-rank-per-expert breakdowns).
+    Per-batch transient state (``current_rank_load`` style) flows through
+    ``RoutingRequest`` top-level fields instead, so policies that only need
+    per-batch view do not have to subscribe to a provider.
 
-    This is a view/reference contract, not a deep-copy snapshot. Adapters may
-    expose long-lived live tensors here when a framework provides that kind of
-    load state. For live sources, adapters should preserve object
-    identity/storage and only map framework field names to this dataclass.
-    Policies can keep a ``RoutingLoadProvider`` and read this view when routing
-    instead of receiving stable prior load through every ``RoutingRequest``.
+    ``live_rank_load`` is intentionally distinct from request-local
+    ``RoutingRequest.routed_rank_load`` / ``active_rank_token_count``: it is a
+    reference-style channel for frameworks that maintain a long-lived live
+    counter (e.g. SGLang EPLB recorder). Adapters expose the live tensor
+    without copying so policies can read the latest value each routing call.
+
+    LP / LB-style policies (LPLB, Metro) use ``historical_expert_load`` and
+    ``historical_rank_expert_load`` for the per-expert and 2-D
+    ``[num_ranks, num_experts_per_rank]`` views the LP solver needs.
+    Shared-expert Waterfill does not consume this view at all.
     """
 
-    current_rank_load: Optional[TensorLike] = None
-    prior_rank_load: Optional[TensorLike] = None
-    physical_expert_load: Optional[TensorLike] = None
-    rank_expert_load: Optional[TensorLike] = None
+    live_rank_load: Optional[TensorLike] = None
+    historical_rank_load: Optional[TensorLike] = None
+    historical_expert_load: Optional[TensorLike] = None
+    historical_rank_expert_load: Optional[TensorLike] = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -182,30 +198,45 @@ class RoutingRequest:
     """Framework-neutral L2 routing request.
 
     Tensor shapes (when supplied):
-        logical_topk_ids:   ``[num_tokens, top_k]`` logical expert ids.
-        topk_weights:       ``[num_tokens, top_k]`` matching gate weights.
-        current_rank_load: ``[ep_size]`` current-batch/window rank load.
-        token_count:      scalar or ``[1]`` total live tokens.
-        lb_token_mask:    ``[num_tokens]`` bool mask of LB-eligible tokens.
+        logical_topk_ids:        ``[num_tokens, top_k]`` logical expert ids.
+        topk_weights:            ``[num_tokens, top_k]`` matching gate weights.
+        routed_rank_load:        ``[ep_size]`` per-rank routed expert assignment
+                                 count (post-collective if applicable).
+                                 Static: local routed counts (no collective).
+                                 Dynamic: post-EP-all-reduce global routed.
+        active_rank_token_count: ``[ep_size]`` per-rank active token count
+                                 (post-collective). Set only in dynamic mode;
+                                 ``None`` in static mode.
+        token_count:             scalar or ``[1]`` total live tokens.
+        lb_token_mask:           ``[num_tokens]`` bool mask of LB-eligible
+                                 tokens.
 
     ``stage`` is optional runtime context. It lets framework adapters describe
     the current request phase, but algorithms are not required to branch on it.
     Stage-based routing enablement belongs to
     ``policy.should_run_for_stage(request.stage)``.
 
-    ``current_rank_load`` is per-request state supplied by adapters. Stable or
-    slowly changing prior load, if a policy needs it, belongs in an L2
-    ``RoutingLoadProvider`` or policy state. That avoids repeatedly threading
-    the same live prior through every request while still allowing policies to
-    observe in-place framework updates.
+    ``placement`` is optional. Algorithms that require logical->physical
+    translation (LPLB, Metro) must validate it is non-None. Algorithms that
+    operate on already-physical IDs (shared-expert Waterfill) leave it ``None``.
+
+    ``routed_rank_load`` and ``active_rank_token_count`` are the canonical raw
+    inputs for shared-expert Waterfill. The presence of
+    ``active_rank_token_count`` signals dynamic mode; its absence signals
+    static mode. The policy combines them as needed (e.g. ``effective =
+    routed + active`` for Waterfill dynamic). Adapters compute these from
+    framework state (e.g. SGLang adapter via ``count_local_routed_per_rank``
+    and an EP-group all-reduce); callers in CPU-only test paths can pass plain
+    sequences.
     """
 
     layer_id: int
     logical_topk_ids: TensorLike
     topk_weights: TensorLike
-    placement: PlacementSnapshot
+    placement: Optional[PlacementSnapshot] = None
     stage: Optional[RoutingStage] = None
-    current_rank_load: Optional[TensorLike] = None
+    routed_rank_load: Optional[TensorLike] = None
+    active_rank_token_count: Optional[TensorLike] = None
     token_count: Optional[TensorLike] = None
     lb_token_mask: Optional[TensorLike] = None
     routed_scaling_factor: float = 1.0

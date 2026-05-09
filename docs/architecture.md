@@ -21,7 +21,7 @@
 - **Framework independent**: 核心模块不 import 推理框架内部类型。
 - **Orthogonal layers**: L1/L2/L3 可独立开关，也可组合使用。
 - **Lossless correctness**: 不改变 router top-k 逻辑 expert；routed expert 重映射只能在同一逻辑 expert 的物理副本内选择，shared expert Waterfill 只能追加等价的 shared dispatch slot。
-- **Stage aware but not stage-bound**: prefill 和 decode 的优化目标可能不同，但不是所有算法都必须按 stage 分叉。`RoutingRequest.stage` 是 optional runtime context；`RoutingPolicyConfig.enabled_stages` 是 core 级通用 gating，允许一个 policy 只在 prefill、只在 decode、两者都运行，或完全不按 stage 限制。`enabled_stages=None` 不要求 stage 已知；显式 stage set 要求 `request.stage` 已知且匹配。当前 SGLang POC 只复用 SGLang EPLB 作为 L1 placement source；新的 L1 optimizer、Metro 留作后续。
+- **Stage aware but not stage-bound**: prefill 和 decode 的优化目标可能不同，但不是所有算法都必须按 stage 分叉。`RoutingRequest.stage` 是 optional runtime context；`RoutingPolicyConfig.enabled_stages` 是 core 级通用 gating，允许一个 policy 只在 prefill、只在 decode、两者都运行，或完全不按 stage 限制。`enabled_stages=None` 不要求 stage 已知；显式 stage set 要求 `request.stage` 已知且匹配。`RoutingPolicyConfig.metadata` 只装 per-policy 稳定 config（scalar / immutable hyperparams 如 `experts_per_rank`、`local_preference`）；tensor 输入必须走 `RoutingRequest` 顶层 canonical 字段或 `RoutingLoadHistoryProvider`，不能塞 metadata。当前 SGLang POC 只复用 SGLang EPLB 作为 L1 placement source；新的 L1 optimizer、Metro 留作后续。
 - **Product path**: SGLang first validation，TensorRT-LLM MoE plugin productization。
 
 ## Core Vs Adapter Boundary
@@ -117,8 +117,16 @@ class RoutingRequest:
     layer_id: int
     logical_topk_ids: Tensor
     topk_weights: Tensor
-    placement: PlacementSnapshot
+    placement: Optional[PlacementSnapshot]                  # Optional: algorithms that
+                                                             # don't need logical->physical
+                                                             # translation (e.g. shared-expert
+                                                             # Waterfill) leave it None.
     stage: Optional[Literal["prefill", "decode", "mixed", "idle", "speculative"]]
+    routed_rank_load: Optional[Tensor]                       # per-rank routed expert assignment
+                                                             # count (post-collective if applicable).
+    active_rank_token_count: Optional[Tensor]                # per-rank active token count
+                                                             # (post-collective). None signals
+                                                             # static mode (no all-reduce).
     token_count: Optional[Tensor]
     lb_token_mask: Optional[Tensor]
     routed_scaling_factor: float
@@ -127,9 +135,15 @@ class RoutingRequest:
 
 @dataclass
 class RoutingPolicyConfig:
-    name: str
-    # None means the policy is stage-agnostic and may run with or without stage.
+    name: str                                                # plain string identifier
     enabled_stages: Optional[set[Literal["prefill", "decode", "mixed", "idle", "speculative"]]]
+    metadata: Mapping[str, Any]                              # per-policy stable config:
+                                                             # immutable scalars only
+                                                             # (e.g. experts_per_rank,
+                                                             # local_preference).
+                                                             # Tensors MUST go through
+                                                             # RoutingRequest top-level fields
+                                                             # or RoutingLoadHistoryProvider.
 
 
 @dataclass
@@ -137,7 +151,7 @@ class RoutingDecision:
     routed_physical_topk_ids: Tensor
     topk_weights: Tensor
     shared_expert_rank: Optional[Tensor] = None
-    stats: Optional[RoutingStats] = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 class MoELoadBalancer:
@@ -155,6 +169,31 @@ class MoELoadBalancer:
 ```
 
 `logical_topk_ids` 是 token-level top-k，不是 logical expert 聚合分布。L2 如果要从 routed top-k 推导当前 per-rank load，必须结合 `PlacementSnapshot` 中的 physical/rank mapping；shared-expert Waterfill 不能只看 logical expert count。
+
+`routed_rank_load` 和 `active_rank_token_count` 是 shared-expert Waterfill 的 raw 输入：
+
+- **Static 模式**：adapter 在不做 all-reduce 的情况下传入 `routed_rank_load = local_routed_counts`（本 rank 视角的 per-rank routed slot 计数），`active_rank_token_count = None`。
+- **Dynamic 模式**：adapter 通过 EP all-reduce 拿到 `routed_rank_load = global_routed_counts`（全局每 rank routed slot 总数）和 `active_rank_token_count = local_tokens_per_rank`（每 rank 自己 batch 大小）。
+
+policy 内部根据 `active_rank_token_count` 是否 `None` 区分模式（不是显式 mode flag）。LPLB / Metro 等其它 L2 算法可以复用 `routed_rank_load` 字段；`active_rank_token_count` 是 shared-expert 算法特有的 raw 输入。
+
+长期 / 跨 batch 的 load 视图（live tensor 引用、historical EWMA、per-expert 或 per-(rank, expert) 视角）由 `RoutingLoadHistoryProvider` 暴露：
+
+```python
+@dataclass
+class RoutingLoadHistory:
+    live_rank_load: Optional[Tensor]                     # framework-maintained live counter
+    historical_rank_load: Optional[Tensor]               # EWMA / aggregated per-rank
+    historical_expert_load: Optional[Tensor]             # per-physical-expert (LPLB)
+    historical_rank_expert_load: Optional[Tensor]        # 2-D [num_ranks, num_experts_per_rank] (LPLB)
+
+
+class RoutingLoadHistoryProvider:
+    def load_history(self, layer_id: int) -> RoutingLoadHistory:
+        ...
+```
+
+Per-batch 的 transient state（Waterfill `routed_rank_load` / `active_rank_token_count`）走 `RoutingRequest` 顶层字段；跨 batch 的 long-lived state 走 `RoutingLoadHistoryProvider`。两条通道职责互斥。
 
 SGLang adapter 另提供 `PlacementProvider.snapshot(layer_id) -> PlacementSnapshot`。SGLang 可以有 `modify_topk()` / `route_topk()` 这样的局部 helper，但它应被视为 `route_tokens()` 在 SGLang TopK 数据结构上的 adapter，不是架构级接口。
 

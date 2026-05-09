@@ -1,391 +1,361 @@
+"""Shared-expert Waterfill L2 router.
+
+The algorithm is a degenerate L2 case: it does not modify the routed top-k
+(which already lives in physical-id space when the adapter calls in), and only
+decides which EP rank receives each token's shared expert. Static and dynamic
+modes are auto-distinguished by whether ``RoutingRequest.active_rank_token_count``
+is provided:
+
+- Static (no EP all-reduce): adapter passes ``routed_rank_load = local_routed
+  counts`` and ``active_rank_token_count = None``. The Triton kernel derives
+  ``target_total`` internally from ``rank_load.sum() / topk`` (correct because
+  ``rank_load`` is pure routed counts in this case).
+
+- Dynamic (post EP all-reduce): adapter passes ``routed_rank_load`` (post-AR
+  global routed counts) and ``active_rank_token_count`` (post-AR per-rank
+  active token counts). ``rank_load`` becomes ``routed + active`` (effective
+  load), and the policy explicitly precomputes ``target_total`` because the
+  kernel's naive derivation would be incorrect on the combined tensor.
+
+The asymmetric handling of ``target_total`` (kernel-derive in static,
+precompute in dynamic) is preserved from PR #19290 as a deliberate performance
+optimization: it avoids an extra host-GPU sync per layer in the static path.
+"""
+
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional
+
+import torch
+import triton
+import triton.language as tl
+from torch import Tensor
 
 from moe_load_balancer.core.l2 import TokenRouter
-from moe_load_balancer.core.types import (
-    PlacementSnapshot,
-    RoutingDecision,
-    RoutingRequest,
-    TensorLike,
-)
+from moe_load_balancer.core.types import RoutingDecision, RoutingRequest
+
+# Local-rank preference fraction for Waterfill weighting (11/10 = 1.1x).
+_LOCAL_PREF_NUMER = 11
+_LOCAL_PREF_DENOM = 10
 
 
-@dataclass(frozen=True)
-class WaterfillPolicyConfig:
-    """Framework-neutral knobs for shared-expert Waterfill.
+class WaterfillL2Router(TokenRouter):
+    """Shared-expert Waterfill rank selection router.
 
-    This config intentionally describes only the policy decision. Framework
-    adapters remain responsible for producing ``current_rank_load`` and
-    materializing the returned shared-expert rank into their TopK layout.
+    Implements ``core.TokenRouter``. ``route_tokens`` consumes a
+    ``RoutingRequest`` whose canonical fields carry per-batch state:
+
+    - ``request.routed_rank_load``: per-rank routed expert assignment count.
+    - ``request.active_rank_token_count``: per-rank active token count
+      (set only in dynamic mode; ``None`` signals static mode).
+    - ``request.policy.metadata["experts_per_rank"]``: DeepEP-style layout
+      assumption (each rank holds N contiguously-numbered physical experts).
+      This is a stable per-policy config string field, not a tensor.
+
+    The router does not consume ``request.placement`` (Waterfill operates on
+    already-physical IDs handed by the adapter).
     """
 
-    local_rank: int = 0
-    local_preference: float = 1.1
-    allow_all_ranks: bool = True
-    target_total: Optional[int] = None
-    routed_rank_load: Optional[TensorLike] = None
-
-    @classmethod
-    def from_request(cls, request: RoutingRequest) -> "WaterfillPolicyConfig":
-        metadata = request.policy.metadata
-        return cls(
-            local_rank=int(metadata.get("local_rank", 0)),
-            local_preference=float(metadata.get("local_preference", 1.1)),
-            allow_all_ranks=_metadata_bool(metadata.get("allow_all_ranks", True)),
-            target_total=(
-                None
-                if metadata.get("target_total") is None
-                else _positive_or_none(metadata["target_total"], "target_total")
-            ),
-            routed_rank_load=metadata.get("routed_rank_load"),
-        )
-
-    def __post_init__(self) -> None:
-        if self.local_rank < 0:
-            raise ValueError("WaterfillPolicyConfig.local_rank must be non-negative.")
-        if self.local_preference <= 0:
-            raise ValueError("WaterfillPolicyConfig.local_preference must be positive.")
-        if self.target_total is not None and self.target_total < 0:
-            raise ValueError("WaterfillPolicyConfig.target_total must be non-negative.")
-
-
-class SharedExpertWaterfillPolicy(TokenRouter):
-    """Example L2 policy for shared-expert Waterfill.
-
-    The policy consumes request-local rank load and chooses the target EP rank
-    for each token's shared expert. It does not encode framework-specific expert
-    IDs, append TopK columns, or call collectives. Those are adapter
-    responsibilities.
-
-    This class is a reference implementation of the framework-neutral
-    ``TokenRouter`` interface. High-throughput integrations should use an
-    adapter-owned vectorized implementation for their runtime layout.
-    """
+    def __init__(
+        self,
+        *,
+        source_rank: int,
+        local_preference: float = 1.1,
+        world_size: int,
+    ):
+        if world_size <= 0:
+            raise ValueError("WaterfillL2Router.world_size must be positive.")
+        if not (0 <= source_rank < world_size):
+            raise ValueError(
+                "WaterfillL2Router.source_rank must satisfy 0 <= source_rank < world_size."
+            )
+        if local_preference <= 0:
+            raise ValueError("WaterfillL2Router.local_preference must be positive.")
+        self.source_rank = source_rank
+        self.local_preference = local_preference
+        self.world_size = world_size
 
     def route_tokens(self, request: RoutingRequest) -> RoutingDecision:
-        routed_physical_topk_ids = _logical_to_physical_topk(
-            request.logical_topk_ids,
-            request.placement,
-        )
+        # Stage gating using the canonical core protocol path.
         if not request.policy.should_run_for_stage(request.stage):
             return RoutingDecision(
-                routed_physical_topk_ids=routed_physical_topk_ids,
+                routed_physical_topk_ids=request.logical_topk_ids,
                 topk_weights=request.topk_weights,
                 shared_expert_rank=None,
                 metadata={"policy": request.policy.name, "skipped": True},
             )
 
-        if request.current_rank_load is None:
-            raise ValueError("SharedExpertWaterfillPolicy requires current_rank_load.")
+        topk_ids = request.logical_topk_ids
+        if not isinstance(topk_ids, Tensor):
+            raise TypeError("WaterfillL2Router requires torch.Tensor topk_ids.")
+        topk_size = topk_ids.shape[1]
 
-        config = WaterfillPolicyConfig.from_request(request)
-        rank_load = _as_number_list(request.current_rank_load, "current_rank_load")
-        _validate_rank_load_values(rank_load, "current_rank_load")
-        if config.local_rank >= len(rank_load):
-            raise ValueError("WaterfillPolicyConfig.local_rank must be smaller than rank count.")
-        routed_rank_load = None
-        if config.routed_rank_load is not None:
-            # Dynamic Waterfill can use effective load for rank capacity while
-            # deriving the active token count from routed load.
-            routed_rank_load = _as_number_list(config.routed_rank_load, "routed_rank_load")
-            _validate_rank_load_values(routed_rank_load, "routed_rank_load")
-            if len(routed_rank_load) != len(rank_load):
-                raise ValueError("routed_rank_load must match current_rank_load length.")
-
-        topk_rows = _as_2d_int_list(routed_physical_topk_ids, "routed_physical_topk_ids")
-        target_total = _target_total(
-            rank_load=rank_load,
-            routed_rank_load=routed_rank_load,
-            topk_size=_topk_size(topk_rows),
-            rank_count=len(rank_load),
-            configured=config.target_total,
-        )
-        shared_expert_rank = [
-            _select_rank_for_token(
-                token_index=i,
-                physical_topk=row,
-                rank_load=rank_load,
-                placement=request.placement,
-                config=config,
-                target_total=target_total,
+        routed = request.routed_rank_load
+        if routed is None or not isinstance(routed, Tensor):
+            raise ValueError(
+                "WaterfillL2Router requires routed_rank_load as a torch.Tensor."
             )
-            for i, row in enumerate(topk_rows)
-        ]
+
+        active = request.active_rank_token_count
+        if active is not None and not isinstance(active, Tensor):
+            raise TypeError(
+                "WaterfillL2Router.active_rank_token_count must be a torch.Tensor "
+                "or None."
+            )
+
+        try:
+            experts_per_rank = int(request.policy.metadata["experts_per_rank"])
+        except KeyError as exc:
+            raise ValueError(
+                "WaterfillL2Router requires policy.metadata['experts_per_rank']."
+            ) from exc
+
+        if active is None:
+            # Static path: rank_load = pure routed counts; let kernel derive
+            # target_total via (sum + sum/topk + ws - 1) / ws (correct because
+            # rank_load is pure A in this case).
+            rank_load = routed
+            target_total = 0
+            allow_all_ranks = True
+        else:
+            # Dynamic path: rank_load = effective (A + B); precompute
+            # target_total because kernel's naive derivation would be wrong
+            # on the combined tensor.
+            rank_load = routed + active
+            total_routed = routed.sum()
+            total_tokens = total_routed // topk_size
+            total_effective = rank_load.sum()
+            # target_total = perfect_balance + slack-for-shared-distribution.
+            # The slack term (= total_tokens / ws) is necessary for the
+            # algorithm to have enough capacity to distribute all shared
+            # expert assignments.
+            target_total = int(
+                (total_effective + total_tokens + self.world_size - 1)
+                // self.world_size
+            )
+            allow_all_ranks = bool(rank_load.max() <= target_total)
+
+        chosen_rank = _waterfill_select(
+            rank_load=rank_load,
+            topk_ids=topk_ids,
+            target_total=target_total,
+            allow_all_ranks=allow_all_ranks,
+            source_rank=self.source_rank,
+            local_preference=self.local_preference,
+            world_size=self.world_size,
+            experts_per_rank=experts_per_rank,
+        )
 
         return RoutingDecision(
-            routed_physical_topk_ids=routed_physical_topk_ids,
+            routed_physical_topk_ids=topk_ids,
             topk_weights=request.topk_weights,
-            shared_expert_rank=shared_expert_rank,
+            shared_expert_rank=chosen_rank,
             metadata={
                 "policy": request.policy.name,
-                "allow_all_ranks": config.allow_all_ranks,
-                "local_rank": config.local_rank,
                 "target_total": target_total,
+                "allow_all_ranks": allow_all_ranks,
             },
         )
 
 
-def _logical_to_physical_topk(
-    logical_topk_ids: TensorLike,
-    placement: PlacementSnapshot,
-) -> list[list[int]]:
-    rows = _as_2d_int_list(logical_topk_ids, "logical_topk_ids")
-    default_physical = _optional_int_list(
-        placement.default_physical_for_logical,
-        "default_physical_for_logical",
-    )
-    candidates = _optional_2d_int_list(
-        placement.logical_to_physical_candidates,
-        "logical_to_physical_candidates",
-    )
-    counts = _optional_int_list(
-        placement.logical_to_physical_count,
-        "logical_to_physical_count",
-    )
-
-    mapped: list[list[int]] = []
-    for row in rows:
-        mapped_row: list[int] = []
-        for logical_id in row:
-            if logical_id < 0:
-                mapped_row.append(logical_id)
-            elif default_physical is not None:
-                _check_index(logical_id, len(default_physical), "logical expert")
-                physical_id = default_physical[logical_id]
-                _check_index(physical_id, placement.num_physical_experts, "physical expert")
-                mapped_row.append(physical_id)
-            else:
-                if candidates is None or counts is None:
-                    raise ValueError(
-                        "PlacementSnapshot needs default_physical_for_logical or "
-                        "logical_to_physical_candidates/count."
-                    )
-                _check_index(logical_id, len(candidates), "logical expert")
-                _check_index(logical_id, len(counts), "logical expert")
-                if counts[logical_id] <= 0:
-                    mapped_row.append(-1)
-                else:
-                    if not candidates[logical_id]:
-                        raise ValueError(
-                            f"logical expert id {logical_id} has no physical candidates."
-                        )
-                    physical_id = candidates[logical_id][0]
-                    _check_index(physical_id, placement.num_physical_experts, "physical expert")
-                    mapped_row.append(physical_id)
-        mapped.append(mapped_row)
-    return mapped
-
-
-def _select_rank_for_token(
+def _waterfill_select(
     *,
-    token_index: int,
-    physical_topk: Sequence[int],
-    rank_load: Sequence[float],
-    placement: PlacementSnapshot,
-    config: WaterfillPolicyConfig,
+    rank_load: Tensor,
+    topk_ids: Tensor,
     target_total: int,
-) -> int:
-    candidates = _candidate_ranks(
-        physical_topk=physical_topk,
-        placement=placement,
-        rank_count=len(rank_load),
-        local_rank=config.local_rank,
-        allow_all_ranks=config.allow_all_ranks,
-    )
-    weighted = [
-        (
-            rank,
-            _waterfill_weight(
-                rank=rank,
-                load=rank_load[rank],
-                local_rank=config.local_rank,
-                local_preference=config.local_preference,
-                target_total=target_total,
-            ),
-        )
-        for rank in candidates
-    ]
-    total_weight = sum(weight for _, weight in weighted)
-    if total_weight <= 0:
-        return min(
-            candidates,
-            key=lambda rank: (
-                _adjusted_load(
-                    rank=rank,
-                    load=rank_load[rank],
-                    local_rank=config.local_rank,
-                    local_preference=config.local_preference,
-                ),
-                rank != config.local_rank,
-                rank,
-            ),
-        )
-
-    threshold = _deterministic_fraction(token_index, config.local_rank) * total_weight
-    cumulative = 0.0
-    for rank, weight in weighted:
-        cumulative += weight
-        if threshold < cumulative:
-            return rank
-    return weighted[-1][0]
-
-
-def _candidate_ranks(
-    *,
-    physical_topk: Sequence[int],
-    placement: PlacementSnapshot,
-    rank_count: int,
-    local_rank: int,
     allow_all_ranks: bool,
-) -> list[int]:
-    if allow_all_ranks:
-        return list(range(rank_count))
+    source_rank: int,
+    local_preference: float,
+    world_size: int,
+    experts_per_rank: int,
+) -> Tensor:
+    """Run the Waterfill rank-selection Triton kernel.
 
-    ranks = {local_rank}
-    physical_to_rank = _optional_int_list(
-        placement.physical_to_rank_map,
-        "physical_to_rank_map",
+    Returns ``chosen_rank: [num_tokens]`` int64 — the EP rank that should
+    receive each token's shared expert.
+
+    Internally this is the per-token decision step extracted from PR #19290's
+    fused expand kernel; materialization back into SGLang's ``StandardTopKOutput``
+    layout is the adapter's responsibility (in
+    ``adapters/sglang/waterfill/runtime.py``).
+    """
+
+    num_tokens = topk_ids.shape[0]
+    topk = topk_ids.shape[1]
+    if num_tokens == 0:
+        return torch.empty(0, dtype=torch.int64, device=topk_ids.device)
+
+    chosen_rank = torch.empty(num_tokens, dtype=torch.int64, device=topk_ids.device)
+    BLOCK_SIZE = 128
+    grid = ((num_tokens + BLOCK_SIZE - 1) // BLOCK_SIZE,)
+
+    # Convert local_preference to integer fraction for kernel-side math.
+    pref_numer = max(int(round(local_preference * _LOCAL_PREF_DENOM)), 1)
+    pref_denom = _LOCAL_PREF_DENOM
+
+    _waterfill_select_kernel[grid](
+        topk_ids,
+        rank_load,
+        chosen_rank,
+        num_tokens,
+        topk,
+        experts_per_rank,
+        world_size,
+        source_rank,
+        pref_numer,
+        pref_denom,
+        target_total,
+        ALLOW_ALL_RANKS=allow_all_ranks,
+        BLOCK_SIZE=BLOCK_SIZE,
     )
-    if physical_to_rank is None:
-        return sorted(ranks)
-
-    for physical_id in physical_topk:
-        if physical_id < 0:
-            continue
-        _check_index(physical_id, len(physical_to_rank), "physical expert")
-        rank = physical_to_rank[physical_id]
-        if 0 <= rank < rank_count:
-            ranks.add(rank)
-    return sorted(ranks)
+    return chosen_rank
 
 
-def _waterfill_weight(
-    *,
-    rank: int,
-    load: float,
-    local_rank: int,
-    local_preference: float,
-    target_total: int,
-) -> float:
-    weight = max(float(target_total) - load, 0.0)
-    if rank != local_rank:
-        weight /= local_preference
-    return weight
+@triton.jit
+def _waterfill_select_kernel(
+    topk_ids_ptr,           # [num_tokens, topk] int64 (physical expert ids)
+    rank_load_ptr,          # [world_size] int64 (rank_load for kernel weighting)
+    chosen_rank_ptr,        # [num_tokens] int64 (output: per-token chosen rank)
+    num_tokens,
+    topk: tl.constexpr,
+    experts_per_rank,
+    world_size: tl.constexpr,
+    source_rank,
+    local_pref_numer,
+    local_pref_denom,
+    precomputed_target_total,
+    ALLOW_ALL_RANKS: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Per-token Waterfill rank selection.
 
+    Two ``target_total`` paths:
+      - ``precomputed_target_total > 0``: caller supplied a correct value
+        (dynamic mode). Use it directly.
+      - ``precomputed_target_total == 0``: caller signals "derive internally"
+        (static mode, where rank_load is pure routed counts and the naive
+        derivation gives the right answer).
+    """
 
-def _adjusted_load(
-    *,
-    rank: int,
-    load: float,
-    local_rank: int,
-    local_preference: float,
-) -> float:
-    if rank == local_rank:
-        return load / local_preference
-    return load
+    pid = tl.program_id(0)
+    token_idx = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = token_idx < num_tokens
 
+    r_idx = tl.arange(0, world_size)
+    rank_load_vec = tl.load(rank_load_ptr + r_idx, mask=r_idx < world_size, other=0).to(
+        tl.int64
+    )
+    total_effective_k = tl.sum(rank_load_vec)
+    total_tokens_global_k = total_effective_k // topk
+    derived_target_total = (
+        total_effective_k + total_tokens_global_k + world_size - 1
+    ) // world_size
+    target_total = tl.where(
+        precomputed_target_total > 0,
+        precomputed_target_total,
+        derived_target_total,
+    )
 
-def _target_total(
-    *,
-    rank_load: Sequence[float],
-    routed_rank_load: Optional[Sequence[float]],
-    topk_size: int,
-    rank_count: int,
-    configured: Optional[int],
-) -> int:
-    if configured is not None and configured > 0:
-        return configured
-    total_effective = int(sum(rank_load))
-    total_routed = int(sum(routed_rank_load)) if routed_rank_load is not None else total_effective
-    total_tokens = total_routed // max(topk_size, 1)
-    return (total_effective + total_tokens + rank_count - 1) // rank_count
+    # Locate the best candidate rank using local-rank preference.
+    source_count = tl.load(rank_load_ptr + source_rank)
+    best_count = tl.where(mask, source_count, 2**30)
+    best_rank = tl.full([BLOCK_SIZE], source_rank, dtype=tl.int64)
+    has_valid = tl.zeros([BLOCK_SIZE], dtype=tl.int1)
+    src_rank_i32 = tl.full([BLOCK_SIZE], source_rank, dtype=tl.int32)
 
+    if ALLOW_ALL_RANKS:
+        candidate_mask = tl.full([BLOCK_SIZE], (1 << world_size) - 1, dtype=tl.int32)
+        for r in range(world_size):
+            target_count = tl.load(rank_load_ptr + r).to(tl.int64)
+            better = (
+                target_count * local_pref_numer < best_count * local_pref_denom
+            ) & mask
+            best_count = tl.where(better, target_count, best_count)
+            best_rank = tl.where(
+                better, tl.full([BLOCK_SIZE], r, dtype=tl.int64), best_rank
+            )
+    else:
+        candidate_mask = (tl.full([BLOCK_SIZE], 1, dtype=tl.int32) << src_rank_i32).to(
+            tl.int32
+        )
 
-def _topk_size(rows: Sequence[Sequence[int]]) -> int:
-    return max((len(row) for row in rows), default=1)
+    for k in range(topk):
+        expert_id = tl.load(
+            topk_ids_ptr + token_idx * topk + k, mask=mask, other=-1
+        ).to(tl.int64)
+        valid = expert_id >= 0
+        has_valid = has_valid | valid
 
+        if not ALLOW_ALL_RANKS:
+            target_rank = expert_id // experts_per_rank
+            target_rank = tl.minimum(tl.maximum(target_rank, 0), world_size - 1)
+            target_rank_i32 = target_rank.to(tl.int32)
+            shift_amt = tl.where(valid, target_rank_i32, 0)
+            bit = tl.full([BLOCK_SIZE], 1, dtype=tl.int32) << shift_amt
+            candidate_mask = tl.where(
+                valid & mask, candidate_mask | bit, candidate_mask
+            )
 
-def _deterministic_fraction(token_index: int, local_rank: int) -> float:
-    value = (token_index & 0xFFFFFFFF) ^ ((local_rank * 0x9E3779B9) & 0xFFFFFFFF)
-    value = (value * 1664525 + 1013904223) & 0xFFFFFFFF
-    return value / 2**32
+            target_count = tl.load(
+                rank_load_ptr + target_rank, mask=mask & valid, other=2**30
+            )
 
+            better = (
+                (target_count * local_pref_numer < best_count * local_pref_denom)
+                & valid
+                & mask
+            )
+            best_count = tl.where(better, target_count, best_count)
+            best_rank = tl.where(better, target_rank, best_rank)
 
-def _as_2d_int_list(value: TensorLike, name: str) -> list[list[int]]:
-    value = _tolist(value)
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        raise TypeError(f"{name} must be a 2D sequence.")
-    rows: list[list[int]] = []
-    for row in value:
-        if not isinstance(row, Sequence) or isinstance(row, (str, bytes)):
-            raise TypeError(f"{name} must be a 2D sequence.")
-        rows.append([int(item) for item in row])
-    return rows
+    # Compute total weight across candidate ranks (slack-based, with local
+    # preference applied to non-source ranks).
+    total_w = tl.zeros([BLOCK_SIZE], dtype=tl.int32)
+    for r in range(world_size):
+        present = ((candidate_mask >> r) & 1) == 1
+        rank_load_r = tl.load(rank_load_ptr + r).to(tl.int64)
+        w = tl.where(target_total > rank_load_r, target_total - rank_load_r, 0).to(
+            tl.int32
+        )
+        w_vec = tl.full([BLOCK_SIZE], w, dtype=tl.int32)
+        w_vec = tl.where(
+            src_rank_i32 == r,
+            w_vec,
+            (w_vec * local_pref_denom) // local_pref_numer,
+        )
+        total_w += tl.where(present, w_vec, 0)
 
+    # Deterministic per-token sampling using token_idx + source_rank seed.
+    token_seed = token_idx.to(tl.uint32) ^ (
+        src_rank_i32.to(tl.uint32) * tl.full([BLOCK_SIZE], 0x9E3779B9, dtype=tl.uint32)
+    )
+    token_seed = token_seed * tl.full([BLOCK_SIZE], 1664525, dtype=tl.uint32) + tl.full(
+        [BLOCK_SIZE], 1013904223, dtype=tl.uint32
+    )
+    u = tl.where(total_w > 0, token_seed % total_w.to(tl.uint32), 0).to(tl.int32)
 
-def _optional_2d_int_list(value: TensorLike, name: str) -> Optional[list[list[int]]]:
-    if value is None:
-        return None
-    return _as_2d_int_list(value, name)
+    chosen = src_rank_i32
+    cum = tl.zeros([BLOCK_SIZE], dtype=tl.int32)
+    for r in range(world_size):
+        present = ((candidate_mask >> r) & 1) == 1
+        rank_load_r = tl.load(rank_load_ptr + r).to(tl.int64)
+        w = tl.where(target_total > rank_load_r, target_total - rank_load_r, 0).to(
+            tl.int32
+        )
+        w_vec = tl.full([BLOCK_SIZE], w, dtype=tl.int32)
+        w_vec = tl.where(
+            src_rank_i32 == r,
+            w_vec,
+            (w_vec * local_pref_denom) // local_pref_numer,
+        )
+        w_vec = tl.where(present, w_vec, 0)
+        pick = (total_w > 0) & present & (u >= cum) & (u < (cum + w_vec))
+        chosen = tl.where(pick, r, chosen)
+        cum += w_vec
 
+    final_rank = tl.where(total_w > 0, chosen.to(tl.int64), best_rank)
+    # Tokens with no valid routed expert get -1 (caller materializer will
+    # treat them as "drop"; SGLang's empty/padding path uses this signal).
+    final_rank = tl.where(has_valid, final_rank, tl.full([BLOCK_SIZE], -1, dtype=tl.int64))
 
-def _optional_int_list(value: TensorLike, name: str) -> Optional[list[int]]:
-    if value is None:
-        return None
-    value = _tolist(value)
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        raise TypeError(f"{name} must be a 1D sequence.")
-    return [int(item) for item in value]
-
-
-def _as_number_list(value: TensorLike, name: str) -> list[float]:
-    value = _tolist(value)
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        raise TypeError(f"{name} must be a 1D sequence.")
-    return [float(item) for item in value]
-
-
-def _validate_rank_load_values(values: Sequence[float], name: str) -> None:
-    if not values:
-        raise ValueError(f"{name} must not be empty.")
-    if any(load < 0 for load in values):
-        raise ValueError(f"{name} values must be non-negative.")
-
-
-def _metadata_bool(value: object) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int):
-        if value in (0, 1):
-            return bool(value)
-        raise TypeError("allow_all_ranks integer metadata must be 0 or 1.")
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "on"}:
-            return True
-        if normalized in {"0", "false", "no", "off"}:
-            return False
-    raise TypeError("allow_all_ranks metadata must be a bool, 0/1, or bool-like string.")
-
-
-def _positive_or_none(value: object, name: str) -> Optional[int]:
-    value = int(value)
-    if value < 0:
-        raise ValueError(f"{name} must be non-negative.")
-    if value == 0:
-        return None
-    return value
-
-
-def _check_index(index: int, length: int, label: str) -> None:
-    if index >= length:
-        raise ValueError(f"{label} id {index} is out of range for length {length}.")
-
-
-def _tolist(value: TensorLike) -> Any:
-    if hasattr(value, "tolist"):
-        return value.tolist()
-    return value
+    tl.store(chosen_rank_ptr + token_idx, final_rank, mask=mask)
