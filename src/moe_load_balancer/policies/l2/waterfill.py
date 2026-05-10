@@ -7,24 +7,22 @@ modes are auto-distinguished by whether ``RoutingRequest.active_rank_token_count
 is provided:
 
 - Static (no EP all-reduce): adapter passes ``routed_rank_load = local_routed
-  counts`` and ``active_rank_token_count = None``. The Triton kernel derives
-  ``target_total`` internally from ``rank_load.sum() / topk`` (correct because
-  ``rank_load`` is pure routed counts in this case).
+  counts`` and ``active_rank_token_count = None``. The kernel sees
+  ``rank_load == routed_load`` and derives ``target_total`` from their sum.
+  ``ALLOW_ALL_RANKS=True`` (caller asserts every rank is a valid shared-expert
+  destination because EPLB already balances routed load).
 
 - Dynamic (post EP all-reduce): adapter passes ``routed_rank_load`` (post-AR
   global routed counts) and ``active_rank_token_count`` (post-AR per-rank
-  active token counts). ``rank_load`` becomes ``routed + active`` (effective
-  load), and the policy explicitly precomputes ``target_total`` because the
-  kernel's naive derivation would be incorrect on the combined tensor.
-
-The asymmetric handling of ``target_total`` (kernel-derive in static,
-precompute in dynamic) is preserved from PR #19290 as a deliberate performance
-optimization: it avoids an extra host-GPU sync per layer in the static path.
+  active token counts). The kernel uses ``rank_load = routed + active`` for
+  scoring and ``routed_load = routed`` for ``total_tokens`` derivation. The
+  candidate set is always restricted to ``token's routed ranks ∪ source``
+  (``ALLOW_ALL_RANKS=False``) — this is conservative (loses the "fully
+  balanced → all-ranks" optimization the PR's CPU-sync-bearing path enabled)
+  but eliminates the two GPU→CPU syncs per layer.
 """
 
 from __future__ import annotations
-
-from typing import Optional
 
 import torch
 import triton
@@ -110,35 +108,23 @@ class WaterfillL2Router(TokenRouter):
                 "WaterfillL2Router requires policy.metadata['experts_per_rank']."
             ) from exc
 
+        # Both paths are sync-free: routed_load is always pure routed counts
+        # (used by the kernel to derive total_tokens internally). rank_load is
+        # the effective load used for scoring (= routed in static; routed+active
+        # in dynamic — a single elementwise add, no .item()).
         if active is None:
-            # Static path: rank_load = pure routed counts; let kernel derive
-            # target_total via (sum + sum/topk + ws - 1) / ws (correct because
-            # rank_load is pure A in this case).
             rank_load = routed
-            target_total = 0
+            routed_load = routed
             allow_all_ranks = True
         else:
-            # Dynamic path: rank_load = effective (A + B); precompute
-            # target_total because kernel's naive derivation would be wrong
-            # on the combined tensor.
             rank_load = routed + active
-            total_routed = routed.sum()
-            total_tokens = total_routed // topk_size
-            total_effective = rank_load.sum()
-            # target_total = perfect_balance + slack-for-shared-distribution.
-            # The slack term (= total_tokens / ws) is necessary for the
-            # algorithm to have enough capacity to distribute all shared
-            # expert assignments.
-            target_total = int(
-                (total_effective + total_tokens + self.world_size - 1)
-                // self.world_size
-            )
-            allow_all_ranks = bool(rank_load.max() <= target_total)
+            routed_load = routed
+            allow_all_ranks = False
 
         chosen_rank = _waterfill_select(
             rank_load=rank_load,
+            routed_load=routed_load,
             topk_ids=topk_ids,
-            target_total=target_total,
             allow_all_ranks=allow_all_ranks,
             source_rank=self.source_rank,
             local_preference=self.local_preference,
@@ -152,7 +138,6 @@ class WaterfillL2Router(TokenRouter):
             shared_expert_rank=chosen_rank,
             metadata={
                 "policy": request.policy.name,
-                "target_total": target_total,
                 "allow_all_ranks": allow_all_ranks,
             },
         )
@@ -161,8 +146,8 @@ class WaterfillL2Router(TokenRouter):
 def _waterfill_select(
     *,
     rank_load: Tensor,
+    routed_load: Tensor,
     topk_ids: Tensor,
-    target_total: int,
     allow_all_ranks: bool,
     source_rank: int,
     local_preference: float,
@@ -178,6 +163,10 @@ def _waterfill_select(
     fused expand kernel; materialization back into SGLang's ``StandardTopKOutput``
     layout is the adapter's responsibility (in
     ``adapters/sglang/waterfill/runtime.py``).
+
+    Sync-free: ``target_total`` is derived inside the kernel via
+    ``tl.sum`` over ``routed_load`` (pure routed counts) and ``rank_load``
+    (effective load). The two tensors alias for static mode.
     """
 
     num_tokens = topk_ids.shape[0]
@@ -196,6 +185,7 @@ def _waterfill_select(
     _waterfill_select_kernel[grid](
         topk_ids,
         rank_load,
+        routed_load,
         chosen_rank,
         num_tokens,
         topk,
@@ -204,7 +194,6 @@ def _waterfill_select(
         source_rank,
         pref_numer,
         pref_denom,
-        target_total,
         ALLOW_ALL_RANKS=allow_all_ranks,
         BLOCK_SIZE=BLOCK_SIZE,
     )
@@ -214,7 +203,8 @@ def _waterfill_select(
 @triton.jit
 def _waterfill_select_kernel(
     topk_ids_ptr,           # [num_tokens, topk] int64 (physical expert ids)
-    rank_load_ptr,          # [world_size] int64 (rank_load for kernel weighting)
+    rank_load_ptr,          # [world_size] int64 (effective load: routed (static) or routed+active (dynamic))
+    routed_load_ptr,        # [world_size] int64 (pure routed counts; aliases rank_load_ptr in static mode)
     chosen_rank_ptr,        # [num_tokens] int64 (output: per-token chosen rank)
     num_tokens,
     topk: tl.constexpr,
@@ -223,18 +213,16 @@ def _waterfill_select_kernel(
     source_rank,
     local_pref_numer,
     local_pref_denom,
-    precomputed_target_total,
     ALLOW_ALL_RANKS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     """Per-token Waterfill rank selection.
 
-    Two ``target_total`` paths:
-      - ``precomputed_target_total > 0``: caller supplied a correct value
-        (dynamic mode). Use it directly.
-      - ``precomputed_target_total == 0``: caller signals "derive internally"
-        (static mode, where rank_load is pure routed counts and the naive
-        derivation gives the right answer).
+    ``target_total`` is derived entirely on-device from
+    ``rank_load_ptr`` (effective load) and ``routed_load_ptr`` (pure routed
+    counts), eliminating per-layer GPU→CPU syncs that the Python wrapper
+    used to incur in dynamic mode. Caller guarantees ``routed_load_ptr``
+    aliases ``rank_load_ptr`` in static mode.
     """
 
     pid = tl.program_id(0)
@@ -245,16 +233,19 @@ def _waterfill_select_kernel(
     rank_load_vec = tl.load(rank_load_ptr + r_idx, mask=r_idx < world_size, other=0).to(
         tl.int64
     )
+    routed_load_vec = tl.load(
+        routed_load_ptr + r_idx, mask=r_idx < world_size, other=0
+    ).to(tl.int64)
     total_effective_k = tl.sum(rank_load_vec)
-    total_tokens_global_k = total_effective_k // topk
-    derived_target_total = (
+    total_routed_k = tl.sum(routed_load_vec)
+    # total_tokens_global = num distinct routed-source tokens (each contributes
+    # ``topk`` valid slots). Derived from routed-only counts so the formula is
+    # correct under both static (rank_load == routed) and dynamic
+    # (rank_load == routed + active) modes.
+    total_tokens_global_k = total_routed_k // topk
+    target_total = (
         total_effective_k + total_tokens_global_k + world_size - 1
     ) // world_size
-    target_total = tl.where(
-        precomputed_target_total > 0,
-        precomputed_target_total,
-        derived_target_total,
-    )
 
     # Locate the best candidate rank using local-rank preference.
     source_count = tl.load(rank_load_ptr + source_rank)

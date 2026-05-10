@@ -24,6 +24,8 @@ from __future__ import annotations
 from typing import Optional, Tuple
 
 import torch
+import triton
+import triton.language as tl
 from torch import Tensor
 
 from moe_load_balancer.adapters.sglang.load_kernels import count_local_routed_per_rank
@@ -298,6 +300,71 @@ def _expand_topk_local_shared(
     )
 
 
+@triton.jit
+def _expand_topk_with_chosen_rank_kernel(
+    topk_ids_ptr,         # [N, topk] int (input)
+    topk_weights_ptr,     # [N, topk] float (input)
+    chosen_rank_ptr,      # [N] int64 (input)
+    expanded_ids_ptr,     # [N, topk+1] int (output, same dtype as topk_ids)
+    expanded_weights_ptr,  # [N, topk+1] float (output, same dtype as topk_weights)
+    num_tokens,
+    topk: tl.constexpr,
+    old_epr,              # = num_routed_experts // world_size
+    new_epr,              # = old_epr + 1
+    shared_weight,        # float scalar
+    local_shared_marker,  # int64 scalar (LOCAL_SHARED_MARKER = -1)
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Fused expansion of SGLang TopK output with a shared-expert column.
+
+    Replaces the ~10-op PyTorch sequence (each op = one kernel launch) with a
+    single Triton kernel:
+      1. Remap routed expert IDs: ``new_id = old_id + (old_id // old_epr)``
+         (shifts each rank's IDs up to leave room for the shared expert at
+         the end of each rank's range).
+      2. Compute ``has_valid`` per token from the routed columns.
+      3. Write the shared-expert column: ``chosen_rank * new_epr + old_epr``
+         (placed at the END of the chosen rank's range), or
+         ``LOCAL_SHARED_MARKER`` for invalid tokens.
+      4. Pass routed weights through, zero them for invalid slots, and write
+         ``shared_weight`` (or 0) in the shared column.
+    """
+    pid = tl.program_id(0)
+    token_idx = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = token_idx < num_tokens
+
+    # Pass 1 (combined): write routed columns AND track has_valid.
+    has_valid = tl.zeros([BLOCK_SIZE], dtype=tl.int1)
+    for k in range(topk):
+        e = tl.load(
+            topk_ids_ptr + token_idx * topk + k, mask=mask, other=-1
+        ).to(tl.int64)
+        w = tl.load(
+            topk_weights_ptr + token_idx * topk + k, mask=mask, other=0.0
+        )
+        valid = e >= 0
+        has_valid = has_valid | valid
+        # ID remap: new_id = old_id + (old_id // old_epr) for valid IDs.
+        new_id = tl.where(valid, e + (e // old_epr), e)
+        new_w = tl.where(valid, w, 0.0)
+        out_idx = token_idx * (topk + 1) + k
+        tl.store(expanded_ids_ptr + out_idx, new_id, mask=mask)
+        tl.store(expanded_weights_ptr + out_idx, new_w, mask=mask)
+
+    # Pass 2: write shared expert column (id + weight).
+    chosen = tl.load(chosen_rank_ptr + token_idx, mask=mask, other=-1).to(tl.int64)
+    valid_chosen = (chosen >= 0) & has_valid
+    shared_id = tl.where(
+        valid_chosen,
+        chosen * new_epr + old_epr,
+        tl.full([BLOCK_SIZE], local_shared_marker, dtype=tl.int64),
+    )
+    out_idx_shared = token_idx * (topk + 1) + topk
+    tl.store(expanded_ids_ptr + out_idx_shared, shared_id, mask=mask)
+    shared_w = tl.where(has_valid, shared_weight, 0.0)
+    tl.store(expanded_weights_ptr + out_idx_shared, shared_w, mask=mask)
+
+
 def _expand_topk_with_chosen_rank(
     topk_ids: Tensor,
     topk_weights: Tensor,
@@ -305,7 +372,8 @@ def _expand_topk_with_chosen_rank(
     *,
     num_routed_experts: int,
     world_size: int,
-    source_rank: int,
+    source_rank: int,  # Kept for API compat; the materialization itself is
+                       # symmetric in the rank dimension and does not need it.
     shared_weight: float,
 ) -> Tuple[Tensor, Tensor]:
     """Expand SGLang TopK output by appending a shared-expert column.
@@ -318,44 +386,41 @@ def _expand_topk_with_chosen_rank(
     last slot on the chosen rank). Tokens with no valid routed expert
     (``has_valid == False``) are pinned to ``LOCAL_SHARED_MARKER = -1``,
     which DeepEP ignores during dispatch.
+
+    Implemented as a single fused Triton kernel to replace the ~10-op PyTorch
+    chain that previously dominated the per-layer overhead.
     """
+    del source_rank  # unused; symmetric in the rank dimension.
     num_tokens = topk_ids.shape[0]
     topk = topk_ids.shape[1]
     device = topk_ids.device
     old_epr = num_routed_experts // world_size
     new_epr = old_epr + 1
 
-    valid_mask = topk_ids >= 0
-    has_valid = valid_mask.any(dim=1)
-
-    # Remap routed expert IDs to new namespace (shift each rank's IDs up by
-    # the rank index to leave room for shared expert at the end of each rank).
-    old_ranks = torch.where(
-        valid_mask, topk_ids // old_epr, torch.zeros_like(topk_ids)
+    expanded_ids = torch.empty(
+        num_tokens, topk + 1, dtype=topk_ids.dtype, device=device
     )
-    expanded_ids = torch.empty(num_tokens, topk + 1, dtype=topk_ids.dtype, device=device)
-    expanded_ids[:, :topk] = torch.where(
-        valid_mask, topk_ids + old_ranks, topk_ids
-    )
-
-    # Shared expert column: chosen_rank * new_epr + old_epr, or marker for
-    # invalid tokens.
-    valid_chosen = (chosen_rank >= 0) & has_valid
-    shared_id = chosen_rank * new_epr + old_epr
-    expanded_ids[:, topk] = torch.where(
-        valid_chosen,
-        shared_id.to(topk_ids.dtype),
-        torch.full_like(shared_id, LOCAL_SHARED_MARKER).to(topk_ids.dtype),
-    )
-
     expanded_weights = torch.empty(
         num_tokens, topk + 1, dtype=topk_weights.dtype, device=device
     )
-    expanded_weights[:, :topk] = torch.where(valid_mask, topk_weights, 0.0)
-    expanded_weights[:, topk] = torch.where(
-        has_valid,
-        torch.full((num_tokens,), shared_weight, dtype=topk_weights.dtype, device=device),
-        torch.zeros((num_tokens,), dtype=topk_weights.dtype, device=device),
+    if num_tokens == 0:
+        return expanded_ids, expanded_weights
+
+    BLOCK_SIZE = 256
+    grid = ((num_tokens + BLOCK_SIZE - 1) // BLOCK_SIZE,)
+    _expand_topk_with_chosen_rank_kernel[grid](
+        topk_ids,
+        topk_weights,
+        chosen_rank,
+        expanded_ids,
+        expanded_weights,
+        num_tokens,
+        topk,
+        old_epr,
+        new_epr,
+        shared_weight,
+        LOCAL_SHARED_MARKER,
+        BLOCK_SIZE=BLOCK_SIZE,
     )
     return expanded_ids, expanded_weights
 
