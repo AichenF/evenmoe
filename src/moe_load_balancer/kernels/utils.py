@@ -22,14 +22,15 @@ future SDK-owned JIT kernels) need to compile through ``tvm-ffi``:
   detection.
 - ``load_jit``: thin wrapper around ``tvm_ffi.cpp.load`` / ``load_inline``
   that injects the SDK's default include / cflag / target-arch setup.
-- ``register_dependency`` + ``get_mathdx_include_paths`` +
-  ``get_sgl_kernel_include_paths``: resolution of external header libraries
-  needed by LPLB's ``.cuh`` files.
+- ``register_dependency`` + ``get_mathdx_include_paths``: resolution of
+  external header libraries needed by future SDK-owned CUDA kernels.
 
-The SDK does **not** import any inference framework here. ``sgl_kernel``
-headers are resolved by inspecting the installed ``sglang`` package at JIT
-compile time; users must install ``sglang`` for the LPLB kernel build to
-succeed.
+The SDK does **not** import any inference framework here. Framework-coupled
+kernels (e.g. LPLB's current pipeline, which depends on SGLang's
+``sgl_kernel/*`` headers) live behind their adapter's ``LPLBKernels``
+implementation and may either delegate to the framework's kernel module or
+vendor sources under ``adapters/<framework>/<algo>/``. See
+``load_balancer_project/DECISION_lplb_kernel_adapter.md`` for the rationale.
 """
 
 from __future__ import annotations
@@ -386,36 +387,6 @@ def get_mathdx_include_paths() -> List[str]:
     return [str(p) for p in candidates]
 
 
-@register_dependency("sgl_kernel")
-def get_sgl_kernel_include_paths() -> List[str]:
-    """Resolve SGLang's ``sgl_kernel/*`` C++ header library.
-
-    LPLB ``.cuh`` files include headers like ``<sgl_kernel/tensor.h>`` for
-    ``tvm-ffi`` tensor binding helpers. These ship inside the installed
-    ``sglang`` package under ``jit_kernel/include/``. The SDK looks them up
-    here at JIT compile time only; no Python import of ``sglang`` happens.
-
-    Raises descriptively if ``sglang`` is not installed in the active
-    environment.
-    """
-    sglang_root = _find_package_root("sglang")
-    if sglang_root is None:
-        raise RuntimeError(
-            "Cannot find the `sglang` package, which provides the "
-            "sgl_kernel C++ header library required to compile LPLB "
-            "kernels. Install sglang in the build environment (typically "
-            "inside the lmsysorg/sglang:dev container)."
-        )
-    include = sglang_root / "jit_kernel" / "include"
-    if not include.exists():
-        raise RuntimeError(
-            f"Expected sgl_kernel headers at {include}, but the directory "
-            "does not exist. Was sglang installed with its jit_kernel "
-            "sources included?"
-        )
-    return [str(include.resolve())]
-
-
 __all__ = [
     "ArchInfo",
     "CPPArgList",
@@ -427,7 +398,6 @@ __all__ = [
     "get_jit_cuda_arch",
     "get_mathdx_include_paths",
     "get_mathdx_root",
-    "get_sgl_kernel_include_paths",
     "is_hip_runtime",
     "load_jit",
     "make_cpp_args",
