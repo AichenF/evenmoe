@@ -234,6 +234,33 @@ class TestTokenRouterProtocol:
         assert request.routed_rank_load == [1, 3]
         assert request.active_rank_token_count == [30, 20]
 
+    def test_global_logical_count_defaults_to_none(self):
+        # Waterfill-style requests omit global_logical_count; LPLB-style
+        # requests populate it. Default must be None so existing callers stay
+        # source-compatible.
+        request = RoutingRequest(
+            layer_id=0,
+            logical_topk_ids=[[0]],
+            topk_weights=[[1.0]],
+        )
+        assert request.global_logical_count is None
+
+    def test_global_logical_count_accepts_live_reference(self):
+        global_logical_count = [5, 7, 0, 3]
+        request = RoutingRequest(
+            layer_id=0,
+            logical_topk_ids=[[0]],
+            topk_weights=[[1.0]],
+            policy="lplb",
+            global_logical_count=global_logical_count,
+        )
+
+        # Same live-reference contract as routed_rank_load: adapter may pass
+        # the post-all-reduce buffer directly so policy sees the latest value.
+        global_logical_count[2] = 11
+        assert request.global_logical_count is global_logical_count
+        assert request.global_logical_count == [5, 7, 11, 3]
+
     def test_request_rejects_positional_construction(self):
         with pytest.raises(TypeError):
             RoutingRequest(0, [[0]], [[1.0]], _placement())  # type: ignore[misc]

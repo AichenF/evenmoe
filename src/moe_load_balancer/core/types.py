@@ -342,6 +342,13 @@ class RoutingRequest:
         active_rank_token_count: ``[ep_size]`` per-rank active token count
                                  (post-collective). Set only in dynamic mode;
                                  ``None`` in static mode.
+        global_logical_count:    ``[num_logical_experts]`` per-logical-expert
+                                 token count, summed across the EP group
+                                 (post-collective). Canonical raw input for
+                                 LP / replica-redirection policies (LPLB,
+                                 Metro). Adapter is responsible for the local
+                                 scatter-add + EP all-reduce; policy treats it
+                                 as the per-batch routing signal.
         token_count:             scalar or ``[1]`` total live tokens.
         lb_token_mask:           ``[num_tokens]`` bool mask of LB-eligible
                                  tokens.
@@ -363,6 +370,15 @@ class RoutingRequest:
     framework state (e.g. SGLang adapter via ``count_local_routed_per_rank``
     and an EP-group all-reduce); callers in CPU-only test paths can pass plain
     sequences.
+
+    ``global_logical_count`` is the canonical raw input for LPLB-class
+    policies that redistribute tokens among physical replicas of replicated
+    logical experts. It is orthogonal to ``routed_rank_load`` (per-rank
+    aggregation): both can be populated simultaneously by combined runtimes
+    that share a single EP all-reduce upstream of LPLB and Waterfill (see
+    ``docs/sglang-integration.md``). Adapters set it from a local scatter-add
+    over ``logical_topk_ids`` followed by an EP-group all-reduce; the policy
+    consumes it sync-free.
     """
 
     layer_id: int
@@ -372,9 +388,12 @@ class RoutingRequest:
     stage: Optional[RoutingStage] = None
     routed_rank_load: Optional[TensorLike] = None
     active_rank_token_count: Optional[TensorLike] = None
+<<<<<<< HEAD
     # ``[num_logical_experts]`` per-logical token count for this batch — local
     # or post-EP-all-reduce depending on the adapter / env. Consumed by L2
-    # algorithms that re-balance across logical-expert replicas (LP-CF).
+    # algorithms that re-balance across logical-expert replicas (LPLB).
+=======
+>>>>>>> 2d45db9 (core: add RoutingRequest.global_logical_count for LPLB-class policies)
     global_logical_count: Optional[TensorLike] = None
     token_count: Optional[TensorLike] = None
     lb_token_mask: Optional[TensorLike] = None
