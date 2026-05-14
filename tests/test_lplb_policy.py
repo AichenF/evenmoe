@@ -1,0 +1,621 @@
+# Copyright 2023-2026 SGLang Team
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+"""Unit tests for :class:`LPLBL2Router` and its LP matrix builder.
+
+These tests run on CPU with a mock :class:`LPLBKernels` implementation
+because the real SGLang kernels require CUDA + cuBLASDx + Math-DX. Kernel
+*correctness* is validated separately by the GPU parity tests in
+``tests/test_lplb_runtime_against_sglang.py``; here we validate:
+
+1. The LP constraint matrices match a hand-derived reference for a known
+   placement (geometry and sign conventions).
+2. The per-(layer, placement_version) state cache rebuilds on version
+   change and reuses on same version.
+3. ``route_tokens`` fast paths (stage gating, no redundancy, empty batch)
+   bypass the kernel pipeline cleanly.
+4. ``route_tokens`` invokes the kernels in the right order with buffers
+   from the cached layer state (no per-call allocation).
+5. Protocol conformance and input validation.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, List, Optional, Tuple
+
+import pytest
+import torch
+from torch import Tensor
+
+from moe_load_balancer.core.l2 import LPLBKernels, TokenRouter
+from moe_load_balancer.core.types import (
+    PlacementSnapshot,
+    RoutingDecision,
+    RoutingPolicyConfig,
+    RoutingRequest,
+    RoutingStage,
+)
+from moe_load_balancer.policies.l2.lplb import (
+    LPLBL2Router,
+    _build_layer_state,
+    _identity_dispatch,
+)
+
+
+# -- Test fixtures: a tiny placement we can reason about by hand -----------
+#
+# Layout: 4 logical experts -> 6 physical experts -> 2 GPUs (3 physicals each)
+#
+#   logical 0  (replicated): physicals 0 (GPU 0) and 3 (GPU 1)
+#   logical 1  (single):     physical  1 (GPU 0)
+#   logical 2  (replicated): physicals 2 (GPU 0) and 4 (GPU 1)
+#   logical 3  (single):     physical  5 (GPU 1)
+#
+# Derived:
+#   log_single     = [1, 3]              phy_single     = [1, 5]
+#   log_replicated = [0, 2]              phy_replicated = [0, 2, 3, 4]
+#
+#   B_full = [[1,1,1,0,0,0],
+#             [0,0,0,1,1,1]]
+#   B1 = B_full[:, [1,5]]                = [[1,0],[0,1]]
+#   B2 = B_full[:, [0,2,3,4]]            = [[1,1,0,0],[0,0,1,1]]
+#   C  = [[1,0,1,0],                       # logical 0 -> phy_replicated [0,2]
+#         [0,1,0,1]]                       # logical 2 -> phy_replicated [1,3]
+#   A_base shape = (NC=4, NV-1=7)  ->  A_full has NV=8
+#
+# -------------------------------------------------------------------------
+
+
+def _toy_snapshot(layer_id: int = 0, placement_version: int = 0) -> PlacementSnapshot:
+    log2phy = torch.tensor(
+        [[0, 3], [1, -1], [2, 4], [5, -1]], dtype=torch.int64
+    )
+    log_counts = torch.tensor([2, 1, 2, 1], dtype=torch.int64)
+    return PlacementSnapshot(
+        layer_id=layer_id,
+        num_logical_experts=4,
+        num_physical_experts=6,
+        logical_to_physical_candidates=log2phy,
+        logical_to_physical_count=log_counts,
+        default_physical_for_logical=None,
+        metadata={"placement_version": placement_version},
+    )
+
+
+def _no_redundancy_snapshot(
+    layer_id: int = 0, default_map: Optional[Tensor] = None
+) -> PlacementSnapshot:
+    """4 logicals each with exactly one physical copy."""
+    return PlacementSnapshot(
+        layer_id=layer_id,
+        num_logical_experts=4,
+        num_physical_experts=4,
+        logical_to_physical_candidates=torch.tensor(
+            [[0, -1], [1, -1], [2, -1], [3, -1]], dtype=torch.int64
+        ),
+        logical_to_physical_count=torch.tensor([1, 1, 1, 1], dtype=torch.int64),
+        default_physical_for_logical=default_map,
+        metadata={"placement_version": 0},
+    )
+
+
+# -- Mock LPLBKernels for the pipeline tests ------------------------------
+
+
+@dataclass
+class _KernelCall:
+    name: str
+    shapes: Tuple[Tuple[int, ...], ...]
+    dtypes: Tuple[str, ...]
+
+
+@dataclass
+class _RecordingKernels:
+    """Mock LPLBKernels that records calls and writes plausible outputs.
+
+    Outputs are not LP-correct; they're just shape-valid so the policy
+    can finish the pipeline and return a RoutingDecision. The point of
+    these tests is to validate the policy plumbing — kernel correctness
+    is covered by the GPU integration tests.
+    """
+
+    calls: List[_KernelCall] = field(default_factory=list)
+    warmup_shapes: List[Tuple[int, int]] = field(default_factory=list)
+    # Identity tracking — verifies buffer reuse across calls.
+    last_A_full_id: Optional[int] = None
+    last_x_id: Optional[int] = None
+    last_log2phy_prob_id: Optional[int] = None
+
+    def _record(self, name: str, *tensors: Tensor) -> None:
+        shapes = tuple(tuple(t.shape) for t in tensors)
+        dtypes = tuple(str(t.dtype) for t in tensors)
+        self.calls.append(_KernelCall(name=name, shapes=shapes, dtypes=dtypes))
+
+    def warmup(self, nc, nv, num_iters, device):
+        self.warmup_shapes.append((nc, nv))
+
+    def prep_lp_inputs(
+        self, A_full, b, t1, global_counts, log_single, log_replicated, B1, A_base_row_sum
+    ):
+        self._record(
+            "prep",
+            A_full,
+            b,
+            t1,
+            global_counts,
+            log_single,
+            log_replicated,
+            B1,
+            A_base_row_sum,
+        )
+        self.last_A_full_id = id(A_full)
+        # Write plausible values: A_full's last col -> 0, b -> 0, t1 -> ones.
+        A_full[:, -1].fill_(0.0)
+        b.fill_(0.0)
+        t1.fill_(1.0)
+
+    def solve_ipm(self, A, b, c, num_iters=5, result=None):
+        self._record("solve", A, b, c)
+        self.last_x_id = id(result)
+        # Fallback value matches PR #24515's LPLBSolver non-convergence path.
+        result.fill_(0.5)
+        return result
+
+    def extract_log2phy_prob(
+        self, log2phy_prob, x, t1, phy_single, phy_replicated, log2phy
+    ):
+        self._record("extract", log2phy_prob, x, t1, phy_single, phy_replicated, log2phy)
+        self.last_log2phy_prob_id = id(log2phy_prob)
+        # Write a valid distribution: 1.0/count for each valid slot.
+        valid = log2phy >= 0
+        per_logical_count = valid.sum(dim=1, keepdim=True).clamp(min=1).float()
+        log2phy_prob.zero_()
+        ones = (1.0 / per_logical_count).expand_as(log2phy_prob).contiguous()
+        log2phy_prob[valid] = ones[valid]
+
+    def dispatch_probability(self, topk_ids, log2phy_prob, log2phy_map):
+        self._record("dispatch", topk_ids, log2phy_prob, log2phy_map)
+        # Always pick column 0 of log2phy_map for each logical id.
+        safe = topk_ids.to(torch.int64).clamp(min=0)
+        physical = log2phy_map.to(torch.int64)[safe, 0]
+        return torch.where(topk_ids >= 0, physical, topk_ids.to(torch.int64)).to(
+            topk_ids.dtype
+        )
+
+
+def _toy_request(
+    *,
+    snapshot: PlacementSnapshot,
+    topk_ids: Tensor,
+    topk_weights: Optional[Tensor] = None,
+    stage: Optional[RoutingStage] = RoutingStage.PREFILL,
+    global_logical_count: Optional[Tensor] = None,
+    enabled_stages: Optional[frozenset] = None,
+) -> RoutingRequest:
+    if topk_weights is None:
+        topk_weights = torch.ones(topk_ids.shape, dtype=torch.float32)
+    if global_logical_count is None:
+        global_logical_count = torch.ones(
+            snapshot.num_logical_experts, dtype=torch.float32
+        )
+    return RoutingRequest(
+        layer_id=snapshot.layer_id,
+        logical_topk_ids=topk_ids,
+        topk_weights=topk_weights,
+        placement=snapshot,
+        stage=stage,
+        global_logical_count=global_logical_count,
+        policy=RoutingPolicyConfig(name="lplb", enabled_stages=enabled_stages),
+    )
+
+
+# -- 1. LP matrix construction --------------------------------------------
+
+
+@pytest.mark.unit
+class TestBuildLayerState:
+    def test_partition_is_correct_for_toy_placement(self):
+        state = _build_layer_state(_toy_snapshot(), num_gpus=2, big_m_penalty=1000.0)
+
+        assert state.has_redundancy is True
+        assert state.log_single.tolist() == [1, 3]
+        assert state.phy_single.tolist() == [1, 5]
+        assert state.log_replicated.tolist() == [0, 2]
+        assert state.phy_replicated.tolist() == [0, 2, 3, 4]
+
+    def test_B1_matches_hand_derivation(self):
+        state = _build_layer_state(_toy_snapshot(), num_gpus=2, big_m_penalty=1000.0)
+
+        # B1[i, j] = 1 iff GPU i owns phy_single[j].
+        # phy_single = [1, 5]. GPU 0 owns phys 0..2 → owns phy 1 (slot 0).
+        # GPU 1 owns phys 3..5 → owns phy 5 (slot 1).
+        expected = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        assert torch.equal(state.B1, expected)
+
+    def test_A_base_matches_hand_derivation(self):
+        state = _build_layer_state(_toy_snapshot(), num_gpus=2, big_m_penalty=1000.0)
+
+        # Top block (num_red_log=2 rows): [C | 0 (num_gpus=2 wide) | 0 (1 wide)]
+        # C row 0: logical 0 -> phys 0 and 3 -> phy_replicated indices [0, 2]
+        # C row 1: logical 2 -> phys 2 and 4 -> phy_replicated indices [1, 3]
+        # Bottom block (num_gpus=2 rows): [B2 | I | -1]
+        # B2 = B_full[:, [0,2,3,4]] = [[1,1,0,0],[0,0,1,1]]
+        expected = torch.tensor(
+            [
+                [1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0, 0.0, 1.0, 0.0, -1.0],
+                [0.0, 0.0, 1.0, 1.0, 0.0, 1.0, -1.0],
+            ]
+        )
+        assert torch.equal(state.A_base, expected)
+        assert state.A_full.shape == (4, 8)  # NC=4, NV = NV-1 + 1 = 8
+        # A_full's first NV-1 cols hold A_base.
+        assert torch.equal(state.A_full[:, :-1], expected)
+
+    def test_c_vec_minimizes_M_with_big_m_penalty(self):
+        state = _build_layer_state(_toy_snapshot(), num_gpus=2, big_m_penalty=12345.0)
+        # c_vec[NV-2] = 1.0  (the peak load M)
+        # c_vec[NV-1] = big_m_penalty
+        # All other entries = 0
+        assert state.c_vec.tolist() == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 12345.0]
+
+    def test_A_base_row_sum_is_precomputed(self):
+        state = _build_layer_state(_toy_snapshot(), num_gpus=2, big_m_penalty=1000.0)
+        assert torch.equal(state.A_base_row_sum, state.A_base.sum(dim=1))
+
+    def test_workspace_buffers_have_correct_shapes(self):
+        state = _build_layer_state(_toy_snapshot(), num_gpus=2, big_m_penalty=1000.0)
+        nc, nv = state.A_full.shape
+        assert state.b.shape == (nc,)
+        assert state.t1.shape == (state.log_single.numel(),)
+        assert state.x.shape == (nv,)
+        assert state.log2phy_prob.shape == (4, 2)
+
+    def test_log2phy_map_for_dispatch_is_int32(self):
+        state = _build_layer_state(_toy_snapshot(), num_gpus=2, big_m_penalty=1000.0)
+        assert state.log2phy_map_for_dispatch.dtype == torch.int32
+
+    def test_no_redundancy_state_is_degenerate(self):
+        snap = _no_redundancy_snapshot()
+        state = _build_layer_state(snap, num_gpus=2, big_m_penalty=1000.0)
+        assert state.has_redundancy is False
+        # No LP matrices; log2phy_prob buffer still allocated for shape stability.
+        assert state.log2phy_prob.shape == (4, 2)
+
+    def test_rejects_non_divisible_num_phy(self):
+        # 5 physical experts, 2 GPUs → 5 % 2 != 0.
+        bad = PlacementSnapshot(
+            layer_id=0,
+            num_logical_experts=3,
+            num_physical_experts=5,
+            logical_to_physical_candidates=torch.tensor(
+                [[0, 1], [2, -1], [3, 4]], dtype=torch.int64
+            ),
+            logical_to_physical_count=torch.tensor([2, 1, 2], dtype=torch.int64),
+        )
+        with pytest.raises(ValueError, match="divisible by num_gpus"):
+            _build_layer_state(bad, num_gpus=2, big_m_penalty=1000.0)
+
+
+# -- 2. Layer-state cache --------------------------------------------------
+
+
+@pytest.mark.unit
+class TestLayerStateCache:
+    def test_same_version_reuses_cached_state(self):
+        kernels = _RecordingKernels()
+        router = LPLBL2Router(kernels=kernels, num_gpus=2)
+        snap = _toy_snapshot(layer_id=0, placement_version=0)
+        topk = torch.tensor([[0, 1, 2]], dtype=torch.int32)
+
+        router.route_tokens(_toy_request(snapshot=snap, topk_ids=topk))
+        router.route_tokens(_toy_request(snapshot=snap, topk_ids=topk))
+
+        # Warmup fires once for the first call only.
+        assert kernels.warmup_shapes == [(4, 8)]
+
+    def test_bumped_version_triggers_rebuild_and_warmup(self):
+        kernels = _RecordingKernels()
+        router = LPLBL2Router(kernels=kernels, num_gpus=2)
+        topk = torch.tensor([[0, 1]], dtype=torch.int32)
+
+        router.route_tokens(
+            _toy_request(snapshot=_toy_snapshot(placement_version=0), topk_ids=topk)
+        )
+        router.route_tokens(
+            _toy_request(snapshot=_toy_snapshot(placement_version=1), topk_ids=topk)
+        )
+        router.route_tokens(
+            _toy_request(snapshot=_toy_snapshot(placement_version=1), topk_ids=topk)
+        )
+
+        # v0: warmup once; v1: warmup once; v1 again: cache hit.
+        assert kernels.warmup_shapes == [(4, 8), (4, 8)]
+
+    def test_eviction_keeps_only_latest_version_per_layer(self):
+        kernels = _RecordingKernels()
+        router = LPLBL2Router(kernels=kernels, num_gpus=2)
+        topk = torch.tensor([[0, 1]], dtype=torch.int32)
+
+        for v in range(3):
+            router.route_tokens(
+                _toy_request(snapshot=_toy_snapshot(placement_version=v), topk_ids=topk)
+            )
+
+        assert list(router._layer_state.keys()) == [(0, 2)]
+
+    def test_buffer_reuse_across_calls(self):
+        kernels = _RecordingKernels()
+        router = LPLBL2Router(kernels=kernels, num_gpus=2)
+        snap = _toy_snapshot()
+        topk = torch.tensor([[0, 1]], dtype=torch.int32)
+
+        router.route_tokens(_toy_request(snapshot=snap, topk_ids=topk))
+        first_A_id = kernels.last_A_full_id
+        first_x_id = kernels.last_x_id
+        first_prob_id = kernels.last_log2phy_prob_id
+
+        router.route_tokens(_toy_request(snapshot=snap, topk_ids=topk))
+
+        assert kernels.last_A_full_id == first_A_id
+        assert kernels.last_x_id == first_x_id
+        assert kernels.last_log2phy_prob_id == first_prob_id
+
+
+# -- 3. Fast paths ---------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestRouteFastPaths:
+    def test_stage_gating_returns_passthrough(self):
+        kernels = _RecordingKernels()
+        router = LPLBL2Router(kernels=kernels, num_gpus=2)
+        topk = torch.tensor([[0, 1, 2]], dtype=torch.int32)
+        weights = torch.tensor([[0.5, 0.3, 0.2]])
+
+        # Policy enabled only for PREFILL, request is DECODE.
+        request = _toy_request(
+            snapshot=_toy_snapshot(),
+            topk_ids=topk,
+            topk_weights=weights,
+            stage=RoutingStage.DECODE,
+            enabled_stages=frozenset({RoutingStage.PREFILL}),
+        )
+        decision = router.route_tokens(request)
+
+        assert torch.equal(decision.routed_physical_topk_ids, topk)
+        assert torch.equal(decision.topk_weights, weights)
+        assert decision.metadata["skipped"] == "stage_gated"
+        # No kernel invocations whatsoever (not even warmup).
+        assert kernels.calls == []
+        assert kernels.warmup_shapes == []
+
+    def test_no_redundancy_uses_default_map(self):
+        kernels = _RecordingKernels()
+        router = LPLBL2Router(kernels=kernels, num_gpus=2)
+        default_map = torch.tensor([10, 20, 30, 40], dtype=torch.int64)
+        snap = _no_redundancy_snapshot(default_map=default_map)
+        topk = torch.tensor([[0, 1, -1], [2, 3, 0]], dtype=torch.int32)
+
+        decision = router.route_tokens(_toy_request(snapshot=snap, topk_ids=topk))
+
+        expected = torch.tensor([[10, 20, -1], [30, 40, 10]], dtype=torch.int32)
+        assert torch.equal(decision.routed_physical_topk_ids, expected)
+        assert decision.metadata["lp_skipped"] == "no_redundancy"
+        assert kernels.calls == []
+
+    def test_no_redundancy_falls_back_to_log2phy_col0(self):
+        kernels = _RecordingKernels()
+        router = LPLBL2Router(kernels=kernels, num_gpus=2)
+        # No default_physical_for_logical provided; fall back to log2phy[:, 0].
+        snap = _no_redundancy_snapshot(default_map=None)
+        topk = torch.tensor([[3, 2, 1, 0]], dtype=torch.int32)
+
+        decision = router.route_tokens(_toy_request(snapshot=snap, topk_ids=topk))
+
+        # log2phy is [[0,-1],[1,-1],[2,-1],[3,-1]], col 0 = [0,1,2,3].
+        expected = torch.tensor([[3, 2, 1, 0]], dtype=torch.int32)
+        assert torch.equal(decision.routed_physical_topk_ids, expected)
+
+    def test_empty_batch_skips_kernels(self):
+        kernels = _RecordingKernels()
+        router = LPLBL2Router(kernels=kernels, num_gpus=2)
+        empty_topk = torch.empty((0, 3), dtype=torch.int32)
+        empty_weights = torch.empty((0, 3), dtype=torch.float32)
+
+        decision = router.route_tokens(
+            _toy_request(
+                snapshot=_toy_snapshot(),
+                topk_ids=empty_topk,
+                topk_weights=empty_weights,
+            )
+        )
+
+        assert decision.routed_physical_topk_ids.shape == (0, 3)
+        assert decision.metadata["lp_skipped"] == "empty_batch"
+        # Warmup fires (layer state is still built), but no per-batch kernels run.
+        assert kernels.calls == []
+        assert kernels.warmup_shapes == [(4, 8)]
+
+
+# -- 4. Full kernel pipeline (mocked) -------------------------------------
+
+
+@pytest.mark.unit
+class TestRoutePipeline:
+    def test_kernel_call_order(self):
+        kernels = _RecordingKernels()
+        router = LPLBL2Router(kernels=kernels, num_gpus=2)
+        snap = _toy_snapshot()
+        topk = torch.tensor([[0, 1, 2], [2, 3, 0]], dtype=torch.int32)
+
+        router.route_tokens(
+            _toy_request(
+                snapshot=snap,
+                topk_ids=topk,
+                global_logical_count=torch.tensor([3.0, 1.0, 2.0, 0.0]),
+            )
+        )
+
+        assert [c.name for c in kernels.calls] == ["prep", "solve", "extract", "dispatch"]
+
+    def test_kernel_argument_shapes(self):
+        kernels = _RecordingKernels()
+        router = LPLBL2Router(kernels=kernels, num_gpus=2)
+        snap = _toy_snapshot()
+        topk = torch.tensor([[0, 1, 2], [2, 3, 0]], dtype=torch.int32)
+
+        router.route_tokens(_toy_request(snapshot=snap, topk_ids=topk))
+
+        prep = next(c for c in kernels.calls if c.name == "prep")
+        # prep_lp_inputs(A_full[NC,NV], b[NC], t1[num_single], global_counts[num_logical],
+        #               log_single[num_single], log_replicated[num_red_log],
+        #               B1[num_gpus,num_single], A_base_row_sum[NC])
+        assert prep.shapes == (
+            (4, 8),
+            (4,),
+            (2,),
+            (4,),
+            (2,),
+            (2,),
+            (2, 2),
+            (4,),
+        )
+
+        solve = next(c for c in kernels.calls if c.name == "solve")
+        # solve_ipm(A[NC,NV], b[NC], c[NV])
+        assert solve.shapes == ((4, 8), (4,), (8,))
+
+        extract = next(c for c in kernels.calls if c.name == "extract")
+        # extract_log2phy_prob(log2phy_prob[NL,MC], x[NV], t1[num_single],
+        #                     phy_single[num_single], phy_replicated[num_red_phy],
+        #                     log2phy[NL,MC])
+        assert extract.shapes == (
+            (4, 2),
+            (8,),
+            (2,),
+            (2,),
+            (4,),
+            (4, 2),
+        )
+
+        dispatch = next(c for c in kernels.calls if c.name == "dispatch")
+        # dispatch_probability(topk_ids[N,K], log2phy_prob[NL,MC], log2phy_map[NL,MC])
+        assert dispatch.shapes == ((2, 3), (4, 2), (4, 2))
+
+    def test_global_logical_count_cast_to_float32(self):
+        kernels = _RecordingKernels()
+        router = LPLBL2Router(kernels=kernels, num_gpus=2)
+        snap = _toy_snapshot()
+        topk = torch.tensor([[0, 1, 2]], dtype=torch.int32)
+
+        # Pass an int32 count — the policy should cast to float32 before prep.
+        int_counts = torch.tensor([3, 1, 2, 0], dtype=torch.int32)
+        router.route_tokens(
+            _toy_request(snapshot=snap, topk_ids=topk, global_logical_count=int_counts)
+        )
+
+        prep = next(c for c in kernels.calls if c.name == "prep")
+        # Index 3 is the global_counts arg.
+        assert prep.dtypes[3] == "torch.float32"
+
+    def test_dispatch_output_preserves_topk_shape(self):
+        kernels = _RecordingKernels()
+        router = LPLBL2Router(kernels=kernels, num_gpus=2)
+        snap = _toy_snapshot()
+        topk = torch.tensor(
+            [[0, 1, 2], [2, 3, 0], [1, 1, 1], [0, 0, 0]], dtype=torch.int32
+        )
+
+        decision = router.route_tokens(_toy_request(snapshot=snap, topk_ids=topk))
+
+        assert decision.routed_physical_topk_ids.shape == topk.shape
+        assert decision.routed_physical_topk_ids.dtype == topk.dtype
+
+
+# -- 5. Validation --------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestRouteValidation:
+    def test_requires_placement(self):
+        router = LPLBL2Router(kernels=_RecordingKernels(), num_gpus=2)
+        request = RoutingRequest(
+            layer_id=0,
+            logical_topk_ids=torch.tensor([[0, 1]], dtype=torch.int32),
+            topk_weights=torch.ones((1, 2)),
+            placement=None,
+            stage=RoutingStage.PREFILL,
+            global_logical_count=torch.ones(4),
+            policy=RoutingPolicyConfig(name="lplb"),
+        )
+        with pytest.raises(ValueError, match="placement"):
+            router.route_tokens(request)
+
+    def test_requires_global_logical_count(self):
+        router = LPLBL2Router(kernels=_RecordingKernels(), num_gpus=2)
+        request = RoutingRequest(
+            layer_id=0,
+            logical_topk_ids=torch.tensor([[0, 1]], dtype=torch.int32),
+            topk_weights=torch.ones((1, 2)),
+            placement=_toy_snapshot(),
+            stage=RoutingStage.PREFILL,
+            global_logical_count=None,
+            policy=RoutingPolicyConfig(name="lplb"),
+        )
+        with pytest.raises(ValueError, match="global_logical_count"):
+            router.route_tokens(request)
+
+    def test_constructor_rejects_invalid_args(self):
+        kernels = _RecordingKernels()
+        with pytest.raises(ValueError, match="num_gpus"):
+            LPLBL2Router(kernels=kernels, num_gpus=0)
+        with pytest.raises(ValueError, match="big_m_penalty"):
+            LPLBL2Router(kernels=kernels, num_gpus=2, big_m_penalty=-1.0)
+        with pytest.raises(ValueError, match="ipm_iters"):
+            LPLBL2Router(kernels=kernels, num_gpus=2, ipm_iters=0)
+
+
+# -- 6. Identity dispatch + protocol conformance --------------------------
+
+
+@pytest.mark.unit
+class TestIdentityDispatch:
+    def test_uses_default_map_when_provided(self):
+        snap = _no_redundancy_snapshot(
+            default_map=torch.tensor([10, 20, 30, 40], dtype=torch.int64)
+        )
+        topk = torch.tensor([[0, 1, -1, 3]], dtype=torch.int32)
+        result = _identity_dispatch(topk, snap)
+        assert result.dtype == torch.int32
+        assert result.tolist() == [[10, 20, -1, 40]]
+
+    def test_falls_back_to_log2phy_col_zero(self):
+        snap = _no_redundancy_snapshot(default_map=None)
+        topk = torch.tensor([[3, 2, -1, 0]], dtype=torch.int32)
+        result = _identity_dispatch(topk, snap)
+        assert result.tolist() == [[3, 2, -1, 0]]
+
+
+@pytest.mark.unit
+class TestProtocolConformance:
+    def test_lplb_l2_router_satisfies_token_router(self):
+        assert isinstance(
+            LPLBL2Router(kernels=_RecordingKernels(), num_gpus=2), TokenRouter
+        )
+
+    def test_recording_kernels_satisfies_lplb_kernels(self):
+        # The mock is the reference for "minimal valid LPLBKernels impl".
+        assert isinstance(_RecordingKernels(), LPLBKernels)
