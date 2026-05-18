@@ -31,6 +31,8 @@ from moe_load_balancer.kernels.utils import (
     get_jit_cuda_arch,
     load_jit,
     make_cpp_args,
+    make_mathdx_include_paths_resolver,
+    register_dependency,
 )
 
 if TYPE_CHECKING:
@@ -45,11 +47,27 @@ DEFAULT_NUM_ITERS = 5
 
 # Adapter-local kernel-source roots. ``load_jit`` resolves ``cuda_files``
 # paths against ``_HERE / "csrc" / <file>`` (the vendored ``.cuh`` files
-# live in a flat ``csrc/`` layout). The vendored ``sgl_kernel/*`` headers
+# live in a flat ``csrc/`` layout). The vendored ``moe_lb_jit/*`` headers
 # the kernels ``#include`` live under ``_INCLUDE`` and are added to every
 # build's ``-I`` path so the SDK has no external C++ header dependencies.
 _HERE = pathlib.Path(__file__).parent.resolve()
 _INCLUDE = str(_HERE / "include")
+_BUNDLED_MATHDX = _HERE / "resources" / "mathdx"
+
+# Register the ``mathdx`` build-time include resolver scoped to this
+# adapter. Math-DX (cuBLASDx + cuSolverDx) is needed only by the LPLB
+# kernels; ``kernels.utils.get_mathdx_root`` is generic and takes the
+# bundled search paths as arguments. Bundled at
+# ``adapters/sglang/lplb/resources/mathdx/`` after running
+# ``resources/download-mathdx.sh``.
+register_dependency("mathdx")(
+    make_mathdx_include_paths_resolver(
+        _BUNDLED_MATHDX,
+        bundled_hint=(
+            "src/moe_load_balancer/adapters/sglang/lplb/resources/download-mathdx.sh"
+        ),
+    )
+)
 
 
 def _sm_ver() -> int:
