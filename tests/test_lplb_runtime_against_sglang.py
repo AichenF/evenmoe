@@ -15,17 +15,18 @@
 
 These tests require:
 
-- SGLang installed in the active environment.
-- SGLang built with PR sgl-project/sglang#24515 (provides
-  ``sglang.jit_kernel.lplb.cuda_solver``). Run in the project's H20 docker
-  container with ``PYTHONPATH=/workspace/sglang/python`` pointing at the
-  LPLB fork.
+- SGLang installed in the active environment (any baseline — LPLB kernels
+  are vendored inside the SDK as of Phase E; no PR sgl-project/sglang#24515
+  fork required).
 - A CUDA device (Hopper-class for the cuBLASDx IPM kernel).
+- ``tvm-ffi`` and Math-DX (cuBLASDx) for the JIT build path. Both are
+  available in the lmsysorg/sglang:dev container by default.
 
 Tests are marked with ``pytest.mark.integration`` (declared in
 ``pyproject.toml``); a vanilla ``pytest tests/`` run on CPU still passes
-because both ``cuda_solver`` and CUDA are checked at module-collection time
-and the whole module is skipped when either is missing.
+because both the SDK's vendored cuda_solver module and CUDA are checked at
+module-collection time and the whole module is skipped when either is
+missing.
 """
 
 from __future__ import annotations
@@ -33,15 +34,15 @@ from __future__ import annotations
 import pytest
 import torch
 
-# Skip the whole module if the LPLB-enabled SGLang fork is absent — the
-# pure framework-neutral tests in tests/test_lplb_policy.py cover the
-# policy logic without these dependencies.
+# Skip the whole module if the SDK's vendored LPLB CUDA pipeline can't be
+# imported (it requires torch + tvm-ffi at module import time). The pure
+# framework-neutral tests in tests/test_lplb_policy.py cover the policy
+# logic without these dependencies.
 pytest.importorskip(
-    "sglang.jit_kernel.lplb.cuda_solver",
+    "moe_load_balancer.adapters.sglang.lplb.cuda_solver",
     reason=(
-        "LPLB CUDA kernels require sglang built with PR #24515 in the "
-        "active env; run inside the LPLB-enabled docker container with "
-        "PYTHONPATH=/workspace/sglang/python."
+        "LPLB CUDA kernel pipeline requires torch + tvm-ffi importable. "
+        "Run inside the lmsysorg/sglang:dev container."
     ),
 )
 pytest.importorskip(
