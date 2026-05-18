@@ -176,8 +176,48 @@ def _build_layer_state(
     valid_log = (
         torch.arange(num_logical, device=device).unsqueeze(1).expand_as(j_idx)[valid_mask]
     )
-    phy2log = torch.empty(num_phy, dtype=torch.int64, device=device)
+
+    # Defensive validation: every valid_phy entry must be a real physical
+    # slot index, otherwise the scatter below silently OOBs and the next
+    # ``log_counts[phy2log]`` lookup triggers an async device-side assert
+    # that surfaces minutes later as an opaque CUDA error. Empirically
+    # (DeepSeek-R1 + --ep-num-redundant-experts), some SGLang configurations
+    # leave physical slots that no logical claims; surface that cleanly.
+    if valid_phy.numel() > 0:
+        vp_min = int(valid_phy.min().item())
+        vp_max = int(valid_phy.max().item())
+        if vp_min < 0 or vp_max >= num_phy:
+            raise RuntimeError(
+                f"LPLB _build_layer_state: valid_phy out of [0, {num_phy}) "
+                f"(observed min={vp_min}, max={vp_max}). "
+                f"log2phy.shape={tuple(log2phy.shape)}, "
+                f"log_counts shape={tuple(log_counts.shape)}, "
+                f"log_counts min/max="
+                f"{int(log_counts.min().item())}/"
+                f"{int(log_counts.max().item())}."
+            )
+
+    # Initialize phy2log to a sentinel (num_logical) so any uncovered slot
+    # later reads as an unmistakable out-of-bound for log_counts. The
+    # post-scatter sanity check below converts that into a clean error.
+    phy2log = torch.full((num_phy,), num_logical, dtype=torch.int64, device=device)
     phy2log[valid_phy] = valid_log
+
+    uncovered = phy2log == num_logical
+    num_uncovered = int(uncovered.sum().item())
+    if num_uncovered > 0:
+        uncovered_ids = torch.nonzero(uncovered).flatten()[:16].tolist()
+        sum_counts = int(log_counts.sum().item())
+        raise RuntimeError(
+            f"LPLB _build_layer_state: phy2log has {num_uncovered} physical "
+            f"slot(s) not reachable from logical_to_physical_candidates "
+            f"(first up to 16: {uncovered_ids}). "
+            f"num_phy={num_phy}, num_logical={num_logical}, "
+            f"sum(log_counts)={sum_counts}. Likely cause: "
+            f"``num_physical_experts`` over-counts the routed slots "
+            f"(e.g. it includes a fused-shared-expert column), or "
+            f"``logical_to_physical_count`` is under-counted."
+        )
 
     # Partition logicals into single-copy vs replicated.
     log_single = torch.nonzero(log_counts == 1).flatten().to(torch.int64)
