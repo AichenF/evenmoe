@@ -13,13 +13,15 @@
 # ==============================================================================
 """SGLang-backed :class:`LPLBKernels` implementation.
 
-Thin delegation layer over ``sglang.jit_kernel.lplb.cuda_solver``. Constructed
-once by :class:`LPLBRuntime` and threaded through to :class:`LPLBL2Router`
-via constructor injection. Sets the "Option 1" path of the open
-kernel-adapter decision (see
-``load_balancer_project/DECISION_lplb_kernel_adapter.md``); a future TRT-LLM
-or vendored implementation supplies its own :class:`LPLBKernels` without
-changing the policy or the core contract.
+Thin delegation layer over the SDK-owned, fully self-contained
+:mod:`moe_load_balancer.adapters.sglang.lplb.cuda_solver`. Phase E of the
+LPLB roadmap moved the kernel sources + the ``sgl_kernel/*`` C++ helper
+headers + the JIT build infrastructure into the SDK; the LPLB pipeline
+no longer has any compile-time or runtime dependency on an installed
+``sglang`` package. Constructed once by :class:`LPLBRuntime` and threaded
+through to :class:`LPLBL2Router` via constructor injection. A future
+TensorRT-LLM or framework-neutral implementation supplies its own
+:class:`LPLBKernels` without changing the policy or the core contract.
 """
 
 from __future__ import annotations
@@ -30,23 +32,28 @@ from typing import Any, Optional
 class SGLangLPLBKernels:
     """Adapter that satisfies :class:`moe_load_balancer.core.l2.LPLBKernels`.
 
-    The constructor imports ``sglang.jit_kernel.lplb.cuda_solver`` lazily so
-    that pure-Python contract tests (which don't have sglang installed)
-    can still import this module. Once constructed, every call delegates
-    directly into the SGLang kernel module — no extra Python work happens
-    on the per-batch hot path beyond the protocol method dispatch.
+    The constructor imports the vendored
+    :mod:`moe_load_balancer.adapters.sglang.lplb.cuda_solver` lazily so
+    that pure-Python contract tests (which don't need ``torch`` /
+    ``tvm-ffi``) can still import this module. Once constructed, every
+    call delegates directly into the cuda_solver module — no extra
+    Python work happens on the per-batch hot path beyond the protocol
+    method dispatch.
     """
 
     def __init__(self) -> None:
         try:
-            from sglang.jit_kernel.lplb import cuda_solver
-        except ImportError as exc:  # pragma: no cover — exercised only in non-SGLang envs
+            from moe_load_balancer.adapters.sglang.lplb import cuda_solver
+        except ImportError as exc:  # pragma: no cover — non-runtime envs only
             raise ImportError(
-                "SGLangLPLBKernels requires sglang.jit_kernel.lplb.cuda_solver, "
-                "which is part of an SGLang build that ships the LPLB CUDA "
-                "kernels (see sgl-project/sglang#24515). Install sglang in the "
-                "active environment, or pick a different LPLBKernels "
-                "implementation."
+                "SGLangLPLBKernels requires "
+                "moe_load_balancer.adapters.sglang.lplb.cuda_solver and its "
+                "transitive runtime dependencies (torch + tvm-ffi). The "
+                "vendored LPLB kernel sources additionally need NVIDIA "
+                "Math-DX (cuBLASDx) headers at JIT compile time — set "
+                "MATHDX_HOME, install the ``nvidia-mathdx`` PyPI package, "
+                "or run the bundled "
+                "``adapters/sglang/lplb/resources/download-mathdx.sh``."
             ) from exc
 
         self._cuda = cuda_solver

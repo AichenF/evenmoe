@@ -248,12 +248,18 @@ def load_jit(
     extra_dependencies: List[str] | None = None,
     build_directory: str | None = None,
     header_only: bool = True,
+    source_root: pathlib.Path | None = None,
 ) -> Module:
-    """Load a JIT module from C++/CUDA source files under ``kernels/csrc/``.
+    """Load a JIT module from C++/CUDA source files.
 
-    Mirrors ``sglang.jit_kernel.utils.load_jit`` but resolves sources against
-    the SDK's own ``KERNEL_PATH`` and emits SDK-prefixed module names. See
-    that function for full parameter semantics.
+    By default, ``cpp_files`` and ``cuda_files`` are resolved against
+    ``KERNEL_PATH / "csrc" / <file>`` (the SDK's top-level kernel sources).
+    Adapters that ship their own ``csrc/`` directory (e.g. the SGLang LPLB
+    adapter at ``adapters/sglang/lplb/csrc/``) pass ``source_root=<adapter
+    package dir>`` so resolution happens against ``source_root / "csrc" /
+    <file>`` instead. Module names get an adapter-specific suffix when
+    ``source_root`` differs from ``KERNEL_PATH``, to keep the tvm-ffi
+    build-cache key stable per source location.
     """
 
     from tvm_ffi.cpp import load, load_inline
@@ -265,8 +271,9 @@ def load_jit(
     extra_ldflags = extra_ldflags or []
     extra_include_paths = extra_include_paths or []
 
-    cpp_files = [str((KERNEL_PATH / "csrc" / f).resolve()) for f in cpp_files]
-    cuda_files = [str((KERNEL_PATH / "csrc" / f).resolve()) for f in cuda_files]
+    root = source_root.resolve() if source_root is not None else KERNEL_PATH
+    cpp_files = [str((root / "csrc" / f).resolve()) for f in cpp_files]
+    cuda_files = [str((root / "csrc" / f).resolve()) for f in cuda_files]
 
     for dep in set(extra_dependencies or []):
         if dep not in _REGISTERED_DEPENDENCIES:
