@@ -197,34 +197,36 @@ def _build_layer_state(
                 f"{int(log_counts.max().item())}."
             )
 
-    # Initialize phy2log to a sentinel (num_logical) so any uncovered slot
-    # later reads as an unmistakable out-of-bound for log_counts. The
-    # post-scatter sanity check below converts that into a clean error.
-    phy2log = torch.full((num_phy,), num_logical, dtype=torch.int64, device=device)
+    # Initialize phy2log to a sentinel (num_logical) so we can distinguish
+    # physical slots that no logical claims through
+    # logical_to_physical_candidates. Empirically (DeepSeek-R1 with
+    # --ep-num-redundant-experts + --init-expert-location=trivial), SGLang
+    # reserves ``num_physical_experts`` slots that include the redundant
+    # capacity but only populates the first ``num_logical`` of them — the
+    # rest stay unclaimed. That is a legitimate state: those slots simply
+    # carry no expert, so the LP must ignore them (they're not in any
+    # logical's replica set, so they contribute nothing to peak GPU load).
+    # The masked indexing below skips them safely.
+    _PHY_UNCOVERED = num_logical  # sentinel: out-of-range for log_counts
+    phy2log = torch.full((num_phy,), _PHY_UNCOVERED, dtype=torch.int64, device=device)
     phy2log[valid_phy] = valid_log
-
-    uncovered = phy2log == num_logical
-    num_uncovered = int(uncovered.sum().item())
-    if num_uncovered > 0:
-        uncovered_ids = torch.nonzero(uncovered).flatten()[:16].tolist()
-        sum_counts = int(log_counts.sum().item())
-        raise RuntimeError(
-            f"LPLB _build_layer_state: phy2log has {num_uncovered} physical "
-            f"slot(s) not reachable from logical_to_physical_candidates "
-            f"(first up to 16: {uncovered_ids}). "
-            f"num_phy={num_phy}, num_logical={num_logical}, "
-            f"sum(log_counts)={sum_counts}. Likely cause: "
-            f"``num_physical_experts`` over-counts the routed slots "
-            f"(e.g. it includes a fused-shared-expert column), or "
-            f"``logical_to_physical_count`` is under-counted."
-        )
+    is_covered = phy2log != _PHY_UNCOVERED
 
     # Partition logicals into single-copy vs replicated.
     log_single = torch.nonzero(log_counts == 1).flatten().to(torch.int64)
     phy_single = log2phy[log_single, 0].to(torch.int64).contiguous()
     log_replicated = torch.nonzero(log_counts > 1).flatten().to(torch.int64)
+    # phy_replicated: physical slots that (a) are claimed by some logical
+    # AND (b) that logical has more than one replica. Uncovered slots are
+    # masked out before the log_counts gather so the indexing stays in
+    # bounds even when ``_PHY_UNCOVERED == num_logical`` would otherwise
+    # OOB.
+    safe_phy2log = phy2log.clamp(max=num_logical - 1)
     phy_replicated = (
-        torch.nonzero(log_counts[phy2log] > 1).flatten().to(torch.int64).contiguous()
+        torch.nonzero(is_covered & (log_counts[safe_phy2log] > 1))
+        .flatten()
+        .to(torch.int64)
+        .contiguous()
     )
 
     num_single = int(log_single.numel())

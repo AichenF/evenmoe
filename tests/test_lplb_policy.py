@@ -294,6 +294,41 @@ class TestBuildLayerState:
         # No LP matrices; log2phy_prob buffer still allocated for shape stability.
         assert state.log2phy_prob.shape == (4, 2)
 
+    def test_uncovered_physicals_do_not_crash(self):
+        """SGLang reserves slots in ``num_physical_experts`` that no logical
+        claims (DeepSeek-R1 + --ep-num-redundant-experts under trivial
+        placement). The LP must treat those as no-op padding, not as bugs."""
+        # 4 logical, 6 physical, but only 4 phys are claimed: log2phy[i, 0]=i,
+        # log_counts=[1, 1, 1, 1]. Phys 4 and 5 are reserved but unused.
+        log2phy = torch.tensor(
+            [[0, -1, -1, -1, -1, -1],
+             [1, -1, -1, -1, -1, -1],
+             [2, -1, -1, -1, -1, -1],
+             [3, -1, -1, -1, -1, -1]],
+            dtype=torch.int64,
+        )
+        log_counts = torch.tensor([1, 1, 1, 1], dtype=torch.int64)
+        snap = PlacementSnapshot(
+            layer_id=0,
+            num_logical_experts=4,
+            num_physical_experts=6,
+            logical_to_physical_candidates=log2phy,
+            logical_to_physical_count=log_counts,
+            metadata={"placement_version": 0},
+        )
+        state = _build_layer_state(snap, num_gpus=2, big_m_penalty=1000.0)
+        # With every logical at exactly 1 copy and 2 physical slots unclaimed,
+        # the LP must degenerate.
+        assert state.has_redundancy is False
+        # Identity dispatch should also succeed (covers the route_tokens
+        # no_redundancy fast path under this snapshot).
+        router = LPLBL2Router(kernels=_RecordingKernels(), num_gpus=2)
+        topk = torch.tensor([[0, 1, 2]], dtype=torch.int32)
+        decision = router.route_tokens(
+            _toy_request(snapshot=snap, topk_ids=topk)
+        )
+        assert decision.metadata["lp_skipped"] == "no_redundancy"
+
     def test_rejects_non_divisible_num_phy(self):
         # 5 physical experts, 2 GPUs → 5 % 2 != 0.
         bad = PlacementSnapshot(
