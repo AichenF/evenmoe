@@ -1,11 +1,22 @@
 """L1 placement policy implementations.
 
-Reserved for the future L1 optimizer (per-layer replica budget, communication-
-aware placement). Integrations can provide an external placement source while
-this package has no built-in planner. See
-:class:`moe_load_balancer.core.l1.PlacementPlanner` for the contract.
+Currently provides the DeepSeek EPLB family. Future planners (CRAFT,
+MoETuner, replica-budget allocators) implement the same
+:class:`moe_load_balancer.core.l1.PlacementPlanner` protocol.
 """
 
 from __future__ import annotations
 
-__all__: list[str] = []
+from moe_load_balancer.policies.l1.eplb import (
+    DeepSeekEPLBPlanner,
+    EplbAlgorithm,
+    compute_algorithm,
+    rebalance_experts,
+)
+
+__all__ = [
+    "DeepSeekEPLBPlanner",
+    "EplbAlgorithm",
+    "compute_algorithm",
+    "rebalance_experts",
+]

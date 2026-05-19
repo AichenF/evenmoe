@@ -132,7 +132,14 @@ class PlacementSnapshot:
 
 @dataclass(frozen=True)
 class PlacementStats:
-    """Input statistics for future L1 placement planning."""
+    """Input statistics for L1 placement planning.
+
+    For EPLB the canonical field is ``logical_count``: per-layer per-logical-
+    expert activation count, summed over a recording window or a single batch.
+    Shape ``[num_layers, num_logical_experts]`` (already-summed) or
+    ``[num_steps, num_layers, num_logical_experts]`` (multi-step, summed by
+    the planner). Future planners may consume ``physical_count`` / ``rank_load``.
+    """
 
     logical_count: Optional[TensorLike] = None
     physical_count: Optional[TensorLike] = None
@@ -141,23 +148,86 @@ class PlacementStats:
 
 
 @dataclass(frozen=True)
-class PlacementRequest:
-    """Reserved L1 planning request.
+class PlacementPolicyConfig:
+    """Framework-neutral L1 placement policy selection.
 
-    Not consumed by the current SGLang POC (which only reads PlacementSnapshot
-    from EPLB). Kept as a forward-looking surface for the future L1 planner;
-    whether PlacementPlan is written back to ExpertLocationMetadata is pending.
+    Mirrors :class:`RoutingPolicyConfig` for L1. ``name`` identifies the
+    placement algorithm family (``"eplb"`` for the DeepSeek EPLB family,
+    ``"disabled"`` to skip). ``metadata`` carries stable per-policy scalar
+    config: algorithm variant (``"auto"`` / ``"deepseek"`` /
+    ``"deepseek_hierarchical"`` / ...), layout scalars
+    (``num_physical_experts``, ``num_local_physical_experts``,
+    ``num_groups``, ``num_nodes``). Tensors MUST NOT go here — tensor inputs
+    flow through :class:`PlacementRequest.stats`.
+
+    L1 has no stage gating (placement is computed offline or at low
+    frequency, not per-batch), so this class is intentionally simpler than
+    ``RoutingPolicyConfig`` and omits ``enabled_stages``.
     """
 
-    current: Mapping[int, PlacementSnapshot]
+    DISABLED: ClassVar[str] = "disabled"
+
+    name: str = DISABLED
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+
+    @classmethod
+    def from_value(
+        cls, value: "PlacementPolicyConfig | str"
+    ) -> "PlacementPolicyConfig":
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, str):
+            return cls(name=value)
+        raise TypeError(
+            "PlacementPolicyConfig.from_value expects PlacementPolicyConfig or str, "
+            f"got {type(value).__name__}."
+        )
+
+    @property
+    def is_disabled(self) -> bool:
+        return self.name == self.DISABLED
+
+
+@dataclass(frozen=True, kw_only=True)
+class PlacementRequest:
+    """Framework-neutral L1 planning request.
+
+    Carries the inputs a :class:`PlacementPlanner` needs to produce a
+    placement plan. For EPLB the required inputs are ``stats.logical_count``
+    plus the scalars in ``policy.metadata``: ``num_physical_experts``,
+    ``num_local_physical_experts``, ``num_groups``, ``num_nodes``, and
+    optionally ``algorithm`` (defaults to ``"auto"``).
+
+    ``current`` is optional — EPLB does not consume the current placement
+    (it produces an absolute new placement from stats only). Future planners
+    (CRAFT / MoETuner) may use ``current`` for diff-based budgeting.
+    """
+
     stats: PlacementStats
+    policy: PlacementPolicyConfig | str = field(default_factory=PlacementPolicyConfig)
+    current: Optional[Mapping[int, PlacementSnapshot]] = None
     hbm_budget_bytes: Optional[int] = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "policy", PlacementPolicyConfig.from_value(self.policy))
 
 
 @dataclass(frozen=True)
 class PlacementPlan:
-    """Reserved L1 planning output (see PlacementRequest)."""
+    """Framework-neutral L1 planning output.
+
+    ``snapshots`` is the per-layer placement view consumable by L2 (and by
+    framework adapters for writeback). ``metadata`` carries raw algorithm
+    outputs for adapters that need them verbatim — for EPLB this is
+    ``{"physical_to_logical_map": Tensor, "logical_to_all_physical_map":
+    Tensor, "expert_count": Tensor}``, so the SGLang adapter can construct
+    ``ExpertLocationMetadata`` directly without round-tripping through
+    ``snapshots``.
+    """
 
     snapshots: Mapping[int, PlacementSnapshot]
     metadata: Mapping[str, Any] = field(default_factory=dict)
