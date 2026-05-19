@@ -2,16 +2,23 @@
 
 Vendored from PR sgl-project/sglang#24515 (``python/sglang/jit_kernel/lplb/``)
 and rewired to be fully self-contained inside the moe_load_balancer SDK.
-Kernel sources live under ``adapters/sglang/lplb/csrc/`` (header-only
-``.cuh`` files). The C++ tvm-ffi helper utilities the kernels ``#include``
-(``tensor.h``, ``utils.cuh``, ``utils.h``, ``source_location.h`` — 33 KB
-total, namespace ``host``) are vendored alongside them under
-``adapters/sglang/lplb/include/moe_lb_jit/``. These are framework-neutral
-tvm-ffi + CUDA launch helpers (TensorView validation, stream-aware
-``cudaLaunchKernelEx`` wrapper); originally hosted in SGLang's
-``sgl_kernel`` namespace but renamed during vendoring so the SDK has no
-externally-recognizable dependency on the SGLang inference engine. No
-runtime or build-time dependency on an installed ``sglang`` package
+Lives under ``moe_load_balancer/kernels/lplb/`` — framework-neutral by
+construction; SGLang-specific glue (``LPLBKernels`` Protocol impl,
+SGLang runtime hook) lives separately under ``adapters/sglang/lplb/``.
+
+Layout:
+
+- ``csrc/``                  CUDA kernel source files (``.cuh``).
+- ``include/moe_lb_jit/``    Vendored tvm-ffi + CUDA helper headers
+                              (TensorView validation chain, stream-aware
+                              ``cudaLaunchKernelEx`` wrapper, etc.; ~33 KB).
+                              Originally ``sgl_kernel/*`` in PR #24515;
+                              renamed during vendoring so the SDK has no
+                              externally-recognizable sgl_kernel surface.
+- ``resources/mathdx/``      NVIDIA Math-DX (cuBLASDx + cuSolverDx) headers,
+                              populated by ``resources/download-mathdx.sh``.
+
+No runtime or build-time dependency on an installed ``sglang`` package
 remains for the LPLB kernel pipeline.
 
 Per-call CPU overhead is dominated by the pybind11 dispatch + four

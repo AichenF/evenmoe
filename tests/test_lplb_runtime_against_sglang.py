@@ -39,7 +39,7 @@ import torch
 # framework-neutral tests in tests/test_lplb_policy.py cover the policy
 # logic without these dependencies.
 pytest.importorskip(
-    "moe_load_balancer.adapters.sglang.lplb.cuda_solver",
+    "moe_load_balancer.kernels.lplb.cuda_solver",
     reason=(
         "LPLB CUDA kernel pipeline requires torch + tvm-ffi importable. "
         "Run inside the lmsysorg/sglang:dev container."

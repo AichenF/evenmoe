@@ -43,17 +43,17 @@ class SGLangLPLBKernels:
 
     def __init__(self) -> None:
         try:
-            from moe_load_balancer.adapters.sglang.lplb import cuda_solver
+            from moe_load_balancer.kernels.lplb import cuda_solver
         except ImportError as exc:  # pragma: no cover — non-runtime envs only
             raise ImportError(
                 "SGLangLPLBKernels requires "
-                "moe_load_balancer.adapters.sglang.lplb.cuda_solver and its "
+                "moe_load_balancer.kernels.lplb.cuda_solver and its "
                 "transitive runtime dependencies (torch + tvm-ffi). The "
                 "vendored LPLB kernel sources additionally need NVIDIA "
                 "Math-DX (cuBLASDx) headers at JIT compile time — set "
                 "MATHDX_HOME, install the ``nvidia-mathdx`` PyPI package, "
                 "or run the bundled "
-                "``adapters/sglang/lplb/resources/download-mathdx.sh``."
+                "``src/moe_load_balancer/kernels/lplb/resources/download-mathdx.sh``."
             ) from exc
 
         self._cuda = cuda_solver
