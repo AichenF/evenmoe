@@ -13,13 +13,9 @@
 # ==============================================================================
 """LPLB L2 router — LP-based redirection among physical replicas.
 
-Mirrors the algorithm from PR sgl-project/sglang#24515's ``LPLBSolver`` but
-operates on framework-neutral :class:`PlacementSnapshot` inputs and routes
-the four kernels through an injected :class:`LPLBKernels` implementation.
-The SGLang adapter satisfies that interface today by delegating to
-``sglang.jit_kernel.lplb.cuda_solver``; see
-``load_balancer_project/DECISION_lplb_kernel_adapter.md`` for the open
-decision on whether the SDK eventually owns the kernels itself.
+Framework-neutral: operates on :class:`PlacementSnapshot` inputs and
+routes the four kernels through an injected :class:`LPLBKernels`
+implementation supplied by the framework adapter.
 
 Algorithm overview
 ------------------
@@ -45,7 +41,7 @@ Per-layer state
 The LP constraint matrices (``B1``, ``A_base``, ``c_vec``, ``log2phy``, …)
 depend only on the placement — not on per-batch data. They are pre-built
 once per ``(layer_id, placement_version)`` and cached. The adapter signals
-EPLB-driven placement changes by bumping
+placement changes by bumping
 ``PlacementSnapshot.metadata["placement_version"]``; the router rebuilds the
 state on the next ``route_tokens`` call.
 
@@ -75,8 +71,8 @@ from moe_load_balancer.core.types import (
     RoutingRequest,
 )
 
-# Sentinel used by the dispatch kernel and the no-redundancy fallback to
-# preserve the "-1 padded slot" convention from SGLang's TopK output.
+# Sentinel preserved through the no-redundancy fallback for the
+# "-1 padded slot" convention frameworks use for invalid TopK entries.
 _INVALID_ID = -1
 
 
@@ -126,10 +122,8 @@ def _build_layer_state(
 ) -> _LPLBLayerState:
     """Build LP matrices + workspace for one MoE layer.
 
-    Mirrors ``LPLBSolver.__init__`` in PR #24515 but consumes the
-    framework-neutral :class:`PlacementSnapshot` rather than SGLang's
-    ``ExpertLocationMetadata``. Validates the contiguous-per-rank ownership
-    layout (``num_phy % num_gpus == 0``).
+    Consumes a framework-neutral :class:`PlacementSnapshot`. Validates the
+    contiguous-per-rank ownership layout (``num_phy % num_gpus == 0``).
 
     Degenerate case: when no logical expert has more than one physical copy
     (``has_redundancy=False``), most of the LP machinery is skipped. The
@@ -180,9 +174,9 @@ def _build_layer_state(
     # Defensive validation: every valid_phy entry must be a real physical
     # slot index, otherwise the scatter below silently OOBs and the next
     # ``log_counts[phy2log]`` lookup triggers an async device-side assert
-    # that surfaces minutes later as an opaque CUDA error. Empirically
-    # (DeepSeek-R1 + --ep-num-redundant-experts), some SGLang configurations
-    # leave physical slots that no logical claims; surface that cleanly.
+    # that surfaces minutes later as an opaque CUDA error. Some placements
+    # can leave physical slots that no logical claims (see below); the
+    # range check here catches genuinely malformed inputs first.
     if valid_phy.numel() > 0:
         vp_min = int(valid_phy.min().item())
         vp_max = int(valid_phy.max().item())
@@ -199,14 +193,13 @@ def _build_layer_state(
 
     # Initialize phy2log to a sentinel (num_logical) so we can distinguish
     # physical slots that no logical claims through
-    # logical_to_physical_candidates. Empirically (DeepSeek-R1 with
-    # --ep-num-redundant-experts + --init-expert-location=trivial), SGLang
-    # reserves ``num_physical_experts`` slots that include the redundant
-    # capacity but only populates the first ``num_logical`` of them — the
-    # rest stay unclaimed. That is a legitimate state: those slots simply
-    # carry no expert, so the LP must ignore them (they're not in any
-    # logical's replica set, so they contribute nothing to peak GPU load).
-    # The masked indexing below skips them safely.
+    # logical_to_physical_candidates. Some placements reserve
+    # ``num_physical_experts`` slots that include redundant capacity but
+    # only populate the first ``num_logical`` of them — the rest stay
+    # unclaimed. That is a legitimate state: those slots simply carry no
+    # expert, so the LP must ignore them (they're not in any logical's
+    # replica set, so they contribute nothing to peak GPU load). The
+    # masked indexing below skips them safely.
     _PHY_UNCOVERED = num_logical  # sentinel: out-of-range for log_counts
     phy2log = torch.full((num_phy,), _PHY_UNCOVERED, dtype=torch.int64, device=device)
     phy2log[valid_phy] = valid_log
@@ -340,7 +333,7 @@ def _identity_dispatch(topk_ids: Tensor, snapshot: PlacementSnapshot) -> Tensor:
     2. ``snapshot.logical_to_physical_candidates[logical_id, 0]`` otherwise.
 
     Tokens with ``logical_id < 0`` (padding / invalid slots) are preserved
-    as-is so the SGLang TopK output convention is respected.
+    as-is so framework TopK padding conventions are respected.
     """
     log2phy = snapshot.logical_to_physical_candidates
     default_map = snapshot.default_physical_for_logical
@@ -502,9 +495,9 @@ class LPLBL2Router(TokenRouter):
         """Return the cached state for this (layer, version), building if needed.
 
         ``snapshot.metadata["placement_version"]`` keys the cache. The
-        SGLang adapter bumps this whenever ``ExpertLocationMetadata.update``
-        runs (EPLB rebalance), so the next ``route_tokens`` call observes a
-        miss and rebuilds the LP matrices.
+        framework adapter bumps this whenever placement changes (e.g. on
+        EPLB rebalance), so the next ``route_tokens`` call observes a miss
+        and rebuilds the LP matrices.
 
         Older versions of the same layer are evicted from the cache when a
         new version arrives to keep the memory footprint bounded.

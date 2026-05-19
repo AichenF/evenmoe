@@ -1,10 +1,8 @@
 """JIT-compiled CUDA Interior Point Method LP solver.
 
-Vendored from PR sgl-project/sglang#24515 (``python/sglang/jit_kernel/lplb/``)
-and rewired to be fully self-contained inside the moe_load_balancer SDK.
-Lives under ``moe_load_balancer/kernels/lplb/`` — framework-neutral by
-construction; SGLang-specific glue (``LPLBKernels`` Protocol impl,
-SGLang runtime hook) lives separately under ``adapters/sglang/lplb/``.
+Framework-neutral; framework-specific glue (a ``LPLBKernels`` Protocol
+impl + the runtime hook) lives separately under
+``moe_load_balancer.adapters.<framework>.lplb``.
 
 Layout:
 
@@ -12,14 +10,8 @@ Layout:
 - ``include/moe_lb_jit/``    Vendored tvm-ffi + CUDA helper headers
                               (TensorView validation chain, stream-aware
                               ``cudaLaunchKernelEx`` wrapper, etc.; ~33 KB).
-                              Originally ``sgl_kernel/*`` in PR #24515;
-                              renamed during vendoring so the SDK has no
-                              externally-recognizable sgl_kernel surface.
 - ``resources/mathdx/``      NVIDIA Math-DX (cuBLASDx + cuSolverDx) headers,
                               populated by ``resources/download-mathdx.sh``.
-
-No runtime or build-time dependency on an installed ``sglang`` package
-remains for the LPLB kernel pipeline.
 
 Per-call CPU overhead is dominated by the pybind11 dispatch + four
 ``data_ptr()`` calls (~5–10 µs total).
@@ -62,16 +54,13 @@ _INCLUDE = str(_HERE / "include")
 _BUNDLED_MATHDX = _HERE / "resources" / "mathdx"
 
 # Register the ``mathdx`` build-time include resolver scoped to this
-# adapter. Math-DX (cuBLASDx + cuSolverDx) is needed only by the LPLB
-# kernels; ``kernels.utils.get_mathdx_root`` is generic and takes the
-# bundled search paths as arguments. Bundled at
-# ``adapters/sglang/lplb/resources/mathdx/`` after running
-# ``resources/download-mathdx.sh``.
+# package. Math-DX (cuBLASDx + cuSolverDx) is bundled under
+# ``kernels/lplb/resources/mathdx/`` after running the install script.
 register_dependency("mathdx")(
     make_mathdx_include_paths_resolver(
         _BUNDLED_MATHDX,
         bundled_hint=(
-            "src/moe_load_balancer/adapters/sglang/lplb/resources/download-mathdx.sh"
+            "src/moe_load_balancer/kernels/lplb/resources/download-mathdx.sh"
         ),
     )
 )

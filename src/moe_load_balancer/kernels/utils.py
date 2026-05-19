@@ -11,26 +11,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""JIT-kernel build helpers (vendored subset from ``sglang.jit_kernel.utils``).
+"""JIT-kernel build helpers.
 
-This module hosts the small set of helpers the LPLB CUDA kernels (and any
-future SDK-owned JIT kernels) need to compile through ``tvm-ffi``:
+This module hosts the small set of helpers SDK CUDA kernels need to
+compile through ``tvm-ffi``:
 
 - ``cache_once``: simple memoization decorator (compatible with ``torch.compile``).
 - ``make_cpp_args`` + ``CPPArgList``: C++ template argument formatting.
 - ``ArchInfo`` + ``get_jit_cuda_arch`` + ``override_jit_cuda_arch``: CUDA arch
   detection.
 - ``load_jit``: thin wrapper around ``tvm_ffi.cpp.load`` / ``load_inline``
-  that injects the SDK's default include / cflag / target-arch setup.
-- ``register_dependency`` + ``get_mathdx_include_paths``: resolution of
-  external header libraries needed by future SDK-owned CUDA kernels.
+  that injects the SDK's default include / cflag / target-arch setup;
+  accepts a ``source_root`` so each kernel subpackage can host its own
+  ``csrc/``.
+- ``register_dependency`` + ``make_mathdx_include_paths_resolver``:
+  declare build-time include-path dependencies (e.g. Math-DX) that
+  resolve at JIT compile time rather than at module import.
 
-The SDK does **not** import any inference framework here. Framework-coupled
-kernels (e.g. LPLB's current pipeline, which depends on SGLang's
-``sgl_kernel/*`` headers) live behind their adapter's ``LPLBKernels``
-implementation and may either delegate to the framework's kernel module or
-vendor sources under ``adapters/<framework>/<algo>/``. See
-``load_balancer_project/DECISION_lplb_kernel_adapter.md`` for the rationale.
+Nothing here imports any inference framework. Kernel subpackages
+(:mod:`moe_load_balancer.kernels.<algo>`) ship their own ``.cuh`` /
+``.hpp`` files and pass ``source_root=Path(__file__).parent`` to
+``load_jit``.
 """
 
 from __future__ import annotations
@@ -69,8 +70,7 @@ def cache_once(fn: F) -> F:
     """Memoize a function once per (args, kwargs) tuple.
 
     ``functools.lru_cache`` is incompatible with ``torch.compile``; this
-    plain dict-backed cache mirrors the behavior used by the upstream
-    SGLang JIT kernel utilities.
+    plain dict-backed cache is a torch.compile-safe alternative.
     """
     result_map: Dict[Tuple[Any, ...], Any] = {}
 
@@ -91,22 +91,14 @@ def _make_wrapper(tup: Tuple[str, str]) -> str:
 
 @cache_once
 def _resolve_kernel_path() -> pathlib.Path:
-    """Locate the SDK's kernel sources directory.
+    """Locate this module's directory; default search root for ``load_jit``.
 
-    Layout assumed:
-
-        moe_load_balancer/kernels/
-        ├── csrc/
-        │   └── <algo>/*.cuh         # CUDA sources, included via #include "<path>"
-        └── utils.py                 # this file
-
-    Unlike SGLang's ``jit_kernel/`` we do not require a sibling ``include/``
-    folder — SDK ``.cuh`` files pull framework headers (e.g. ``sgl_kernel``)
-    through registered dependencies instead.
-
-    Existence of ``csrc/`` is not validated here: it can be empty until an
-    algorithm subpackage is added. ``load_jit`` surfaces the missing-file
-    error at compile time.
+    Kernel subpackages typically ship their own ``csrc/`` directory and
+    pass ``source_root=Path(__file__).parent`` to ``load_jit``; this
+    default exists so callers that don't override it land in the same
+    package as ``utils.py``. Existence of any ``csrc/`` beneath it is
+    not validated here — ``load_jit`` surfaces the missing-file error
+    at compile time.
     """
     return pathlib.Path(__file__).parent.resolve()
 
@@ -168,8 +160,8 @@ class ArchInfo:
 
     @property
     def jit_flag(self) -> str:
-        # Matches sglang's SGL_CUDA_ARCH define so vendored .cuh files
-        # depending on it keep working unchanged.
+        # Vendored ``.cuh`` files key conditional code paths on this define
+        # (e.g. SM-version-specific shmem budgets); keep the name stable.
         return f"-DSGL_CUDA_ARCH={self.major * 100 + self.minor * 10}"
 
 
@@ -254,12 +246,10 @@ def load_jit(
 
     By default, ``cpp_files`` and ``cuda_files`` are resolved against
     ``KERNEL_PATH / "csrc" / <file>`` (the SDK's top-level kernel sources).
-    Adapters that ship their own ``csrc/`` directory (e.g. the SGLang LPLB
-    adapter at ``adapters/sglang/lplb/csrc/``) pass ``source_root=<adapter
-    package dir>`` so resolution happens against ``source_root / "csrc" /
-    <file>`` instead. Module names get an adapter-specific suffix when
-    ``source_root`` differs from ``KERNEL_PATH``, to keep the tvm-ffi
-    build-cache key stable per source location.
+    Kernel subpackages that ship their own ``csrc/`` directory (e.g.
+    ``kernels/lplb/csrc/``) pass ``source_root=<package dir>`` so
+    resolution happens against ``source_root / "csrc" / <file>``
+    instead.
     """
 
     from tvm_ffi.cpp import load, load_inline
@@ -360,10 +350,9 @@ def get_mathdx_root(*extra_bundled_paths: pathlib.Path) -> Optional[pathlib.Path
          adapter-local ``resources/mathdx`` directory populated by the
          bundled ``download-mathdx.sh``.
 
-    The default top-level kernels module does not own any LPLB-style
-    bundled directory; adapters that need Math-DX (e.g.
-    ``adapters/sglang/lplb``) register their own dependency resolver that
-    passes ``adapter_dir / "resources" / "mathdx"`` here.
+    Kernel subpackages that bundle Math-DX (e.g. ``kernels/lplb``)
+    register their own dependency resolver via
+    ``make_mathdx_include_paths_resolver(<pkg_dir> / "resources" / "mathdx")``.
     """
     env_home = os.environ.get("MATHDX_HOME")
     if env_home:

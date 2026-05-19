@@ -15,7 +15,7 @@
 //
 // Adapted from DeepSeek-AI/LPLB's `minilp.cu`. Templated on (NC, NV,
 // BLOCK_DIM, SM_VER, NUM_ITERS) so each unique shape is compiled once via
-// sglang's tvm-ffi load_jit cache.
+// the tvm-ffi ``load_jit`` cache.
 
 #include <moe_lb_jit/tensor.h>
 #include <moe_lb_jit/utils.h>
@@ -47,8 +47,8 @@ struct ipm_smem {
 
 // In-place Cholesky factorization a = L L^T (lower triangle), no external
 // linkage. Replaces cuSolverDx::posv to keep the kernel self-contained
-// under sglang's tvm-ffi load_jit (which uses plain c++ for the final
-// link step and so cannot satisfy cuSolverDx's device-link requirement).
+// under ``load_jit`` (which uses plain c++ for the final link step and so
+// cannot satisfy cuSolverDx's device-link requirement).
 //
 // For the typical LPLB shape (N <= 32) the algorithm is dwarfed by the
 // cuBLASDx GEMMs.
