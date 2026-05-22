@@ -240,8 +240,38 @@ class TestTokenRouterProtocol:
 
 
 @pytest.mark.unit
-class TestSGLangPlacementAdapterStub:
-    def test_placement_adapter_is_unimplemented(self):
-        adapter = SGLangPlacementAdapter(metadata_source=object())
-        with pytest.raises(NotImplementedError):
+class TestSGLangPlacementAdapter:
+    def _mock_metadata(self):
+        import torch
+
+        class _Meta:
+            num_logical_experts = 8
+            num_physical_experts = 12
+            logical_to_all_physical_map = torch.tensor([
+                [[0, -1, -1], [1, 5, -1], [2, -1, -1], [3, -1, -1],
+                 [4, -1, -1], [6, -1, -1], [7, 8, 9], [10, 11, -1]],
+            ], dtype=torch.int32)
+            logical_to_all_physical_map_num_valid = torch.tensor([
+                [1, 2, 1, 1, 1, 1, 3, 2],
+            ], dtype=torch.int32)
+
+        return _Meta()
+
+    def test_snapshot_aliases_metadata(self):
+        adapter = SGLangPlacementAdapter(self._mock_metadata())
+        snap = adapter.snapshot(layer_id=0)
+        assert snap.num_logical_experts == 8
+        assert snap.num_physical_experts == 12
+        assert snap.metadata["placement_version"] == 0
+        assert snap.logical_to_physical_candidates.shape == (8, 3)
+
+    def test_bump_version_invalidates(self):
+        adapter = SGLangPlacementAdapter(self._mock_metadata())
+        adapter.bump_version()
+        adapter.bump_version()
+        assert adapter.snapshot(layer_id=0).metadata["placement_version"] == 2
+
+    def test_missing_metadata_raises(self):
+        adapter = SGLangPlacementAdapter(metadata_source=None)
+        with pytest.raises(RuntimeError):
             adapter.snapshot(layer_id=0)
