@@ -10,3 +10,8 @@ __pycache__/
 poc-plan.html
 proposal-moe-load-balancer.md
 docs/
+
+# Keep docs ignored by default, but track the LMSYS blog draft.
+!docs/
+docs/*
+!docs/deepep-waterfill-lplb-blog-draft.md
