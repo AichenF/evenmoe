@@ -249,16 +249,12 @@ class TestSGLangPlacementAdapter:
     def _fake_metadata():
         import torch
 
-        # Synthetic per-layer placement: 3 layers, 4 logical experts, 8 physical
-        # slots (2 replicas each), ep_size=2 → 4 local physical experts per rank.
         num_layers, num_logical, num_physical, max_repl, ep_size = 3, 4, 8, 2, 2
         num_local_physical = num_physical // ep_size
 
-        # logical_to_all_physical_map[L, E] = list of physical slots, padded -1
         log2allphy = torch.full(
             (num_layers, num_logical, max_repl), -1, dtype=torch.int64
         )
-        # Each logical e gets physical slots [e*2, e*2+1].
         for L in range(num_layers):
             for e in range(num_logical):
                 log2allphy[L, e, 0] = 2 * e
@@ -267,19 +263,15 @@ class TestSGLangPlacementAdapter:
             (num_layers, num_logical), max_repl, dtype=torch.int64
         )
 
-        # physical_to_logical_map[L, P] = which logical e owns physical slot P
         phy2log = torch.zeros((num_layers, num_physical), dtype=torch.int64)
         for L in range(num_layers):
             for p in range(num_physical):
                 phy2log[L, p] = p // max_repl
 
-        # Per-rank dispatch table: rank 0 dispatches logical e to slot 2e, rank
-        # 1 dispatches to slot 2e+1. The adapter exposes the full table; rank
-        # selection happens at the call site.
         rank_dispatch = torch.zeros((num_layers, num_logical), dtype=torch.int64)
         for L in range(num_layers):
             for e in range(num_logical):
-                rank_dispatch[L, e] = 2 * e  # rank 0's choice as a placeholder
+                rank_dispatch[L, e] = 2 * e
 
         class _FakeEL:
             num_logical_experts = num_logical
@@ -296,14 +288,13 @@ class TestSGLangPlacementAdapter:
         import torch
 
         em, num_logical, num_physical, num_local_physical = self._fake_metadata()
-        adapter = SGLangPlacementAdapter(metadata=em)
+        adapter = SGLangPlacementAdapter(em)
 
         snap = adapter.snapshot(layer_id=1)
 
         assert snap.layer_id == 1
         assert snap.num_logical_experts == num_logical
         assert snap.num_physical_experts == num_physical
-        # Per-layer slices are direct views of the underlying tensors.
         assert torch.equal(
             snap.logical_to_physical_candidates, em.logical_to_all_physical_map[1]
         )
@@ -316,7 +307,6 @@ class TestSGLangPlacementAdapter:
             snap.default_physical_for_logical,
             em.logical_to_rank_dispatch_physical_map[1],
         )
-        # physical_to_rank_map = arange(num_physical) // num_local_physical
         expected_p2r = (
             torch.arange(num_physical, dtype=torch.int64) // num_local_physical
         )
@@ -327,16 +317,15 @@ class TestSGLangPlacementAdapter:
 
     def test_physical_to_rank_map_is_cached_across_layers(self):
         em, *_ = self._fake_metadata()
-        adapter = SGLangPlacementAdapter(metadata=em)
+        adapter = SGLangPlacementAdapter(em)
         s0 = adapter.snapshot(layer_id=0)
         s2 = adapter.snapshot(layer_id=2)
-        # Same tensor object — derived once, shared across snapshots.
         assert s0.physical_to_rank_map is s2.physical_to_rank_map
 
     def test_default_physical_is_none_when_dispatch_table_missing(self):
         em, *_ = self._fake_metadata()
         em.logical_to_rank_dispatch_physical_map = None
-        adapter = SGLangPlacementAdapter(metadata=em)
+        adapter = SGLangPlacementAdapter(em)
         snap = adapter.snapshot(layer_id=0)
         assert snap.default_physical_for_logical is None
 
@@ -345,12 +334,30 @@ class TestSGLangPlacementAdapter:
         import torch
 
         em, *_ = self._fake_metadata()
-        adapter = SGLangPlacementAdapter(metadata=em)
+        adapter = SGLangPlacementAdapter(em)
         before = adapter.snapshot(layer_id=0)
-        # Simulate EPLBManager rewriting placement on the same metadata object.
         em.logical_to_all_physical_map = em.logical_to_all_physical_map.flip(dims=(1,))
         after = adapter.snapshot(layer_id=0)
         assert not torch.equal(
             before.logical_to_physical_candidates,
             after.logical_to_physical_candidates,
         )
+
+    def test_placement_version_starts_at_zero(self):
+        em, *_ = self._fake_metadata()
+        adapter = SGLangPlacementAdapter(em)
+        assert adapter.version == 0
+        assert adapter.snapshot(layer_id=0).metadata["placement_version"] == 0
+
+    def test_bump_version_invalidates(self):
+        em, *_ = self._fake_metadata()
+        adapter = SGLangPlacementAdapter(em)
+        adapter.bump_version()
+        adapter.bump_version()
+        assert adapter.version == 2
+        assert adapter.snapshot(layer_id=0).metadata["placement_version"] == 2
+
+    def test_missing_metadata_raises(self):
+        adapter = SGLangPlacementAdapter(metadata=None)
+        with pytest.raises(RuntimeError):
+            adapter.snapshot(layer_id=0)

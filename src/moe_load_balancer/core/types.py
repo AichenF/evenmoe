@@ -307,6 +307,10 @@ class RoutingRequest:
     stage: Optional[RoutingStage] = None
     routed_rank_load: Optional[TensorLike] = None
     active_rank_token_count: Optional[TensorLike] = None
+    # ``[num_logical_experts]`` per-logical token count for this batch — local
+    # or post-EP-all-reduce depending on the adapter / env. Consumed by L2
+    # algorithms that re-balance across logical-expert replicas (LP-CF).
+    global_logical_count: Optional[TensorLike] = None
     token_count: Optional[TensorLike] = None
     lb_token_mask: Optional[TensorLike] = None
     routed_scaling_factor: float = 1.0
