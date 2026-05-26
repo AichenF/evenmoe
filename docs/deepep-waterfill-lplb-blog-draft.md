@@ -11,7 +11,7 @@ Mixture-of-Experts (MoE) models rely on Expert Parallelism (EP) to scale inferen
 
 This blog introduces two dispatch-time load balancing features in SGLang:
 
-- **Waterfill**, a lightweight shared-expert load balancing method for DeepEP. It dispatches the shared expert through DeepEP and assigns it to less-loaded ranks, improving throughput by about **4%** on DeepSeek-V3/R1-style workloads and up to **4.31%** in our DeepSeek V4 sanity tests.
+- **Waterfill**, a lightweight shared-expert load balancing method for DeepEP. It dispatches the shared expert through DeepEP and assigns it to less-loaded ranks. In our two-node H20 tests, the primary DeepSeek-V3/R1-style MMLU serving workload improved by roughly **3-4%**, the latest DeepSeek-V3 redundant-EPLB rerun improved by up to **3.91%**, and the latest DeepSeek V4 clean rerun improved by up to **4.92%**.
 - **LPLB**, a linear-programming-based load balancer for redundant expert replicas. It is designed to solve a per-layer dispatch optimization problem over redundant experts.
 
 The Waterfill work is built on two SGLang PRs: [shared expert fusion](https://github.com/sgl-project/sglang/pull/20089) and [Waterfill dispatch balancing](https://github.com/sgl-project/sglang/pull/19290). DeepSeek V4 support is added in [#25391](https://github.com/sgl-project/sglang/pull/25391). LPLB is introduced in [#24515](https://github.com/sgl-project/sglang/pull/24515).
@@ -90,19 +90,44 @@ Suggested points to cover:
 
 ### Waterfill on DeepSeek V3/R1
 
-We evaluated Waterfill on a DeepSeek-V3-style setup with FP8 weights, 2 nodes, 16 H20 GPUs, EP16, and DP attention. The benchmark uses MMLU-style prompts with approximately 600 input tokens, one output token, and 256 concurrent requests across multiple rounds.
+We evaluated Waterfill on a DeepSeek-V3/R1-style setup with FP8 weights, two H20 nodes, 16 GPUs total, EP16, DP16, DeepEP normal mode, and DP attention. The serving workload uses real MMLU prompts generated from the SGLang MMLU benchmark. For the original PR reproduction, the MMLU prompt set was split into two non-overlapping files: 2,000 prompts for recording the EPLB distribution and 2,000 prompts for serving throughput.
 
-| Configuration | Output Throughput | Gain |
-| --- | ---: | ---: |
-| Baseline + static EPLB | ~29,700 tok/s | - |
-| Waterfill + static EPLB | ~30,900 tok/s | +4% |
+The primary serving benchmark uses:
+
+- Dataset: MMLU prompts, 5-shot, all subjects generated through `benchmark/mmlu/bench_sglang.py`.
+- Prompt length: approximately 600 input tokens on average; measured rounds usually contain about 650K-675K total tokens for 1,000 requests.
+- Request shape: `max_tokens=1`, `temperature=0`.
+- Batch shape: 1,000 sampled prompts per measured round.
+- Concurrency: 256 concurrent requests.
+- Metric: total token throughput, counting prompt tokens plus the single generated token.
+- Statistics: warmup rounds are discarded; measured rounds report a trimmed mean after dropping the highest and lowest throughput samples.
+
+On the original non-redundant/static-EPLB PR reproduction, the expected range was:
+
+| Configuration | Workload | Total Throughput | Gain |
+| --- | --- | ---: | ---: |
+| Baseline + static EPLB | MMLU, 1,000 requests/round, concurrency 256, `max_tokens=1` | ~29,300-29,700 tok/s | - |
+| Waterfill + static EPLB | Same | ~30,600-31,000 tok/s | +3% to +4.4% |
+
+We also re-ran the newer redundant-EPLB variants on the full 14,042-prompt MMLU pool. Each mode used 2 warmup rounds and 4 measured rounds, with 1,000 prompts sampled per round, concurrency 256, and `max_tokens=1`.
+
+| Configuration | Physical Routed Experts | Baseline | Waterfill | Gain |
+| --- | ---: | ---: | ---: | ---: |
+| Static EPLB, red16 | 272 | 31,070 tok/s | 31,472 tok/s | +1.29% |
+| Static EPLB, red32 | 288 | 30,942 tok/s | 32,153 tok/s | +3.91% |
+
+For reference, standalone DeepEP shared-expert fusion without Waterfill measured 30,569 tok/s for red0, 30,992 tok/s for red16, and 31,124 tok/s for red32 under the same 14,042-prompt, batch=1,000, concurrency=256, `max_tokens=1` workload. This separates the shared-expert fusion baseline from the Waterfill dispatch policy.
 
 The accuracy sanity check showed no degradation:
 
 | Configuration | MMLU Accuracy |
 | --- | ---: |
-| Baseline | 91.55% |
-| Waterfill + static EPLB | 91.80% |
+| Original PR baseline | 91.55% |
+| Original PR Waterfill + static EPLB | 91.80% |
+| Latest red16 baseline | 13,093 / 14,042 = 93.24% |
+| Latest red16 Waterfill | 13,103 / 14,042 = 93.31% |
+| Latest red32 baseline | 13,084 / 14,042 = 93.18% |
+| Latest red32 Waterfill | 13,092 / 14,042 = 93.23% |
 
 These results indicate that Waterfill improves throughput while preserving model quality, because it only changes physical shared-expert placement and does not change the logical expert computation.
 
@@ -110,20 +135,25 @@ These results indicate that Waterfill improves throughput while preserving model
 
 DeepSeek V4 introduces additional engineering requirements for the Waterfill path, including `HashTopK`, logical/physical expert IDs, and redundant physical experts. [#25391](https://github.com/sgl-project/sglang/pull/25391) extends Waterfill support to this path.
 
-Two-node H20 DeepSeek V4 FP8 sanity tests showed consistent throughput improvement:
+Two-node H20 DeepSeek V4 FP8 clean reruns showed consistent throughput improvement on the same MMLU-style serving workload shape: 14,042-prompt pool, batch=512, concurrency=128, `max_tokens=1`, 2 warmup rounds, and 4 measured rounds. The table reports trimmed mean total throughput.
 
 | Configuration | Baseline | Waterfill | Gain |
 | --- | ---: | ---: | ---: |
-| no-red, batch=512, concurrency=128 | 46,028 tok/s | 47,224 tok/s | +2.60% |
-| red16, batch=512, concurrency=128 | 48,666 tok/s | 50,049 tok/s | +2.84% |
-| red32, batch=512, concurrency=128 | 48,538 tok/s | 50,630 tok/s | +4.31% |
+| No EPLB | 45,951 tok/s | 47,876 tok/s | +4.19% |
+| Static EPLB, red0 | 49,253 tok/s | 51,677 tok/s | +4.92% |
+| Static EPLB, red16 | 50,006 tok/s | 51,655 tok/s | +3.30% |
+| Static EPLB, red32 | 50,167 tok/s | 51,813 tok/s | +3.28% |
 
-For an MMLU sanity run with 1000 examples:
+For MMLU sanity runs:
 
 | Configuration | Score | Output Throughput |
 | --- | ---: | ---: |
-| Baseline | 0.878 | 892.9 tok/s |
-| Waterfill | 0.876 | 902.6 tok/s |
+| No-EPLB baseline | 0.880 | 991.8 tok/s |
+| No-EPLB Waterfill | 0.876 | 1007.1 tok/s |
+| red16 baseline | 0.8755 | 685.4 tok/s |
+| red16 Waterfill | 0.8835 | 734.8 tok/s |
+| red32 baseline | 0.881 | 685.4 tok/s |
+| red32 Waterfill | 0.883 | 700.8 tok/s |
 
 The small score difference is within the expected range for this sanity test, while the throughput remains directionally positive.
 
