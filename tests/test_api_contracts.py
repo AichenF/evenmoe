@@ -171,7 +171,7 @@ class TestProtocolConformance:
     def test_sglang_placement_adapter_satisfies_provider(self):
         # Construction succeeds without SGLang installed; isinstance against
         # a runtime_checkable Protocol verifies the method shape only.
-        adapter = SGLangPlacementAdapter(metadata_source=object())
+        adapter = SGLangPlacementAdapter(metadata=object())
         assert isinstance(adapter, PlacementProvider)
 
 
@@ -240,8 +240,117 @@ class TestTokenRouterProtocol:
 
 
 @pytest.mark.unit
-class TestSGLangPlacementAdapterStub:
-    def test_placement_adapter_is_unimplemented(self):
-        adapter = SGLangPlacementAdapter(metadata_source=object())
-        with pytest.raises(NotImplementedError):
-            adapter.snapshot(layer_id=0)
+class TestSGLangPlacementAdapter:
+    """Exercises ``SGLangPlacementAdapter`` against a synthetic
+    ``ExpertLocationMetadata``-shaped object (sglang itself is not imported).
+    """
+
+    @staticmethod
+    def _fake_metadata():
+        import torch
+
+        # Synthetic per-layer placement: 3 layers, 4 logical experts, 8 physical
+        # slots (2 replicas each), ep_size=2 → 4 local physical experts per rank.
+        num_layers, num_logical, num_physical, max_repl, ep_size = 3, 4, 8, 2, 2
+        num_local_physical = num_physical // ep_size
+
+        # logical_to_all_physical_map[L, E] = list of physical slots, padded -1
+        log2allphy = torch.full(
+            (num_layers, num_logical, max_repl), -1, dtype=torch.int64
+        )
+        # Each logical e gets physical slots [e*2, e*2+1].
+        for L in range(num_layers):
+            for e in range(num_logical):
+                log2allphy[L, e, 0] = 2 * e
+                log2allphy[L, e, 1] = 2 * e + 1
+        log2allphy_num_valid = torch.full(
+            (num_layers, num_logical), max_repl, dtype=torch.int64
+        )
+
+        # physical_to_logical_map[L, P] = which logical e owns physical slot P
+        phy2log = torch.zeros((num_layers, num_physical), dtype=torch.int64)
+        for L in range(num_layers):
+            for p in range(num_physical):
+                phy2log[L, p] = p // max_repl
+
+        # Per-rank dispatch table: rank 0 dispatches logical e to slot 2e, rank
+        # 1 dispatches to slot 2e+1. The adapter exposes the full table; rank
+        # selection happens at the call site.
+        rank_dispatch = torch.zeros((num_layers, num_logical), dtype=torch.int64)
+        for L in range(num_layers):
+            for e in range(num_logical):
+                rank_dispatch[L, e] = 2 * e  # rank 0's choice as a placeholder
+
+        class _FakeEL:
+            num_logical_experts = num_logical
+            num_physical_experts = num_physical
+            num_local_physical_experts = num_local_physical
+            logical_to_all_physical_map = log2allphy
+            logical_to_all_physical_map_num_valid = log2allphy_num_valid
+            physical_to_logical_map = phy2log
+            logical_to_rank_dispatch_physical_map = rank_dispatch
+
+        return _FakeEL(), num_logical, num_physical, num_local_physical
+
+    def test_snapshot_maps_fields_for_one_layer(self):
+        import torch
+
+        em, num_logical, num_physical, num_local_physical = self._fake_metadata()
+        adapter = SGLangPlacementAdapter(metadata=em)
+
+        snap = adapter.snapshot(layer_id=1)
+
+        assert snap.layer_id == 1
+        assert snap.num_logical_experts == num_logical
+        assert snap.num_physical_experts == num_physical
+        # Per-layer slices are direct views of the underlying tensors.
+        assert torch.equal(
+            snap.logical_to_physical_candidates, em.logical_to_all_physical_map[1]
+        )
+        assert torch.equal(
+            snap.logical_to_physical_count,
+            em.logical_to_all_physical_map_num_valid[1],
+        )
+        assert snap.default_physical_for_logical is not None
+        assert torch.equal(
+            snap.default_physical_for_logical,
+            em.logical_to_rank_dispatch_physical_map[1],
+        )
+        # physical_to_rank_map = arange(num_physical) // num_local_physical
+        expected_p2r = (
+            torch.arange(num_physical, dtype=torch.int64) // num_local_physical
+        )
+        assert torch.equal(snap.physical_to_rank_map, expected_p2r)
+        assert torch.equal(
+            snap.metadata["physical_to_logical_map"], em.physical_to_logical_map[1]
+        )
+
+    def test_physical_to_rank_map_is_cached_across_layers(self):
+        em, *_ = self._fake_metadata()
+        adapter = SGLangPlacementAdapter(metadata=em)
+        s0 = adapter.snapshot(layer_id=0)
+        s2 = adapter.snapshot(layer_id=2)
+        # Same tensor object — derived once, shared across snapshots.
+        assert s0.physical_to_rank_map is s2.physical_to_rank_map
+
+    def test_default_physical_is_none_when_dispatch_table_missing(self):
+        em, *_ = self._fake_metadata()
+        em.logical_to_rank_dispatch_physical_map = None
+        adapter = SGLangPlacementAdapter(metadata=em)
+        snap = adapter.snapshot(layer_id=0)
+        assert snap.default_physical_for_logical is None
+
+    def test_snapshot_reflects_live_rebalance(self):
+        """``ExpertLocationMetadata`` rewrite in place is observable via the adapter."""
+        import torch
+
+        em, *_ = self._fake_metadata()
+        adapter = SGLangPlacementAdapter(metadata=em)
+        before = adapter.snapshot(layer_id=0)
+        # Simulate EPLBManager rewriting placement on the same metadata object.
+        em.logical_to_all_physical_map = em.logical_to_all_physical_map.flip(dims=(1,))
+        after = adapter.snapshot(layer_id=0)
+        assert not torch.equal(
+            before.logical_to_physical_candidates,
+            after.logical_to_physical_candidates,
+        )
