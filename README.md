@@ -69,3 +69,14 @@ class MoELoadBalancer:
 - NeMo Inference 和 Dynamo 通过后端引擎集成间接受益。
 - 三层能力应可独立开关，也可组合使用。
 - Prefill 和 decode 的优化目标不同: prefill 侧重均衡 token 数，decode 侧重均衡激活 expert 数；但这不是所有算法的强制分类轴。某个 L2 policy 可以通过 `enabled_stages` 限制只在 prefill、只在 decode、两者都运行，或完全不按 stage gating。
+
+## SGLang PR Safety
+
+SGLang PR #19290 是独立 PR，必须保持可单独 review、测试和合入。这个模块的后续接入实验不能直接修改或 push 到 PR #19290 的真实 branch。
+
+开发规则:
+
+- PR #19290 branch 只保留该 PR 自身需要的 Waterfill 实现，不 import 这个尚未 ready 的 `moe_load_balancer` 模块。
+- 模块化接入实验必须使用单独 worktree / branch，例如 `pr-19290-moe-lb-integration`，不要覆盖 `feat/deepep-waterfill-eplb-balance` 或 PR 对应 branch。
+- 远端验证时，SGLang integration worktree 只应用实验 patch；模块代码通过独立 package 安装，例如 `pip install -e /path/to/moe_load_balancer --no-deps`。
+- 除非明确决定切换 PR 策略，否则不要把 import-package 版本 push 到 PR #19290 的 upstream branch。

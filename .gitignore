@@ -11,7 +11,11 @@ poc-plan.html
 proposal-moe-load-balancer.md
 docs/
 
-# Keep docs ignored by default, but track the LMSYS blog draft.
+# Keep docs ignored by default, but track the curated docs.
 !docs/
 docs/*
+!docs/architecture.md
 !docs/deepep-waterfill-lplb-blog-draft.md
+!docs/lpcf-user-guide.md
+!docs/poc-plan.md
+!docs/h20-pr19290-reproduction-howto.md
