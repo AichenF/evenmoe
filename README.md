@@ -1,5 +1,92 @@
 # MoE Load Balancer
 
+# English
+
+This repository is the local engineering workspace for the Google Doc proposal and the follow-up implementation work.
+
+Source of truth:
+
+- Google Doc: https://docs.google.com/document/d/1xeDxh2sH1atr6DBnoO6QkXjZ8EKTcWa4emsq4Hk76Dw/edit?tab=t.0#heading=h.d3248k5k32jx
+
+## Project Intent
+
+Build a framework-decoupled MoE inference load balancer that systematically addresses expert/GPU load imbalance. The module is first developed and validated in SGLang, then abstracted into an independent component and integrated into the TensorRT-LLM MoE plugin, so NeMo Inference and Dynamo can benefit through their backend engines.
+
+This project is not a single-algorithm integration and is not just a Waterfill + LPLB demo. The proposal is organized around three orthogonal layers:
+
+1. **Layer 1: SGLang EPLB Placement Source**
+   The current POC only reuses SGLang's existing EPLB placement metadata / rebalance path. It does not introduce a new placement optimizer.
+2. **Layer 2: Dynamic Token Routing**
+   Generate dispatch routing for each batch and each layer. Routed experts can only be selected among physical replicas of the same logical expert. The PR-aligned Waterfill path only appends a shared-expert dispatch slot.
+3. **Layer 3: Prediction + Expert Prefetch**
+   Predict the next layer's expert activation pattern and proactively perform P2P expert-weight replication.
+
+All optimizations must preserve lossless accuracy: they must not change the router's logical top-k experts, and may only change physical replica selection for the same logical expert.
+
+## Roadmap
+
+| Stage | Goal | Deliverables |
+|---|---|---|
+| Stage 0 | Baseline study | EPLB in SGLang, shared-expert Waterfill PR, Shared Expert Fusion, LPLB in progress |
+| Stage 1 | Research + engineering in parallel | Three-layer technical research report, LPLB benchmark, Waterfill/LPLB SGLang integration points, vLLM/TRT-LLM hook points |
+| Stage 2 | Architecture design | Unified module boundaries, interface specification, framework adapter plan |
+| Stage 3 | SGLang POC | Reuse SGLang EPLB as the placement source + L2 shared-expert Waterfill/LPLB; experiments can be limited by policy config to prefill, decode, or both; does not include a new L1 optimizer, L3, or Metro |
+| Stage 4 | Modularization + framework integration | Independent load balancer module, TensorRT-LLM integration, and benchmark |
+
+The current documentation work should primarily serve Stage 1 and Stage 2: first clarify the three-layer problem, existing implementations, hook points, and unified interfaces, then move into the Stage 3 SGLang POC. The current POC scope has been narrowed: L1 only reuses SGLang EPLB and does not build a new replica budget / placement optimizer; L2 focuses on shared-expert Waterfill + LPLB, with core-level policy config deciding whether a policy runs only in prefill, only in decode, in both, or without stage gating; L3 prediction/prefetch and Metro are deferred.
+
+## Canonical Interfaces
+
+The current POC uses the following canonical interfaces:
+
+```python
+class PlacementProvider:
+    def snapshot(self, layer_id: int) -> PlacementSnapshot:
+        ...
+
+
+class MoELoadBalancer:
+    def route_tokens(self, request: RoutingRequest) -> RoutingDecision:
+        ...
+
+    def predict_and_prefetch(self, request: PrefetchRequest) -> PrefetchPlan:
+        ...
+```
+
+In the SGLang POC, `PlacementProvider` is implemented by the EPLB adapter. `RoutingRequest` uses framework-neutral data such as logical top-k ids, top-k weights, placement snapshot, and optional stage. `RoutingPolicyConfig.enabled_stages` is a core-level generic stage gate. `None` means the algorithm is not restricted by stage and also allows `stage=None`. Explicitly listing all stages still requires the caller to provide a known stage. `RoutingDecision` returns a framework-neutral routing decision, which the adapter then writes back as physical/interleaved expert ids or shared-expert slots. SGLang-specific types such as `StandardTopKOutput`, `ExpertLocationMetadata`, process groups, and DeepEP interleaved ids may only appear in adapters/helpers, and must not become project-level primary interfaces.
+
+## Repository Skeleton
+
+This repo currently provides a minimal L1/L2 skeleton to support parallel API design and SGLang integration-point research:
+
+- `src/moe_load_balancer/core/`: framework-neutral API contracts.
+- `src/moe_load_balancer/policies/l1/`: L1 placement policy implementations.
+- `src/moe_load_balancer/policies/l2/`: L2 routing policy implementations.
+- `src/moe_load_balancer/adapters/sglang/`: SGLang adapter placeholder, responsible for SGLang type conversion, TopK writeback, and runtime glue.
+
+## Working Assumptions
+
+- SGLang is the first development and validation platform, not the final or only target.
+- The TensorRT-LLM MoE plugin is the most important production integration target.
+- NeMo Inference and Dynamo benefit indirectly through backend-engine integration.
+- The three layers should be independently switchable and also composable.
+- Prefill and decode have different optimization goals: prefill focuses on balancing token count, while decode focuses on balancing activated expert count. However, this is not a mandatory classification axis for every algorithm. An L2 policy can use `enabled_stages` to run only in prefill, only in decode, in both, or without stage gating.
+
+## SGLang PR Safety
+
+SGLang PR #19290 is an independent PR and must remain independently reviewable, testable, and mergeable. Follow-up integration experiments for this module must not directly modify or push to the real PR #19290 branch.
+
+Development rules:
+
+- The PR #19290 branch should only contain the Waterfill implementation required by that PR. It must not import this not-yet-ready `moe_load_balancer` module.
+- Modular integration experiments must use a separate worktree / branch, for example `pr-19290-moe-lb-integration`, and must not overwrite `feat/deepep-waterfill-eplb-balance` or the PR branch.
+- During remote validation, the SGLang integration worktree should only apply the experimental patch. The module code should be installed as an independent package, for example `pip install -e /path/to/moe_load_balancer --no-deps`.
+- Unless we explicitly decide to change the PR strategy, do not push the import-package version to the upstream branch of PR #19290.
+
+---
+
+# MoE Load Balancer 中文版
+
 本目录是 Google Doc proposal 的本地整理和后续工程工作台。
 
 Source of truth:
