@@ -35,7 +35,7 @@ from typing import Optional
 
 import torch
 
-from moe_load_balancer.core.l1 import PlacementPlanner
+from moe_load_balancer.core.l1 import PlacementPlanner, StatsCollector
 from moe_load_balancer.core.types import (
     PlacementPolicyConfig,
     PlacementRequest,
@@ -119,6 +119,33 @@ class SGLangEPLBRuntime:
                 server_args.device
             ),
         )
+
+    def plan_placement(
+        self,
+        server_args,
+        model_config,
+        collector: StatsCollector,
+    ):
+        """Periodic-rebalance entry point.
+
+        The natural counterpart of :meth:`init_by_eplb` for the rebalance
+        loop: instead of receiving a pre-fetched ``logical_count`` tensor,
+        pull stats via the framework-neutral
+        :class:`~moe_load_balancer.core.l1.StatsCollector` protocol.
+
+        Today this is a thin wrapper around :meth:`init_by_eplb`. Once
+        sglang's ``EPLBManager.rebalance`` is rewired to call through this
+        method, the rebalance-skip decision (based on
+        ``stats.average_utilization_rate``) will live here instead of in
+        ``EPLBManager``, so the orchestration becomes framework-neutral.
+
+        Returns an ``ExpertLocationMetadata`` (or ``None`` if the
+        collector has not yet observed any stats).
+        """
+        stats = collector.collect()
+        if stats.logical_count is None:
+            return None
+        return self.init_by_eplb(server_args, model_config, stats.logical_count)
 
 
 def _maybe_active_ranks(server_args) -> Optional[torch.Tensor]:

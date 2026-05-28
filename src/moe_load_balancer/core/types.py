@@ -144,6 +144,11 @@ class PlacementStats:
     logical_count: Optional[TensorLike] = None
     physical_count: Optional[TensorLike] = None
     rank_load: Optional[TensorLike] = None
+    # Aggregate GPU expert-utilization rate over the most recent collection
+    # window, as reported by the framework. Used by rebalance orchestration
+    # (not by the L1 planner) to skip rebalances that would not meaningfully
+    # change throughput. ``None`` means "not measured".
+    average_utilization_rate: Optional[float] = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
