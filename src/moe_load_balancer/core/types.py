@@ -196,6 +196,40 @@ class PlacementPolicyConfig:
         return self.name == self.DISABLED
 
 
+@dataclass(frozen=True)
+class RebalancePolicyConfig:
+    """Framework-neutral configuration for the L1 rebalance loop.
+
+    Mirrors :class:`PlacementPolicyConfig` / :class:`RoutingPolicyConfig` in
+    that it groups tunables for a single concern (periodic rebalance
+    triggering and the recording window that feeds it). MLB provides
+    defaults; framework adapters may override per-deployment by passing
+    overrides into the runtime/recorder/provider constructors.
+
+    Fields:
+
+    * ``recording_window_size`` -- how many forward passes the recorder
+      keeps in its rolling buffer. ``logical_count`` returned from
+      :meth:`StatsCollector.collect` is the sum across this window.
+      Matches sglang's
+      ``server_args.expert_distribution_recorder_buffer_size`` semantics.
+
+    * ``min_utilization_threshold`` -- per-rebalance skip gate. If the
+      recently-measured GPU expert utilization rate is above this value,
+      the rebalance call is a no-op (no new plan published). ``None``
+      means "never skip". Matches sglang's
+      ``server_args.eplb_min_rebalancing_utilization_threshold``.
+
+    The rebalance *period* itself (every N forward passes) is **not** in
+    here -- that's owned by the orchestration layer (sglang ``EPLBManager``
+    holds ``--eplb-rebalance-num-iterations``). MLB sees only the trigger
+    edge; whether the trigger fires is the orchestrator's call.
+    """
+
+    recording_window_size: int = 100
+    min_utilization_threshold: Optional[float] = None
+
+
 @dataclass(frozen=True, kw_only=True)
 class PlacementRequest:
     """Framework-neutral L1 planning request.
