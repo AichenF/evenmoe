@@ -121,6 +121,19 @@ class EPLBRecorder(StatsCollector):
         """
         if not self._recording:
             return
+        # Co-locate observations onto the placement map's device. Rationale:
+        # sglang gatherers may emit ``global_physical_count`` on CPU (e.g.
+        # DeepEP-normal mode uses a CPU-side gatherer) while the placement
+        # map lives on the EP device (GPU). Downstream rebalance steps in
+        # sglang (``torch.distributed.all_reduce(logical_count)``) need a
+        # GPU tensor for NCCL, so we align toward the placement map's
+        # device, which mirrors sglang's prior behaviour where
+        # ``_Buffer`` was constructed with ``device=server_args.device``
+        # and items were implicitly moved on append.
+        if global_physical_count.device != physical_to_logical_map.device:
+            global_physical_count = global_physical_count.to(
+                physical_to_logical_map.device
+            )
         self._buffer.append(global_physical_count)
         # Keep only the latest placement map -- per-step storage would
         # be wasteful and ambiguous (the active placement at collect
@@ -149,8 +162,17 @@ def _physical_to_logical(
     Mirrors sglang's
     ``_convert_global_physical_count_to_logical_count`` so the resulting
     tensor is bit-identical for the same inputs.
+
+    The two inputs may live on different devices (sglang gatherers in
+    DeepEP normal mode produce ``global_physical_count`` on CPU while
+    ``ExpertLocationMetadata.physical_to_logical_map`` is on the EP
+    device); we co-locate them on ``physical_count``'s device so the
+    accumulation happens wherever sglang's gatherer chose to land its
+    output.
     """
     num_layers, num_physical = physical_count.shape
+    if physical_to_logical_map.device != physical_count.device:
+        physical_to_logical_map = physical_to_logical_map.to(physical_count.device)
     num_logical = int(physical_to_logical_map.max().item()) + 1
     logical = torch.zeros(
         (num_layers, num_logical),
