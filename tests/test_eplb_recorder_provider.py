@@ -313,31 +313,81 @@ class TestSGLangEPLBRuntimeFacade:
         assert isinstance(br, SGLangStatsBridge)
         assert br.recorder is rt.recorder
 
-    def test_plan_placement_uses_internal_recorder_by_default(self, monkeypatch):
-        """When no collector is passed, plan_placement pulls from the
-        runtime's own recorder (the same one the bridge feeds)."""
+    def test_drain_stats_returns_none_when_empty(self):
         rt = SGLangEPLBRuntime()
-        # Feed the recorder directly (as the bridge would)
+        assert rt.drain_stats() is None
+
+    def test_drain_stats_returns_logical_count_after_append(self):
+        rt = SGLangEPLBRuntime()
         rt.recorder.append(
-            global_physical_count=_gpc(fill=1), physical_to_logical_map=_phy2log()
+            global_physical_count=_gpc(fill=1),
+            physical_to_logical_map=_phy2log(),
         )
+        drained = rt.drain_stats()
+        assert drained is not None
+        assert drained["logical_count"] is not None
+        # 1 forward, fill=1, 2 replicas per logical -> 2 per logical
+        assert torch.equal(
+            drained["logical_count"], torch.full((3, 4), 2, dtype=torch.int32)
+        )
+        # Drained -> next call returns None (atomic snapshot-and-reset)
+        assert rt.drain_stats() is None
 
-        captured = {}
-
-        def fake_init_by_eplb(server_args, model_config, logical_count):
-            captured["logical_count"] = logical_count
-            return "SENTINEL"
-
-        monkeypatch.setattr(rt, "init_by_eplb", fake_init_by_eplb)
-        result = rt.plan_placement(server_args=object(), model_config=object())
-        assert result == "SENTINEL"
-        assert "logical_count" in captured  # consumed from internal recorder
-
-    def test_plan_placement_returns_none_when_no_stats(self):
+    def test_compute_placement_produces_placement_tensors(self):
         rt = SGLangEPLBRuntime()
-        # No appends; recorder is empty
-        result = rt.plan_placement(server_args=object(), model_config=object())
-        assert result is None
+        # Synthetic logical_count: 1 layer, 4 logical experts, 8 physical
+        logical_count = torch.tensor([[10, 20, 30, 40]], dtype=torch.int32)
+        result = rt.compute_placement(
+            logical_count=logical_count,
+            num_physical_experts=8,
+            num_local_physical_experts=4,  # ep_size=2
+            num_groups=1,
+            num_nodes=1,
+        )
+        assert result is not None
+        assert "physical_to_logical_map" in result
+        assert "logical_to_all_physical_map" in result
+        # physical_to_logical_map shape: [num_layers, num_physical]
+        assert result["physical_to_logical_map"].shape == (1, 8)
+        # logical_to_all_physical_map shape: [num_layers, num_logical, max_replicas]
+        assert result["logical_to_all_physical_map"].shape[0] == 1
+
+    def test_compute_placement_publishes_to_provider(self):
+        rt = SGLangEPLBRuntime()
+        assert rt.provider.version == 0
+        rt.compute_placement(
+            logical_count=torch.tensor([[10, 20, 30, 40]], dtype=torch.int32),
+            num_physical_experts=8,
+            num_local_physical_experts=4,
+            num_groups=1,
+            num_nodes=1,
+        )
+        # Provider published once
+        assert rt.provider.version == 1
+        snap = rt.provider.snapshot(layer_id=0)
+        assert snap.layer_id == 0
+
+    def test_runtime_source_has_no_sglang_import(self):
+        """Regression test for the Phase 1.5 inversion: the adapter module
+        must not have any ``from sglang.…`` or ``import sglang`` lines.
+        """
+        from pathlib import Path
+        import moe_load_balancer.adapters.sglang.eplb.runtime as rt_module
+        src_text = Path(rt_module.__file__).read_text()
+        # Strip docstrings (they contain the word "sglang" intentionally)
+        import ast
+        tree = ast.parse(src_text)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                names = []
+                if isinstance(node, ast.ImportFrom):
+                    names.append(node.module or "")
+                for alias in node.names:
+                    names.append(alias.name)
+                for name in names:
+                    assert not name.startswith("sglang"), (
+                        f"runtime.py imports sglang at top level: {name}"
+                    )
 
 
 # ----------------------------------------------------------------------
