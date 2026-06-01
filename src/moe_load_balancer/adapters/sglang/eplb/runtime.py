@@ -128,6 +128,62 @@ class SGLangEPLBRuntime:
             "average_utilization_rate": stats.average_utilization_rate,
         }
 
+    def drain_for_rebalance(
+        self,
+        *,
+        observed_utilization_rate: Optional[float] = None,
+    ) -> Optional[dict]:
+        """Drain stats and apply the rebalance-skip policy in one call.
+
+        Combines :meth:`drain_stats` with the skip-gate decision (MLB owns
+        the threshold; sglang owns the metric). Used by sglang
+        ``EPLBManager.rebalance`` as the single entry point for the
+        periodic-rebalance path.
+
+        Returns ``None`` if **either**:
+
+        * the recorder has not observed any stats yet, OR
+        * ``observed_utilization_rate`` exceeds
+          ``rebalance_policy.min_utilization_threshold`` (current placement
+          is already good enough; skip the rebalance to save the
+          all_reduce + algorithm + hot-swap cost).
+
+        Otherwise returns the same dict shape as :meth:`drain_stats`::
+
+            {
+                "logical_count": Tensor,                    # per-rank view
+                "average_utilization_rate": float | None,
+            }
+
+        The caller cannot distinguish "no data" from "skipped by
+        threshold" -- both yield a no-op rebalance. If finer-grained
+        logging is needed, call :meth:`drain_stats` directly and check the
+        threshold yourself.
+
+        Args:
+          observed_utilization_rate: Current windowed GPU expert
+            utilization rate (typically computed by the framework's own
+            metric path; MLB does not compute it). Pass ``None`` if the
+            metric is unavailable -- the skip-gate degrades to
+            "always rebalance" in that case.
+        """
+        stats = self._recorder.collect()
+        if stats.logical_count is None:
+            return None
+
+        threshold = self._rebalance_policy.min_utilization_threshold
+        if (
+            threshold is not None
+            and observed_utilization_rate is not None
+            and observed_utilization_rate > threshold
+        ):
+            return None  # current placement already balanced; skip
+
+        return {
+            "logical_count": stats.logical_count,
+            "average_utilization_rate": observed_utilization_rate,
+        }
+
     def compute_placement(
         self,
         *,

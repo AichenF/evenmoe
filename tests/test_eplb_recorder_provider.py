@@ -367,6 +367,57 @@ class TestSGLangEPLBRuntimeFacade:
         snap = rt.provider.snapshot(layer_id=0)
         assert snap.layer_id == 0
 
+    def test_drain_for_rebalance_returns_none_when_empty(self):
+        rt = SGLangEPLBRuntime()
+        result = rt.drain_for_rebalance(observed_utilization_rate=0.5)
+        assert result is None
+
+    def test_drain_for_rebalance_returns_dict_when_no_threshold(self):
+        rt = SGLangEPLBRuntime()  # default policy: min_utilization_threshold=None
+        rt.recorder.append(
+            global_physical_count=_gpc(fill=1), physical_to_logical_map=_phy2log()
+        )
+        result = rt.drain_for_rebalance(observed_utilization_rate=0.95)
+        # no threshold configured -> always proceed
+        assert result is not None
+        assert result["logical_count"] is not None
+        assert result["average_utilization_rate"] == 0.95
+
+    def test_drain_for_rebalance_returns_dict_when_util_below_threshold(self):
+        rt = SGLangEPLBRuntime(
+            rebalance_policy=RebalancePolicyConfig(min_utilization_threshold=0.9),
+        )
+        rt.recorder.append(
+            global_physical_count=_gpc(fill=1), physical_to_logical_map=_phy2log()
+        )
+        result = rt.drain_for_rebalance(observed_utilization_rate=0.7)
+        assert result is not None  # 0.7 < 0.9, do rebalance
+
+    def test_drain_for_rebalance_skips_when_util_above_threshold(self):
+        rt = SGLangEPLBRuntime(
+            rebalance_policy=RebalancePolicyConfig(min_utilization_threshold=0.9),
+        )
+        rt.recorder.append(
+            global_physical_count=_gpc(fill=1), physical_to_logical_map=_phy2log()
+        )
+        result = rt.drain_for_rebalance(observed_utilization_rate=0.95)
+        assert result is None  # 0.95 > 0.9, skip
+        # BUT: the recorder was already drained (the policy decision happens
+        # post-collect since the buffer needs to be sampled to know we are
+        # past the skip threshold). Next call should see empty.
+        assert rt.recorder.window_size() == 0
+
+    def test_drain_for_rebalance_no_skip_when_util_is_none(self):
+        rt = SGLangEPLBRuntime(
+            rebalance_policy=RebalancePolicyConfig(min_utilization_threshold=0.9),
+        )
+        rt.recorder.append(
+            global_physical_count=_gpc(fill=1), physical_to_logical_map=_phy2log()
+        )
+        result = rt.drain_for_rebalance(observed_utilization_rate=None)
+        # No utilization rate observed -> degrade to "always rebalance".
+        assert result is not None
+
     def test_runtime_source_has_no_sglang_import(self):
         """Regression test for the Phase 1.5 inversion: the adapter module
         must not have any ``from sglang.…`` or ``import sglang`` lines.
