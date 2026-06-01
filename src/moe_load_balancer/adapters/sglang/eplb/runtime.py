@@ -272,15 +272,60 @@ def set_default_runtime(runtime: SGLangEPLBRuntime) -> None:
 
 
 def get_default_runtime() -> SGLangEPLBRuntime:
-    """Return the registered default runtime, creating an unconfigured
-    instance on first call if sglang has not registered one yet.
+    """Return the registered default runtime.
 
-    The fallback path is mostly for tests / contract-only environments;
-    production paths register explicitly via :func:`set_default_runtime`.
+    Raises :class:`RuntimeError` if no runtime has been registered yet
+    via :func:`set_default_runtime`. There is **no silent lazy default**:
+    in production sglang's ``_StatAccumulator.__init__`` (or the
+    cold-start ``init_by_eplb`` path) is responsible for registering a
+    properly-configured runtime; in tests, call
+    ``set_default_runtime(SGLangEPLBRuntime())`` explicitly.
+
+    Rationale: a lazy default would silently mask wiring bugs — if
+    ``_StatAccumulator`` failed to register due to an upstream ordering
+    issue, ``init_by_eplb`` would happily publish to an unconfigured
+    runtime whose ``RebalancePolicyConfig`` doesn\'t match
+    ``server_args``, and downstream L2 readers would see plans that
+    never re-appear after ``_StatAccumulator`` later overwrites the
+    slot.
     """
     global _default_runtime
     if _default_runtime is None:
-        _default_runtime = SGLangEPLBRuntime()
+        raise RuntimeError(
+            "No default SGLangEPLBRuntime registered. "
+            "sglang.srt.eplb.expert_distribution._StatAccumulator.__init__ "
+            "or sglang.srt.eplb.expert_location.ExpertLocationMetadata.init_by_eplb "
+            "must call set_default_runtime(...) before any caller invokes "
+            "get_default_runtime(). For tests, register an unconfigured "
+            "instance explicitly: set_default_runtime(SGLangEPLBRuntime())."
+        )
+    return _default_runtime
+
+
+def ensure_default_runtime(
+    *,
+    rebalance_policy=None,
+    planner=None,
+    recorder=None,
+    provider=None,
+) -> SGLangEPLBRuntime:
+    """First-caller-wins helper: return the registered runtime if any,
+    otherwise build one with the given kwargs and register it.
+
+    Both ``_StatAccumulator.__init__`` and the ``init_by_eplb`` static
+    method use this to avoid clobbering each other's instance when
+    sglang's startup order varies. The first one to run installs the
+    configured runtime; the second one sees it and reuses.
+    """
+    global _default_runtime
+    if _default_runtime is not None:
+        return _default_runtime
+    _default_runtime = SGLangEPLBRuntime(
+        planner=planner,
+        rebalance_policy=rebalance_policy,
+        recorder=recorder,
+        provider=provider,
+    )
     return _default_runtime
 
 

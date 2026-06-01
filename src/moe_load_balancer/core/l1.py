@@ -71,10 +71,13 @@ class StatsCollector(Protocol):
     ``ExpertDistributionRecorder.start_record` / ``stop_record`` shape;
     implementations that are always-on may treat them as no-ops.
 
-    :meth:`collect` carries an *atomic snapshot-and-reset* semantics --
-    after the call, the underlying accumulator is cleared so the next
-    window starts fresh. This matches sglang's ``dump_record`` behavior
-    and lets the L1 rebalance loop be a single read.
+    :meth:`collect` performs snapshot-and-reset: after the call,
+    the underlying accumulator is cleared so the next window starts
+    fresh. **The operation is not atomic against concurrent appends**
+    -- implementations assume a single-threaded caller (e.g. sglang
+    invokes per-forward append and periodic collect on the same
+    scheduler event-loop thread). If you need a different concurrency
+    model, wrap with your own lock.
     """
 
     @property

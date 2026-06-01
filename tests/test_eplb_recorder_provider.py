@@ -25,6 +25,7 @@ from moe_load_balancer.adapters.sglang.eplb import (
     SGLangEPLBRuntime,
     SGLangStatsBridge,
     clear_default_runtime,
+    ensure_default_runtime,
     get_default_runtime,
     set_default_runtime,
 )
@@ -145,6 +146,32 @@ class TestEPLBRecorder:
         assert stats.logical_count is not None
         assert torch.equal(
             stats.logical_count, torch.tensor([[44, 66]], dtype=torch.int32)
+        )
+
+
+    def test_append_clones_so_caller_buffer_reset_is_invisible(self):
+        """Codex-review fix #1: sglang gatherers reuse a single tensor and
+        zero it in-place on reset(). EPLBRecorder.append must take an
+        independent snapshot so window history survives the gatherer's
+        next reset() call.
+        """
+        rec = EPLBRecorder(RebalancePolicyConfig(recording_window_size=10))
+        phy2log = _phy2log()
+
+        # Simulate sglang gatherer's reused buffer.
+        gatherer_buf = _gpc(fill=3)
+        rec.append(global_physical_count=gatherer_buf, physical_to_logical_map=phy2log)
+
+        # Caller-side reset (what sglang does between forwards).
+        gatherer_buf.zero_()
+
+        # Recorder's buffered observation must NOT have been zeroed.
+        stats = rec.collect()
+        # Fill was 3 across one observation, 2 replicas per logical -> 6 per logical.
+        expected = torch.full((3, 4), 6, dtype=torch.int32)
+        assert torch.equal(stats.logical_count, expected), (
+            "append() did not snapshot defensively; buffered tensor aliases "
+            "caller buffer."
         )
 
 
@@ -448,22 +475,21 @@ class TestSGLangEPLBRuntimeFacade:
 
 @pytest.mark.unit
 class TestDefaultRuntimeRegistry:
+    """Default-runtime registry semantics after codex-review fix #2:
+    NO lazy init -- get_default_runtime() raises if nothing registered.
+    """
+
     def setup_method(self):
         clear_default_runtime()
 
     def teardown_method(self):
         clear_default_runtime()
 
-    def test_lazy_init_returns_default_instance(self):
-        rt = get_default_runtime()
-        assert isinstance(rt, SGLangEPLBRuntime)
+    def test_get_without_register_raises(self):
+        with pytest.raises(RuntimeError, match="No default SGLangEPLBRuntime"):
+            get_default_runtime()
 
-    def test_subsequent_gets_return_same_instance(self):
-        rt1 = get_default_runtime()
-        rt2 = get_default_runtime()
-        assert rt1 is rt2
-
-    def test_set_default_overrides_lazy_init(self):
+    def test_set_then_get_returns_registered(self):
         custom = SGLangEPLBRuntime(
             rebalance_policy=RebalancePolicyConfig(recording_window_size=999)
         )
@@ -472,13 +498,36 @@ class TestDefaultRuntimeRegistry:
         assert got is custom
         assert got.rebalance_policy.recording_window_size == 999
 
-    def test_clear_resets_state(self):
-        custom = SGLangEPLBRuntime()
-        set_default_runtime(custom)
+    def test_subsequent_gets_return_same_instance(self):
+        rt = SGLangEPLBRuntime()
+        set_default_runtime(rt)
+        assert get_default_runtime() is rt
+        assert get_default_runtime() is rt
+
+    def test_clear_returns_to_unregistered_state(self):
+        set_default_runtime(SGLangEPLBRuntime())
         clear_default_runtime()
-        # After clear, a new lazy default is built
-        rt = get_default_runtime()
-        assert rt is not custom
+        with pytest.raises(RuntimeError):
+            get_default_runtime()
+
+    def test_ensure_default_runtime_first_caller_wins(self):
+        """First caller installs; second caller reuses existing instance."""
+        first = ensure_default_runtime(
+            rebalance_policy=RebalancePolicyConfig(recording_window_size=100),
+        )
+        # Second caller passes different config but should get back the first.
+        second = ensure_default_runtime(
+            rebalance_policy=RebalancePolicyConfig(recording_window_size=999),
+        )
+        assert second is first
+        # The "winning" config is the first one's.
+        assert second.rebalance_policy.recording_window_size == 100
+
+    def test_ensure_default_runtime_first_caller_installs(self):
+        """If nothing registered yet, ensure builds + installs."""
+        rt = ensure_default_runtime()
+        assert isinstance(rt, SGLangEPLBRuntime)
+        assert get_default_runtime() is rt
 
 
 # ----------------------------------------------------------------------
@@ -506,3 +555,39 @@ class TestRebalancePolicyConfig:
         c = RebalancePolicyConfig()
         with pytest.raises(FrozenInstanceError):
             c.recording_window_size = 999  # type: ignore[misc]
+
+    def test_recording_window_size_must_be_positive(self):
+        with pytest.raises(ValueError, match="must be > 0"):
+            RebalancePolicyConfig(recording_window_size=0)
+        with pytest.raises(ValueError, match="must be > 0"):
+            RebalancePolicyConfig(recording_window_size=-1)
+
+    def test_min_utilization_threshold_none_is_ok(self):
+        c = RebalancePolicyConfig(min_utilization_threshold=None)
+        assert c.min_utilization_threshold is None
+
+    def test_min_utilization_threshold_in_range_is_ok(self):
+        c = RebalancePolicyConfig(min_utilization_threshold=0.0)
+        assert c.min_utilization_threshold == 0.0
+        c = RebalancePolicyConfig(min_utilization_threshold=1.0)
+        assert c.min_utilization_threshold == 1.0
+        c = RebalancePolicyConfig(min_utilization_threshold=0.85)
+        assert c.min_utilization_threshold == 0.85
+
+    def test_min_utilization_threshold_negative_rejected(self):
+        with pytest.raises(ValueError, match=r"\[0\.0, 1\.0\]"):
+            RebalancePolicyConfig(min_utilization_threshold=-0.1)
+
+    def test_min_utilization_threshold_above_one_rejected(self):
+        with pytest.raises(ValueError, match=r"\[0\.0, 1\.0\]"):
+            RebalancePolicyConfig(min_utilization_threshold=1.5)
+
+    def test_min_utilization_threshold_nan_rejected(self):
+        with pytest.raises(ValueError, match="finite float"):
+            RebalancePolicyConfig(min_utilization_threshold=float("nan"))
+
+    def test_min_utilization_threshold_inf_rejected(self):
+        # inf is not "in [0.0, 1.0]" so should be rejected by the range
+        # check (the NaN check only catches NaN; inf falls through to range).
+        with pytest.raises(ValueError):
+            RebalancePolicyConfig(min_utilization_threshold=float("inf"))

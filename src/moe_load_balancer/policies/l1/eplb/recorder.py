@@ -88,8 +88,12 @@ class EPLBRecorder(StatsCollector):
             physical_count, self._latest_physical_to_logical_map
         )
 
-        # Drain the buffer so the next window starts fresh (matches
-        # sglang dump_record's atomic snapshot-and-reset semantics).
+        # Drain the buffer so the next window starts fresh. This is a
+        # *single-threaded* snapshot-and-reset: append + collect are
+        # NOT guarded by a lock, so concurrent calls would race. SGLang's
+        # scheduler invokes per-forward append and periodic collect on
+        # the same event-loop thread per rank, which makes the race
+        # impossible in production; tests run the sequence linearly.
         self._buffer.clear()
 
         return PlacementStats(
@@ -121,19 +125,25 @@ class EPLBRecorder(StatsCollector):
         """
         if not self._recording:
             return
-        # Co-locate observations onto the placement map's device. Rationale:
-        # sglang gatherers may emit ``global_physical_count`` on CPU (e.g.
-        # DeepEP-normal mode uses a CPU-side gatherer) while the placement
-        # map lives on the EP device (GPU). Downstream rebalance steps in
-        # sglang (``torch.distributed.all_reduce(logical_count)``) need a
-        # GPU tensor for NCCL, so we align toward the placement map's
-        # device, which mirrors sglang's prior behaviour where
-        # ``_Buffer`` was constructed with ``device=server_args.device``
-        # and items were implicitly moved on append.
-        if global_physical_count.device != physical_to_logical_map.device:
-            global_physical_count = global_physical_count.to(
-                physical_to_logical_map.device
-            )
+
+        # Defensive snapshot: sglang gatherers (e.g.
+        # ``_LayerBasedGpuSinglePassGatherer``) reuse a single
+        # ``self._data`` tensor across forward passes and zero it in
+        # place on ``reset()`` before the next pass starts. If we put
+        # that tensor reference straight into the deque, every entry
+        # aliases the same memory and the next ``reset()`` wipes our
+        # whole window. We must take an independent copy.
+        #
+        # ``.to(device, copy=True)`` does both the device co-location
+        # (CPU gatherer -> GPU placement; needed for sglang
+        # ``all_reduce(logical_count)`` under NCCL) AND the independent
+        # snapshot in one shot. If devices match the result is still a
+        # fresh tensor; if they differ ``.to`` allocates on the target
+        # device. Cost per forward: one [num_layers,num_physical] int32
+        # copy (~tens of KB on typical EP configs).
+        global_physical_count = global_physical_count.to(
+            physical_to_logical_map.device, copy=True
+        )
         self._buffer.append(global_physical_count)
         # Keep only the latest placement map -- per-step storage would
         # be wasteful and ambiguous (the active placement at collect

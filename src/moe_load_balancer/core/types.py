@@ -162,8 +162,11 @@ class PlacementPolicyConfig:
     config: algorithm variant (``"auto"`` / ``"deepseek"`` /
     ``"deepseek_hierarchical"`` / ...), layout scalars
     (``num_physical_experts``, ``num_local_physical_experts``,
-    ``num_groups``, ``num_nodes``). Tensors MUST NOT go here — tensor inputs
-    flow through :class:`PlacementRequest.stats`.
+    ``num_groups``, ``num_nodes``). Tensors MUST NOT go here for *scalars*; read-only tensor references that are
+    policy parameters (e.g. ``active_ranks`` for the elasticity-
+    aware EPLB variants) are acceptable. The boundary is "don't
+    put load *statistics* in metadata; those flow through
+    :class:`PlacementRequest.stats`."
 
     L1 has no stage gating (placement is computed offline or at low
     frequency, not per-batch), so this class is intentionally simpler than
@@ -228,6 +231,29 @@ class RebalancePolicyConfig:
 
     recording_window_size: int = 100
     min_utilization_threshold: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        if self.recording_window_size <= 0:
+            raise ValueError(
+                f"recording_window_size must be > 0 (got "
+                f"{self.recording_window_size!r}); infinite-buffer mode "
+                f"is not supported."
+            )
+        thr = self.min_utilization_threshold
+        if thr is not None:
+            # Reject NaN (NaN != NaN) and non-numeric.
+            if not isinstance(thr, (int, float)) or (
+                isinstance(thr, float) and thr != thr
+            ):
+                raise ValueError(
+                    f"min_utilization_threshold must be None or a finite "
+                    f"float in [0.0, 1.0]; got {thr!r}."
+                )
+            if thr < 0.0 or thr > 1.0:
+                raise ValueError(
+                    f"min_utilization_threshold must be in [0.0, 1.0]; "
+                    f"got {thr!r}."
+                )
 
 
 @dataclass(frozen=True, kw_only=True)

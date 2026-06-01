@@ -30,6 +30,7 @@ from __future__ import annotations
 from moe_load_balancer.adapters.sglang.eplb.runtime import (
     SGLangEPLBRuntime,
     clear_default_runtime,
+    ensure_default_runtime,
     get_default_runtime,
     set_default_runtime,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "SGLangStatsBridge",
     "SGLangStatsCollector",
     "clear_default_runtime",
+    "ensure_default_runtime",
     "get_default_runtime",
     "set_default_runtime",
 ]
