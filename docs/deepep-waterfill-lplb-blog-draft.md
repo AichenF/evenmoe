@@ -102,17 +102,15 @@ The primary serving benchmark uses:
 - Metric: total token throughput, counting prompt tokens plus the single generated token.
 - Statistics: warmup rounds are discarded; measured rounds report a trimmed mean after dropping the highest and lowest throughput samples.
 
-On the original non-redundant/static-EPLB PR reproduction, a representative reportable run was:
-
-| Configuration | Workload | Total Throughput | Gain |
-| --- | --- | ---: | ---: |
-| Baseline + static EPLB | MMLU, 1,000 requests/round, concurrency 256, `max_tokens=1` | 29,745 tok/s | - |
-| Waterfill + static EPLB | Same | 30,979 tok/s | +4.1% |
-
-We also re-ran the newer redundant-EPLB variants on the full 14,042-prompt MMLU pool. Each mode used 2 warmup rounds and 4 measured rounds, with 1,000 prompts sampled per round, concurrency 256, and `max_tokens=1`.
+The table below summarizes the DeepSeek-V3/R1-style Waterfill results. The
+non-redundant red0 row is from the original PR reproduction using the 2,000
+prompt serving split. The red16 and red32 rows are newer redundant-EPLB reruns
+on the full 14,042-prompt MMLU pool. All rows use 1,000 requests per measured
+round, concurrency 256, and `max_tokens=1`.
 
 | Configuration | Physical Routed Experts | Baseline | Waterfill | Gain |
 | --- | ---: | ---: | ---: | ---: |
+| Static EPLB, red0 | 256 | 29,745 tok/s | 30,979 tok/s | +4.1% |
 | Static EPLB, red16 | 272 | 31,070 tok/s | 31,472 tok/s | +1.29% |
 | Static EPLB, red32 | 288 | 30,942 tok/s | 32,153 tok/s | +3.91% |
 
