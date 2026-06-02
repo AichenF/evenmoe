@@ -120,7 +120,9 @@ These results indicate that Waterfill improves throughput while preserving model
 
 ### Waterfill on DeepSeek V4
 
-DeepSeek V4 introduces additional engineering requirements for the Waterfill path, including `HashTopK`, logical/physical expert IDs, and redundant physical experts. [#25391](https://github.com/sgl-project/sglang/pull/25391) extends Waterfill support to this path.
+DeepSeek V4 uses a `HashTopK` routing path, so Waterfill support also needs to
+cover that path. [#25391](https://github.com/sgl-project/sglang/pull/25391)
+extends Waterfill to DeepSeek V4 `HashTopK`.
 
 Two-node H20 DeepSeek V4 FP8 clean reruns showed consistent throughput improvement on the same MMLU-style serving workload shape: 14,042-prompt pool, batch=512, concurrency=128, `max_tokens=1`, 2 warmup rounds, and 4 measured rounds. The table reports trimmed mean total throughput.
 
@@ -131,7 +133,8 @@ Two-node H20 DeepSeek V4 FP8 clean reruns showed consistent throughput improveme
 | Static EPLB, red16 | 50,006 tok/s | 51,655 tok/s | +3.30% |
 | Static EPLB, red32 | 50,167 tok/s | 51,813 tok/s | +3.28% |
 
-These results use the V4 TopK/HashTopK path and validate that Waterfill remains directionally positive after adding logical/physical expert ID handling.
+These results use the V4 `HashTopK` path and validate that Waterfill remains
+directionally positive on DeepSeek V4.
 
 ### LPLB on DeepSeek R1
 
@@ -180,7 +183,8 @@ The important flags are:
 - `--enable-deepep-waterfill`: enable the shared expert fusion and Waterfill path.
 - `--init-expert-location`: optionally initialize expert placement and rank-load metadata from collected expert distribution statistics.
 
-For DeepSeek V4, Waterfill additionally needs the V4 TopK/HashTopK and logical/physical expert ID path introduced in [#25391](https://github.com/sgl-project/sglang/pull/25391).
+DeepSeek V4 support uses the `HashTopK` path added in
+[#25391](https://github.com/sgl-project/sglang/pull/25391).
 
 ### Enable LPLB
 
