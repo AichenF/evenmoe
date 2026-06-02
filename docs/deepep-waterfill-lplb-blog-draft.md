@@ -43,7 +43,7 @@ Static expert placement is important, but it cannot remove all runtime imbalance
 
 ## Waterfill: Lightweight Load Balancing for Shared Expert Dispatch
 
-### What Waterfill Is and Why It Works
+### Waterfill Dispatch Strategy
 
 Waterfill is a lightweight load balancing algorithm for the shared expert path under DeepEP.
 
@@ -55,7 +55,7 @@ For each token, Waterfill adds one extra expert slot for the shared expert. Inst
 
 The result is a small but consistent improvement in end-to-end throughput for workloads where shared-expert execution amplifies EP imbalance.
 
-### Why Waterfill Requires Shared Expert Fusion
+### Shared Expert Fusion as the Enabling Mechanism
 
 Waterfill depends on shared expert fusion.
 
@@ -75,7 +75,7 @@ The fusion itself is not the final load balancing algorithm. It is the required 
 
 ## LPLB: LP-Based Load Balancing for Redundant Expert Replicas
 
-### What LPLB Is and How It Works
+### LPLB Routing Strategy
 
 TODO: This section will be completed by the LPLB owners.
 
