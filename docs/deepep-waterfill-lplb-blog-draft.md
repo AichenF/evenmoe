@@ -11,14 +11,14 @@ Mixture-of-Experts (MoE) models rely on Expert Parallelism (EP) to scale inferen
 
 This blog introduces two dispatch-time load balancing features in SGLang:
 
-- **Waterfill**, a lightweight shared-expert load balancing method for DeepEP. It dispatches the shared expert through DeepEP and assigns it to less-loaded ranks. In our primary two-node H20 DeepSeek-V3/R1-style MMLU serving workload, Waterfill improved total throughput from **29,745 tok/s** to **30,979 tok/s** (**+4.1%**). In the latest DeepSeek V4 clean rerun, the best measured point improved from **49,253 tok/s** to **51,677 tok/s** (**+4.92%**).
+- **Waterfill**, a lightweight shared-expert load balancing method for DeepEP. It dispatches the shared expert through DeepEP and assigns it to less-loaded ranks. In our primary two-node H20 DeepSeek-V3/R1-style MMLU serving workload, Waterfill improved total throughput from **29,745 tok/s** to **30,979 tok/s** (**+4.1%**). On DeepSeek V4 Flash, the best measured point improved from **49,253 tok/s** to **51,677 tok/s** (**+4.92%**).
 - **LPLB**, a linear-programming-based load balancer for redundant expert replicas. It is designed to solve a per-layer dispatch optimization problem over redundant experts.
 
-The Waterfill work is built on two SGLang PRs: [shared expert fusion](https://github.com/sgl-project/sglang/pull/20089) and [Waterfill dispatch balancing](https://github.com/sgl-project/sglang/pull/19290). DeepSeek V4 support is added in [#25391](https://github.com/sgl-project/sglang/pull/25391). LPLB is introduced in [#24515](https://github.com/sgl-project/sglang/pull/24515).
+The Waterfill work is built on two SGLang PRs: [shared expert fusion](https://github.com/sgl-project/sglang/pull/20089) and [Waterfill dispatch balancing](https://github.com/sgl-project/sglang/pull/19290). DeepSeek V4 Flash support is added in [#25391](https://github.com/sgl-project/sglang/pull/25391). LPLB is introduced in [#24515](https://github.com/sgl-project/sglang/pull/24515).
 
 ## Introduction
 
-Large MoE models such as DeepSeek-V3/R1 and DeepSeek V4 use sparse expert activation to increase model capacity while keeping per-token computation manageable. During inference, EP distributes experts across GPUs and routes tokens to the ranks that own the selected experts. This reduces per-GPU memory pressure and makes large-scale serving practical, but it also introduces a central systems problem: **the router does not generate perfectly balanced expert traffic**.
+Large MoE models such as DeepSeek-V3/R1 and DeepSeek V4 Flash use sparse expert activation to increase model capacity while keeping per-token computation manageable. During inference, EP distributes experts across GPUs and routes tokens to the ranks that own the selected experts. This reduces per-GPU memory pressure and makes large-scale serving practical, but it also introduces a central systems problem: **the router does not generate perfectly balanced expert traffic**.
 
 When some experts receive many more tokens than others, the EP group waits for the busiest ranks. This imbalance affects both computation and communication. Static placement methods such as EPLB can improve the long-term placement of experts and redundant replicas, but a single batch can still have residual imbalance. Dispatch-time load balancing addresses this remaining gap by deciding, at runtime, which physical replica should process each token or each shared-expert request.
 
@@ -104,7 +104,7 @@ The primary serving benchmark uses:
 
 The table below summarizes the DeepSeek-V3/R1-style Waterfill results. The
 non-redundant red0 row is from the original PR reproduction using the 2,000
-prompt serving split. The red16 and red32 rows are newer redundant-EPLB reruns
+prompt serving split. The red16 and red32 rows are newer redundant-EPLB measurements
 on the full 14,042-prompt MMLU pool. All rows use 1,000 requests per measured
 round, concurrency 256, and `max_tokens=1`.
 
@@ -118,13 +118,13 @@ For reference, standalone DeepEP shared-expert fusion without Waterfill measured
 
 These results indicate that Waterfill improves throughput while preserving model quality, because it only changes physical shared-expert placement and does not change the logical expert computation.
 
-### Waterfill on DeepSeek V4
+### Waterfill on DeepSeek V4 Flash
 
-DeepSeek V4 uses a `HashTopK` routing path, so Waterfill support also needs to
+DeepSeek V4 Flash uses a `HashTopK` routing path, so Waterfill support also needs to
 cover that path. [#25391](https://github.com/sgl-project/sglang/pull/25391)
-extends Waterfill to DeepSeek V4 `HashTopK`.
+extends Waterfill to DeepSeek V4 Flash `HashTopK`.
 
-Two-node H20 DeepSeek V4 FP8 clean reruns showed consistent throughput improvement on the same MMLU-style serving workload shape: 14,042-prompt pool, batch=512, concurrency=128, `max_tokens=1`, 2 warmup rounds, and 4 measured rounds. The table reports trimmed mean total throughput.
+Two-node H20 DeepSeek V4 Flash FP8 showed consistent throughput improvement on the same MMLU-style serving workload shape: 14,042-prompt pool, batch=512, concurrency=128, `max_tokens=1`, 2 warmup rounds, and 4 measured rounds. The table reports trimmed mean total throughput.
 
 | Configuration | Baseline | Waterfill | Gain |
 | --- | ---: | ---: | ---: |
@@ -133,8 +133,8 @@ Two-node H20 DeepSeek V4 FP8 clean reruns showed consistent throughput improveme
 | Static EPLB, red16 | 50,006 tok/s | 51,655 tok/s | +3.30% |
 | Static EPLB, red32 | 50,167 tok/s | 51,813 tok/s | +3.28% |
 
-These results use the V4 `HashTopK` path and validate that Waterfill remains
-directionally positive on DeepSeek V4.
+These results use the V4 Flash `HashTopK` path and validate that Waterfill remains
+directionally positive on DeepSeek V4 Flash.
 
 ### LPLB on DeepSeek R1
 
@@ -183,7 +183,7 @@ The important flags are:
 - `--enable-deepep-waterfill`: enable the shared expert fusion and Waterfill path.
 - `--init-expert-location`: optionally initialize expert placement and rank-load metadata from collected expert distribution statistics.
 
-DeepSeek V4 support uses the `HashTopK` path added in
+DeepSeek V4 Flash support uses the `HashTopK` path added in
 [#25391](https://github.com/sgl-project/sglang/pull/25391).
 
 ### Enable LPLB
