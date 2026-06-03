@@ -69,24 +69,18 @@ By shifting less shared-expert work to already-heavy ranks and more shared-exper
 
 Waterfill depends on shared expert fusion.
 
-Before shared expert fusion, SGLang computed the shared expert separately from
-the DeepEP MoE dispatch path. Routed experts went through DeepEP dispatch,
-grouped GEMM, and combine, while the shared expert was launched through a
-separate path. After Waterfill chooses non-local shared-expert ranks, a
-non-fused design would need to extract the dispatched shared-expert tokens from
-the routed-expert layout and launch a separate shared-expert computation. That
-extra layout conversion and launch path can add noticeable overhead.
+Before shared expert fusion, the shared expert used a separate execution path
+from the routed experts. After Waterfill chooses non-local shared-expert ranks,
+that design would need to extract shared-expert tokens from the dispatched
+routed-expert layout and launch a separate shared-expert computation, adding
+extra layout conversion and launch overhead.
 
-Shared expert fusion removes this extra path. The shared expert is represented
-as another expert slot in the same DeepEP MoE layout, so SGLang can use the same
-dispatch, grouped-GEMM, and combine flow for both routed experts and the shared
-expert. In other words, Waterfill can treat the shared expert like a routed
-expert for execution purposes, without adding a separate token extraction or
-layout conversion path.
-
-In DeepSeek V3/R1, this fused representation is commonly described as adding a
-"9th expert" slot per rank: the original top-k routed experts remain unchanged,
-and one additional column is appended for the shared expert.
+Shared expert fusion avoids that path by representing the shared expert as
+another expert slot in the same DeepEP MoE layout. In DeepSeek V3/R1, this is
+the "9th expert" slot per rank: the original routed top-k columns remain
+unchanged, and one additional column is appended for the shared expert. This
+lets routed experts and the shared expert share the same DeepEP dispatch,
+grouped-GEMM, and combine flow.
 
 This is why the Waterfill feature was split into two pieces:
 
