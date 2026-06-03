@@ -63,7 +63,7 @@ only to ranks that the token already visits for routed experts, with the source
 rank kept as a fallback. This preserves most of the load-balancing benefit while
 keeping communication overhead close to the original DeepEP dispatch path.
 
-By shifting less shared-expert work to already-heavy ranks and more shared-expert work to lighter ranks, Waterfill makes the per-rank workload more balanced and improves end-to-end system throughput.
+By shifting shared-expert work away from already-heavy ranks and toward lighter ranks, Waterfill balances per-rank work and improves end-to-end throughput.
 
 ### Shared Expert Fusion as the Enabling Mechanism
 
@@ -76,11 +76,12 @@ routed-expert layout and launch a separate shared-expert computation, adding
 extra layout conversion and launch overhead.
 
 Shared expert fusion avoids that path by representing the shared expert as
-another expert slot in the same DeepEP MoE layout. In DeepSeek V3/R1, this is
-the "9th expert" slot per rank: the original routed top-k columns remain
-unchanged, and one additional column is appended for the shared expert. This
-lets routed experts and the shared expert share the same DeepEP dispatch,
-grouped-GEMM, and combine flow.
+another expert slot in the same DeepEP MoE layout. In DeepSeek V3/R1, the
+router still selects the original routed top-k experts, and the TopK output gets
+one additional column for the shared expert. In the DeepEP physical expert ID
+layout, each rank reserves one extra shared-expert slot next to its routed
+experts. This lets routed experts and the shared expert share the same DeepEP
+dispatch, grouped-GEMM, and combine flow.
 
 This is why the Waterfill feature was split into two pieces:
 
@@ -124,6 +125,12 @@ prompt serving split. The red16 and red32 rows are newer redundant-EPLB measurem
 on the full 14,042-prompt MMLU pool. All rows use 1,000 requests per measured
 round, concurrency 256, and `max_tokens=1`.
 
+Because the red0 row is kept from the original PR reproduction and the red16/red32
+rows come from the later full-pool rerun, the rows are meant to report Waterfill
+gain within each configuration rather than to compare absolute throughput across
+all configurations. The standalone fusion-only red0 reference below is also a
+full-pool measurement, not the direct baseline for the original red0 PR row.
+
 | Configuration | Physical Routed Experts | Baseline | Waterfill | Gain |
 | --- | ---: | ---: | ---: | ---: |
 | Static EPLB, red0 | 256 | 29,745 tok/s | 30,979 tok/s | +4.1% |
@@ -136,9 +143,10 @@ These results indicate that Waterfill improves throughput while preserving model
 
 ### Waterfill on DeepSeek V4 Flash
 
-DeepSeek V4 Flash uses a `HashTopK` routing path, so Waterfill support also needs to
-cover that path. [#25391](https://github.com/sgl-project/sglang/pull/25391)
-extends Waterfill to DeepSeek V4 Flash `HashTopK`.
+Because DeepSeek V4 Flash uses a `HashTopK` routing path, Waterfill must append
+and remap the shared-expert slot in the `HashTopK` output path as well.
+[#25391](https://github.com/sgl-project/sglang/pull/25391) extends Waterfill to
+DeepSeek V4 Flash `HashTopK`.
 
 Two-node H20 DeepSeek V4 Flash FP8 showed consistent throughput improvement on the same MMLU-style serving workload shape: 14,042-prompt pool, batch=512, concurrency=128, `max_tokens=1`, 2 warmup rounds, and 4 measured rounds. The table reports trimmed mean total throughput.
 
