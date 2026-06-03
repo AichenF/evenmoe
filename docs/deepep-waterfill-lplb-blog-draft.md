@@ -53,6 +53,16 @@ Waterfill changes this by treating the shared expert as a dispatchable expert sl
 
 For each token, Waterfill adds one extra expert slot for the shared expert. Instead of always assigning that slot to the token's local rank, it selects a rank based on the current load distribution. This keeps the routed expert choices unchanged, so the model still computes the same logical routed experts and the same shared expert. The only thing that changes is **which physical rank executes the shared expert work**.
 
+There is an important communication tradeoff. If every token could send its
+shared-expert work to any EP rank, Waterfill would have more balancing freedom,
+but it could also increase all-to-all traffic. For GPU MoE serving, communication
+is often more expensive than the extra shared-expert computation. Waterfill
+therefore keeps the candidate ranks local to the token's existing dispatch
+footprint: in the communication-sensitive path, the shared expert is assigned
+only to ranks that the token already visits for routed experts, with the source
+rank kept as a fallback. This preserves most of the load-balancing benefit while
+keeping communication overhead close to the original DeepEP dispatch path.
+
 By shifting less shared-expert work to already-heavy ranks and more shared-expert work to lighter ranks, Waterfill makes the per-rank workload more balanced and improves end-to-end system throughput.
 
 ### Shared Expert Fusion as the Enabling Mechanism
