@@ -47,13 +47,13 @@ Static expert placement is important, but it cannot remove all runtime imbalance
 
 Waterfill is a lightweight load balancing algorithm for the shared expert path under DeepEP.
 
-The key observation is simple: when routed expert load is imbalanced across ranks, the shared expert does not have to make the imbalance worse. If the shared expert is always computed locally on every rank, then each rank pays the shared-expert cost regardless of whether it is already overloaded by routed experts. The overloaded ranks remain overloaded, and the less-loaded ranks cannot help absorb the shared-expert work.
+If the shared expert is always computed locally on every rank, then each rank pays the shared-expert cost regardless of whether it is already overloaded by routed experts. The overloaded ranks remain overloaded, and the less-loaded ranks cannot help absorb the shared-expert work.
 
 Waterfill changes this by treating the shared expert as a dispatchable expert slot. After the routed experts are selected, Waterfill estimates the current routed load on each EP rank, then assigns the shared expert work to ranks with lower load. Conceptually, it fills the valleys in the rank-load distribution, similar to pouring water into uneven containers.
 
 For each token, Waterfill adds one extra expert slot for the shared expert. Instead of always assigning that slot to the token's local rank, it selects a rank based on the current load distribution. This keeps the routed expert choices unchanged, so the model still computes the same logical routed experts and the same shared expert. The only thing that changes is **which physical rank executes the shared expert work**.
 
-The result is a small but consistent improvement in end-to-end throughput for workloads where shared-expert execution amplifies EP imbalance.
+By shifting less shared-expert work to already-heavy ranks and more shared-expert work to lighter ranks, Waterfill makes the per-rank workload more balanced and improves end-to-end system throughput.
 
 ### Shared Expert Fusion as the Enabling Mechanism
 
