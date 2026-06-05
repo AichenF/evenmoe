@@ -162,14 +162,31 @@ directionally positive on DeepSeek V4 Flash.
 
 ### LPLB on DeepSeek R1
 
-TODO: This section will be completed by the LPLB owners.
+We also ran a controlled Waterfill/LPLB comparison with the official SGLang
+`bench_serving` script on the same two-node H20, EP16/DP16, DeepEP normal-mode
+DeepSeek-V3/R1-style setup. The sweep used MMLU, GPQA, and GSM8K prompt pools,
+`max_tokens=1`, no streaming, concurrency 256, 2 warmup rounds, and 4 measured
+rounds. Each reported throughput is the trimmed mean after dropping the highest
+and lowest measured rounds.
 
-Suggested points to cover:
+The table keeps each comparison within the same placement configuration. LPLB is
+only meaningful when EPLB placement is enabled, because it routes among valid
+physical replicas of the same logical expert.
 
-- Benchmark setup.
-- Dynamic baseline versus LP dispatch.
-- Throughput and TTFT results.
-- Workload conditions where the measured signal is strongest.
+| Dataset | Baseline setting | Baseline | Waterfill | Waterfill gain | LPLB | LPLB gain |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| MMLU | No EPLB | 28,968 tok/s | 29,697 tok/s | +2.52% | - | - |
+| MMLU | Static EPLB, red0 | 30,392 tok/s | 31,424 tok/s | +3.40% | 29,938 tok/s | -1.50% |
+| MMLU | Static EPLB, red16 | 30,638 tok/s | 31,483 tok/s | +2.76% | 31,104 tok/s | +1.52% |
+| MMLU | Static EPLB, red32 | 30,714 tok/s | 31,169 tok/s | +1.48% | 31,547 tok/s | +2.72% |
+| GPQA | No EPLB | 23,201 tok/s | 24,283 tok/s | +4.66% | - | - |
+| GPQA | Static EPLB, red0 | 26,322 tok/s | 26,970 tok/s | +2.46% | 25,899 tok/s | -1.61% |
+| GPQA | Static EPLB, red16 | 26,124 tok/s | 26,683 tok/s | +2.14% | 26,350 tok/s | +0.86% |
+| GPQA | Static EPLB, red32 | 25,975 tok/s | 26,655 tok/s | +2.62% | 26,193 tok/s | +0.84% |
+| GSM8K | No EPLB | 29,649 tok/s | 30,892 tok/s | +4.19% | - | - |
+| GSM8K | Static EPLB, red0 | 33,058 tok/s | 34,529 tok/s | +4.45% | 32,744 tok/s | -0.95% |
+| GSM8K | Static EPLB, red16 | 34,026 tok/s | 35,226 tok/s | +3.53% | 35,474 tok/s | +4.26% |
+| GSM8K | Static EPLB, red32 | 33,988 tok/s | 35,070 tok/s | +3.19% | 36,482 tok/s | +7.34% |
 
 ### Accuracy Validation
 
