@@ -268,24 +268,33 @@ DeepSeek V4 Flash support uses the `HashTopK` path added in
 
 ### Enable LPLB
 
-TODO: This section will be completed by the LPLB owners.
-
-Suggested command shape:
+LPLB is selected through the EP dispatch algorithm on the DeepEP MoE path. Because LPLB balances tokens across redundant replicas, it requires both an EPLB placement that actually contains redundant experts. A representative two-node launch command is:
 
 ```bash
 python3 -m sglang.launch_server \
     --model-path /path/to/DeepSeek-R1 \
-    --trust-remote-code \
-    --tp-size 16 \
+    --tp 16 \
     --dp-size 16 \
     --ep-size 16 \
-    --enable-dp-attention \
+    --nnodes 2 \
+    --node-rank ${NODE_RANK} \
+    --dist-init-addr ${HEAD_NODE_IP}:${PORT} \
+    --host 0.0.0.0 \
+    --port 30000 \
+    --trust-remote-code \
     --moe-a2a-backend deepep \
     --deepep-mode normal \
+    --enable-dp-attention \
     --ep-num-redundant-experts 16 \
     --ep-dispatch-algorithm lp \
     --init-expert-location /path/to/expert_stats.pt
 ```
+
+The important flags are:
+
+- `--ep-dispatch-algorithm lp`: select the LPLB linear-programming dispatcher in place of the default `static` or the uniform-random `dynamic` policy.
+- `--ep-num-redundant-experts`: create redundant physical replicas for hot logical experts. LPLB has nothing to balance without them — this is why the `red0` rows above show no LPLB gain.
+- `--init-expert-location`: load the static EPLB placement (the physical-to-logical map, including the redundant slots) collected from an expert-distribution recording run. The replica count here must be consistent with `--ep-num-redundant-experts`.
 
 ## Acknowledgment
 
