@@ -306,3 +306,8 @@ We thank the SGLang maintainers and reviewers for discussions, reviews, and inte
 - [#19290: Add Waterfill load balancing for shared expert dispatch](https://github.com/sgl-project/sglang/pull/19290)
 - [#25391: Support DeepSeek V4 DeepEP Waterfill](https://github.com/sgl-project/sglang/pull/25391)
 - [#24515: LPLB: linear-programming load balancer for MoE expert parallelism](https://github.com/sgl-project/sglang/pull/24515)
+
+We also thank DeepSeek for open-sourcing their LPLB work at
+[deepseek-ai/LPLB](https://github.com/deepseek-ai/LPLB), whose linear-programming
+formulation for balancing tokens across redundant expert replicas inspired the
+SGLang LPLB integration described here.
