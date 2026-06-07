@@ -92,16 +92,55 @@ The fusion itself is not the final load balancing algorithm. It is the required 
 
 ## LPLB: LP-Based Load Balancing for Redundant Expert Replicas
 
-### LPLB Routing Strategy
+### The Problem LPLB Solves
 
-TODO: This section will be completed by the LPLB owners.
+EPLB places redundant replicas of hot logical experts and then, by default, splits each hot expert's tokens **evenly** across its physical copies. Even splitting is optimal only when the offline distribution used to build the placement matches the live traffic. In practice it often does not: a single batch concentrates on different experts than the calibration set, the served dataset drifts away from the recording dataset, and the rebalance period is long enough that placement is effectively static for many batches. When that happens, evenly dividing a hot expert's load still leaves the ranks that own its copies unevenly loaded relative to the rest of the EP group, and the whole group waits on the busiest rank.
 
-Suggested points to cover:
+LPLB closes this gap at dispatch time. For each MoE layer, on each batch, it looks at the *actual* per-expert token counts and decides how to split each replicated expert's tokens across its physical copies so that the **maximum per-rank load is minimized**. It does not move weights and it does not change the router's logical top-k choices — it only chooses, among the valid physical replicas of a logical expert, how much traffic each replica receives. The result is an optimal min–max assignment for the batch in front of it, rather than the static even split EPLB bakes in offline.
 
-- What optimization problem LPLB solves.
-- How LPLB uses redundant expert replicas.
-- How it differs from Waterfill.
-- Why it is useful for per-layer dispatch-time balancing.
+### The LP Formulation
+
+LPLB casts this as a small linear program solved per layer. The intuition maps directly onto the constraints:
+
+- **Objective — minimize the peak.** Introduce a scalar `M` representing the maximum load over all ranks, and minimize it. Driving `M` down pulls the busiest rank toward the average, which is exactly what shortens the grouped-GEMM tail that EP imbalance creates.
+- **Rank-load constraints.** For every rank, *(load from its redundant-expert copies) + (load from its single-copy experts) + (slack to the peak) = M*. The single-copy load on each rank is fixed input — those experts have no dispatch choice — so it moves to the right-hand side. Each rank gets one such equation; the slack is non-negative, so `M` is forced to be at least every rank's true load.
+- **Redundant-expert conservation.** For every replicated logical expert, the loads assigned to its copies must sum to that expert's total observed load: *copy₁ + copy₂ + … + copyₙ = total load*. This guarantees LPLB only redistributes existing traffic and never invents or drops tokens.
+
+The decision variables are the per-copy loads of the replicated experts plus the per-rank slacks and `M`. Single-copy experts are not variables — they contribute only fixed terms — which keeps the LP small: its size scales with the number of *redundant* experts and the number of ranks, not the full expert count.
+
+The constraint matrix is split into an offline part and an online part. The structural blocks — the copy-to-logical-expert mapping, the per-rank ownership of replicated copies, and the slack/`−M` columns — depend only on the expert-to-GPU placement, so they are **pre-computed once at startup and after every EPLB rebalance**. Only the right-hand side changes per batch: the observed redundant-expert loads and the per-rank single-copy loads. A Big-M auxiliary column keeps the system feasible during the solve and is penalized heavily in the objective so the solver drives it to zero.
+
+### From Global Counts to a Solved LP
+
+A subtlety of DP-attention is that different EP ranks run different forward modes in the same step — prefill, decode, or idle — so no single rank sees the global token distribution. LPLB handles this with a deliberately simple collective design:
+
+1. Each rank counts its local tokens per logical expert.
+2. **All** EP ranks participate in one all-reduce of those counts — idle ranks contribute zeros — so every rank ends up with the identical global per-expert distribution.
+3. Every rank then solves the *same* LP independently from those identical inputs and obtains the same solution, so **no broadcast of the result is needed**.
+
+The LP itself is solved on-GPU by a fused interior-point-method (IPM) kernel built on `cuSOLVERDx`/`cuBLASDx`, pre-compiled for the layer's matrix shape at startup so the first real request does not pay the JIT cost. The whole per-batch path — build the right-hand side, solve, and extract the per-copy split — collapses into three CUDA kernel launches that write into pre-allocated buffers, keeping launch overhead and host syncs off the critical path.
+
+### From LP Solution to Token Dispatch
+
+The LP returns, for each replicated logical expert, how its load *should* be divided across its physical copies. LPLB normalizes this into a per-expert probability distribution over the valid physical copies (`log2phy_prob`). At dispatch, each token routed to a replicated logical expert samples a physical copy from that distribution; single-copy experts map to their one physical location as before. This is a drop-in replacement for the existing `dynamic` policy, which picks a copy uniformly at random — LPLB keeps the same probabilistic, per-token dispatch shape but replaces the uniform draw with the load-optimal distribution computed for the batch.
+
+### How LPLB Differs from Waterfill
+
+Waterfill and LPLB share the end goal — flatten per-rank load under DeepEP — but act on different dispatch choices, with different machinery:
+
+| | Waterfill | LPLB |
+| --- | --- | --- |
+| Target | The **shared** (dense) expert, applied to every token | The **routed** experts that EPLB has **replicated** |
+| Decision | Which rank executes each token's shared-expert slot | How to split each replicated expert's tokens across its physical copies |
+| Method | Lightweight valley-filling heuristic over current rank loads | Per-layer min–max linear program solved on-GPU |
+| Requires | Shared expert fusion | EPLB redundant replicas to exist |
+| Cost | Near-zero overhead | An all-reduce plus an LP solve per layer |
+
+They are complementary rather than competing: Waterfill removes imbalance contributed by the dense shared expert, while LPLB removes imbalance among the sparse routed replicas. Because LPLB only redistributes traffic across valid replicas of the same logical expert and never alters the router's logical top-k, it preserves model semantics for the same reason Waterfill does.
+
+### When LPLB Helps Most
+
+LPLB's benefit tracks how much the live batch deviates from the distribution EPLB was calibrated on. When traffic is well-balanced and batches are huge (large-scale, highly diverse serving), there is little residual imbalance left for the LP to remove. When traffic is essentially invariant and narrow (a handful of near-identical questions), static EPLB already captures the distribution and an even split is close to optimal. LPLB delivers the strongest signal in between — **medium-scale serving** focused on a moderate number of related topics, where each batch is imbalanced in a way the offline placement did not anticipate but is still structured enough that an optimal per-batch split meaningfully lowers the peak rank load.
 
 ## Evaluation
 
