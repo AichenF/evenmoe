@@ -268,7 +268,7 @@ DeepSeek V4 Flash support uses the `HashTopK` path added in
 
 ### Enable LPLB
 
-LPLB is selected through the EP dispatch algorithm on the DeepEP MoE path. Because LPLB balances tokens across redundant replicas, it requires both an EPLB placement that actually contains redundant experts. A representative two-node launch command is:
+LPLB is selected through the EP dispatch algorithm on the DeepEP MoE path. Because LPLB balances tokens across redundant replicas, it requires an EPLB placement that actually contains redundant experts. A representative two-node launch command is:
 
 ```bash
 python3 -m sglang.launch_server \
