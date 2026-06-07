@@ -231,7 +231,7 @@ physical replicas of the same logical expert.
 
 Waterfill preserves model semantics because it does not alter the router's logical top-k decisions. The routed experts selected by the model remain the same, and the shared expert remains the same shared expert. Waterfill only changes which physical EP rank executes the shared expert slot.
 
-For LPLB, the expected invariant is similar: dispatch-time routing should select among valid redundant physical replicas for the same logical expert. The LPLB owners can fill in the exact validation methodology and results.
+LPLB preserves model semantics for the same structural reason. It never alters the router's logical top-k; it only chooses which physical replica of a selected logical expert executes each token. Because all replicas of a logical expert hold identical weights, the result a token receives is independent of which replica processes it. This is the same accuracy guarantee EPLB and the `dynamic` policy already rely on.
 
 ## How to Use
 
