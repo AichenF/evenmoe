@@ -65,6 +65,10 @@ keeping communication overhead close to the original DeepEP dispatch path.
 
 By shifting shared-expert work away from already-heavy ranks and toward lighter ranks, Waterfill balances per-rank work and improves end-to-end throughput.
 
+![Waterfill timeline before and after shared-expert balancing](assets/waterfill_timeline_nature_redraw.png)
+
+Figure: Waterfill moves shared-expert work from overloaded ranks to lighter ranks while keeping the routed expert choices unchanged.
+
 ### Shared Expert Fusion as the Enabling Mechanism
 
 Waterfill depends on shared expert fusion.
