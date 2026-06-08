@@ -11,8 +11,8 @@ Mixture-of-Experts (MoE) models rely on Expert Parallelism (EP) to scale inferen
 
 This blog introduces two dispatch-time load balancing features in SGLang:
 
-- **Waterfill**, a lightweight shared-expert load balancing method for DeepEP. It dispatches the shared expert through DeepEP and assigns it to less-loaded ranks. In our primary two-node H20 DeepSeek-V3/R1-style MMLU serving workload, Waterfill improved total throughput from **29,745 tok/s** to **30,979 tok/s** (**+4.1%**). On DeepSeek V4 Flash, the best measured point improved from **49,253 tok/s** to **51,677 tok/s** (**+4.92%**).
-- **LPLB**, a linear-programming-based load balancer for redundant expert replicas. It is designed to solve a per-layer dispatch optimization problem over redundant experts.
+- **Waterfill**, a lightweight shared-expert load balancing method for DeepEP. It dispatches the shared expert through DeepEP and assigns it to less-loaded ranks. On two-node H20 DeepSeek-V3/R1-style serving workloads, Waterfill improves total throughput by **+1.48% to +4.66%** across MMLU, GPQA, and GSM8K. On DeepSeek V4 Flash, the best measured point improved from **49,253 tok/s** to **51,677 tok/s** (**+4.92%**).
+- **LPLB**, a linear-programming-based load balancer for redundant expert replicas. In the same DeepSeek-V3/R1-style matrix, LPLB improves redundant-EPLB configurations by up to **+7.34%**.
 
 The Waterfill work is built on two SGLang PRs: [shared expert fusion](https://github.com/sgl-project/sglang/pull/20089) and [Waterfill dispatch balancing](https://github.com/sgl-project/sglang/pull/19290). DeepSeek V4 Flash support is added in [#25391](https://github.com/sgl-project/sglang/pull/25391). LPLB is introduced in [#24515](https://github.com/sgl-project/sglang/pull/24515).
 
@@ -144,69 +144,25 @@ LPLB's benefit tracks how much the live batch deviates from the distribution EPL
 
 ## Evaluation
 
-### Waterfill on DeepSeek V3/R1
+### Waterfill and LPLB on DeepSeek V3/R1
 
-We evaluated Waterfill on a DeepSeek-V3/R1-style setup with FP8 weights, two H20 nodes, 16 GPUs total, EP16, DP16, DeepEP normal mode, and DP attention. The serving workload uses real MMLU prompts generated from the SGLang MMLU benchmark. For the original PR reproduction, the MMLU prompt set was split into two non-overlapping files: 2,000 prompts for recording the EPLB distribution and 2,000 prompts for serving throughput.
+We evaluated Waterfill and LPLB on the same DeepSeek-V3/R1-style serving setup.
+The table below corresponds to the direct SGLang integration run
+`dsv3_ep16_three_dataset_lplb_matrix_20260605_101821`, using SGLang commit
+`a462e0f864103785fd3e64327104103f1356f220`.
 
-The primary serving benchmark uses:
+The benchmark configuration was:
 
-- Dataset: MMLU prompts, 5-shot, all subjects generated through `benchmark/mmlu/bench_sglang.py`.
-- Prompt length: approximately 600 input tokens on average; measured rounds usually contain about 650K-675K total tokens for 1,000 requests.
-- Request shape: `max_tokens=1`, `temperature=0`.
-- Batch shape: 1,000 sampled prompts per measured round.
-- Concurrency: 256 concurrent requests.
-- Metric: total token throughput, counting prompt tokens plus the single generated token.
-- Statistics: warmup rounds are discarded; measured rounds report a trimmed mean after dropping the highest and lowest throughput samples.
-
-The table below summarizes the DeepSeek-V3/R1-style Waterfill results. The
-non-redundant red0 row is from the original PR reproduction using the 2,000
-prompt serving split. The red16 and red32 rows are newer redundant-EPLB measurements
-on the full 14,042-prompt MMLU pool. All rows use 1,000 requests per measured
-round, concurrency 256, and `max_tokens=1`.
-
-Because the red0 row is kept from the original PR reproduction and the red16/red32
-rows come from the later full-pool rerun, the rows are meant to report Waterfill
-gain within each configuration rather than to compare absolute throughput across
-all configurations. The standalone fusion-only red0 reference below is also a
-full-pool measurement, not the direct baseline for the original red0 PR row.
-
-| Configuration | Physical Routed Experts | Baseline | Waterfill | Gain |
-| --- | ---: | ---: | ---: | ---: |
-| Static EPLB, red0 | 256 | 29,745 tok/s | 30,979 tok/s | +4.1% |
-| Static EPLB, red16 | 272 | 31,070 tok/s | 31,472 tok/s | +1.29% |
-| Static EPLB, red32 | 288 | 30,942 tok/s | 32,153 tok/s | +3.91% |
-
-For reference, standalone DeepEP shared-expert fusion without Waterfill measured 30,569 tok/s for red0, 30,992 tok/s for red16, and 31,124 tok/s for red32 under the same 14,042-prompt, batch=1,000, concurrency=256, `max_tokens=1` workload. This separates the shared-expert fusion baseline from the Waterfill dispatch policy.
-
-These results indicate that Waterfill improves throughput while preserving model quality, because it only changes physical shared-expert placement and does not change the logical expert computation.
-
-### Waterfill on DeepSeek V4 Flash
-
-Because DeepSeek V4 Flash uses a `HashTopK` routing path, Waterfill must append
-and remap the shared-expert slot in the `HashTopK` output path as well.
-[#25391](https://github.com/sgl-project/sglang/pull/25391) extends Waterfill to
-DeepSeek V4 Flash `HashTopK`.
-
-Two-node H20 DeepSeek V4 Flash FP8 showed consistent throughput improvement on the same MMLU-style serving workload shape: 14,042-prompt pool, batch=512, concurrency=128, `max_tokens=1`, 2 warmup rounds, and 4 measured rounds. The table reports trimmed mean total throughput.
-
-| Configuration | Baseline | Waterfill | Gain |
-| --- | ---: | ---: | ---: |
-| No EPLB | 45,951 tok/s | 47,876 tok/s | +4.19% |
-| Static EPLB, red0 | 49,253 tok/s | 51,677 tok/s | +4.92% |
-| Static EPLB, red16 | 50,006 tok/s | 51,655 tok/s | +3.30% |
-| Static EPLB, red32 | 50,167 tok/s | 51,813 tok/s | +3.28% |
-
-These results use the V4 Flash `HashTopK` path and validate that Waterfill remains
-directionally positive on DeepSeek V4 Flash.
-
-### LPLB on DeepSeek R1
-
-We also ran a controlled Waterfill/LPLB comparison with the official SGLang
-`bench_serving` script on the same two-node H20, EP16/DP16, DeepEP normal-mode
-DeepSeek-V3/R1-style setup. The sweep used MMLU, GPQA, and GSM8K prompt pools,
-`max_tokens=1`, no streaming, concurrency 256, 2 warmup rounds, and 4 measured
-rounds. Each reported throughput is the trimmed mean after dropping the highest
-and lowest measured rounds.
+- Model: DeepSeek-V3 FP8, used as the DeepSeek-V3/R1-style serving workload.
+- Hardware: two H20 nodes, 16 GPUs total.
+- Parallelism and backend: TP16, DP16, EP16, DP attention, DeepEP normal mode.
+- Benchmark driver: official SGLang `bench_serving` with the OpenAI chat backend.
+- Datasets: MMLU, GPQA, and GSM8K prompt pools.
+- Request shape: `max_tokens=1`, no streaming, `ignore_eos` disabled.
+- Batch shape: 1,000 prompts per round, concurrency 256, request rate `inf`.
+- Statistics: 2 warmup rounds and 4 measured rounds; reported throughput is the
+  trimmed mean after dropping the highest and lowest measured rounds.
+- Runtime prewarm: 2 lightweight prewarm requests before the benchmark rounds.
 
 The table keeps each comparison within the same placement configuration. LPLB is
 only meaningful when EPLB placement is enabled, because it routes among valid
@@ -226,6 +182,27 @@ physical replicas of the same logical expert.
 | GSM8K | Static EPLB, red0 | 33,058 tok/s | 34,529 tok/s | +4.45% | 32,744 tok/s | -0.95% |
 | GSM8K | Static EPLB, red16 | 34,026 tok/s | 35,226 tok/s | +3.53% | 35,474 tok/s | +4.26% |
 | GSM8K | Static EPLB, red32 | 33,988 tok/s | 35,070 tok/s | +3.19% | 36,482 tok/s | +7.34% |
+
+These results indicate that Waterfill improves throughput while preserving model quality, because it only changes physical shared-expert placement and does not change the logical expert computation. LPLB is strongest when redundant expert replicas provide useful dispatch choices, as shown by the red16 and red32 rows.
+
+### Waterfill on DeepSeek V4 Flash
+
+Because DeepSeek V4 Flash uses a `HashTopK` routing path, Waterfill must append
+and remap the shared-expert slot in the `HashTopK` output path as well.
+[#25391](https://github.com/sgl-project/sglang/pull/25391) extends Waterfill to
+DeepSeek V4 Flash `HashTopK`.
+
+Two-node H20 DeepSeek V4 Flash FP8 showed consistent throughput improvement on the MMLU-style serving workload. This V4 Flash run uses the 14,042-prompt MMLU pool, batch=512, concurrency=128, `max_tokens=1`, 2 warmup rounds, and 4 measured rounds. The table reports trimmed mean total throughput. Because the V4 Flash model and `HashTopK` path were evaluated with a smaller batch/concurrency shape, these numbers should be read as V4-specific validation rather than a direct throughput comparison against the DeepSeek-V3/R1-style matrix above.
+
+| Configuration | Baseline | Waterfill | Gain |
+| --- | ---: | ---: | ---: |
+| No EPLB | 45,951 tok/s | 47,876 tok/s | +4.19% |
+| Static EPLB, red0 | 49,253 tok/s | 51,677 tok/s | +4.92% |
+| Static EPLB, red16 | 50,006 tok/s | 51,655 tok/s | +3.30% |
+| Static EPLB, red32 | 50,167 tok/s | 51,813 tok/s | +3.28% |
+
+These results use the V4 Flash `HashTopK` path and validate that Waterfill remains
+directionally positive on DeepSeek V4 Flash.
 
 ### Accuracy Validation
 
