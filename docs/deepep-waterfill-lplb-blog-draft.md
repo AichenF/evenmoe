@@ -156,13 +156,9 @@ The benchmark configuration was:
 - Model: DeepSeek-V3 FP8, used as the DeepSeek-V3/R1-style serving workload.
 - Hardware: two H20 nodes, 16 GPUs total.
 - Parallelism and backend: TP16, DP16, EP16, DP attention, DeepEP normal mode.
-- Benchmark driver: official SGLang `bench_serving` with the OpenAI chat backend.
 - Datasets: MMLU, GPQA, and GSM8K prompt pools.
-- Request shape: `max_tokens=1`, no streaming, `ignore_eos` disabled.
-- Batch shape: 1,000 prompts per round, concurrency 256, request rate `inf`.
-- Statistics: 2 warmup rounds and 4 measured rounds; reported throughput is the
-  trimmed mean after dropping the highest and lowest measured rounds.
-- Runtime prewarm: 2 lightweight prewarm requests before the benchmark rounds.
+- Benchmark shape: `batch_size=1000`, `concurrency=256`,
+  `request_rate=inf`, `max_tokens=1`.
 
 The table keeps each comparison within the same placement configuration. LPLB is
 only meaningful when EPLB placement is enabled, because it routes among valid
