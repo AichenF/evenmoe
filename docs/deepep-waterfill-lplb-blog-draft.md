@@ -7,14 +7,14 @@ previewImg: /images/blog/deepep-waterfill-lplb/preview.jpg
 
 ## TL;DR
 
-Mixture-of-Experts (MoE) models rely on Expert Parallelism (EP) to scale inference across multiple GPUs. In SGLang, DeepEP provides the high-performance all-to-all dispatch and combine path for EP, but the workload seen by each rank can still be imbalanced because tokens are not routed uniformly across experts.
+Mixture-of-Experts (MoE) models rely on Expert Parallelism (EP) to scale inference across multiple GPUs. In SGLang, DeepEP and EPLB provide high-performance serving under EP, but the workload seen by each rank can still be imbalanced because tokens are not routed uniformly across experts.
 
 This blog introduces two dispatch-time load balancing features in SGLang:
 
 - **Waterfill**, a lightweight shared-expert load balancing method for DeepEP. It dispatches the shared expert through DeepEP and assigns it to less-loaded ranks. On two-node H20 DeepSeek-V3/R1-style serving workloads, Waterfill improves total throughput by **+1.48% to +4.66%** across MMLU, GPQA, and GSM8K. On DeepSeek V4 Flash, the best measured point improved from **49,253 tok/s** to **51,677 tok/s** (**+4.92%**).
 - **LPLB**, a linear-programming-based load balancer for redundant expert replicas. In the same DeepSeek-V3/R1-style matrix, LPLB improves redundant-EPLB configurations by up to **+7.34%**.
 
-The Waterfill work is built on two SGLang PRs: [shared expert fusion](https://github.com/sgl-project/sglang/pull/20089) and [Waterfill dispatch balancing](https://github.com/sgl-project/sglang/pull/19290). DeepSeek V4 Flash support is added in [#25391](https://github.com/sgl-project/sglang/pull/25391). LPLB is introduced in [#24515](https://github.com/sgl-project/sglang/pull/24515).
+The Waterfill work is built on two SGLang PRs: [shared expert fusion under EP](https://github.com/sgl-project/sglang/pull/20089) and [Waterfill dispatch balancing](https://github.com/sgl-project/sglang/pull/19290). DeepSeek V4 Flash support is added in [#25391](https://github.com/sgl-project/sglang/pull/25391). LPLB is introduced in [#24515](https://github.com/sgl-project/sglang/pull/24515).
 
 ## Introduction
 
@@ -39,7 +39,7 @@ From a serving-system perspective, routed experts and shared experts create diff
 - Shared experts are dense. Every token needs the shared expert, so the shared-expert workload is present for the full batch.
 - Redundant experts, introduced by EPLB-style placement, provide multiple physical replicas for some logical experts. They create an opportunity for dispatch-time balancing, because the system can choose which physical replica processes a token without changing the model's logical expert choice.
 
-Static expert placement is important, but it cannot remove all runtime imbalance. The actual tokens in a batch may still concentrate on a subset of experts or ranks. In DeepEP, this can leave some ranks waiting for overloaded peers. Waterfill and LPLB both aim to reduce this dispatch-time imbalance while preserving the model's semantics.
+Static expert placement is helpful, but it cannot remove all runtime imbalance. The actual tokens in a batch may still concentrate on a subset of experts or ranks. In DeepEP, this can leave some ranks waiting for overloaded peers. Waterfill and LPLB both aim to reduce this dispatch-time imbalance while preserving the model's semantics.
 
 ## Waterfill: Lightweight Load Balancing for Shared Expert Dispatch
 
@@ -71,10 +71,10 @@ Figure: Waterfill moves shared-expert work from overloaded ranks to lighter rank
 
 ### Shared Expert Fusion as the Enabling Mechanism
 
-Waterfill depends on shared expert fusion.
+Waterfill can be further accelerated by fusing shared experts and routed experts.
 
-Before shared expert fusion, the shared expert used a separate execution path
-from the routed experts. After Waterfill chooses non-local shared-expert ranks,
+Under EP, shared experts used a separate execution path from the routed experts.
+After Waterfill chooses non-local shared-expert ranks,
 that design would need to extract shared-expert tokens from the dispatched
 routed-expert layout and launch a separate shared-expert computation, adding
 extra layout conversion and launch overhead.
