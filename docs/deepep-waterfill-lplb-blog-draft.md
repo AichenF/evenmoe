@@ -53,15 +53,36 @@ Waterfill changes this by treating the shared expert as a dispatchable expert sl
 
 For each token, Waterfill adds one extra expert slot for the shared expert. Instead of always assigning that slot to the token's local rank, it selects a rank based on the current load distribution. This keeps the routed expert choices unchanged, so the model still computes the same logical routed experts and the same shared expert. The only thing that changes is **which physical rank executes the shared expert work**.
 
+At a high level, the algorithm is:
+
+1. Count the routed expert load already landing on each EP rank.
+2. Use that count as a per-rank load score. In dynamic mode, SGLang first runs one EP-group collective, so the score can use the global routed-load vector plus each rank's current local batch size.
+3. Add one shared-expert slot per participating token, and compute a target waterline:
+
+   ```text
+   H = ceil((sum_r L_r + N) / R)
+   ```
+
+   Here `L_r` is rank `r`'s load score, `N` is the number of shared-expert slots to place, and `R` is the EP group size.
+4. Ranks below this waterline have slack:
+
+   ```text
+   S_r = max(H - L_r, 0)
+   ```
+
+5. For each token, Waterfill samples the shared-expert target rank from candidate ranks with probability proportional to slack, with a small local-rank preference. If all candidates have zero slack, it falls back to the clearly lighter candidate rank, again keeping the local-rank preference.
+
+The detailed derivation and the exact SGLang static/dynamic behavior are documented in the [Waterfill dispatch balancing PR](https://github.com/sgl-project/sglang/pull/19290).
+
 There is an important communication tradeoff. If every token could send its
 shared-expert work to any EP rank, Waterfill would have more balancing freedom,
 but it could also increase all-to-all traffic. For GPU MoE serving, communication
-is often more expensive than the extra shared-expert computation. Waterfill
-therefore keeps the candidate ranks local to the token's existing dispatch
-footprint: in the communication-sensitive path, the shared expert is assigned
-only to ranks that the token already visits for routed experts, with the source
-rank kept as a fallback. This preserves most of the load-balancing benefit while
-keeping communication overhead close to the original DeepEP dispatch path.
+is often more expensive than the extra shared-expert computation. The
+communication-conservative candidate set therefore keeps the shared expert on
+ranks that the token already visits for routed experts, with the source rank kept
+as a fallback. SGLang also supports an all-rank mode, which gives Waterfill more
+balancing freedom but can add a new per-token dispatch destination. This is a
+deliberate communication tradeoff rather than a change in model semantics.
 
 By shifting shared-expert work away from already-heavy ranks and toward lighter ranks, Waterfill balances per-rank work and improves end-to-end throughput.
 
