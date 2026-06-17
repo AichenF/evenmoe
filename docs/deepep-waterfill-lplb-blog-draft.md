@@ -11,7 +11,7 @@ Mixture-of-Experts (MoE) models rely on Expert Parallelism (EP) to scale inferen
 
 This blog introduces two dispatch-time load balancing features in SGLang:
 
-- **Waterfill**, a lightweight shared-expert load balancing method for DeepEP. It dispatches the shared expert through DeepEP and assigns it to less-loaded ranks. On two-node Hopper DeepSeek-V3/R1-style serving workloads, Waterfill improves total throughput by **+1.48% to +4.66%** across MMLU, GPQA, and GSM8K. On DeepSeek V4 Flash, the best measured point improved from **49,253 tok/s** to **51,677 tok/s** (**+4.92%**).
+- **Waterfill**, a lightweight shared-expert load balancing method for DeepEP. It dispatches the shared expert through DeepEP and assigns it to less-loaded ranks. On two Hopper GPU nodes with DeepSeek-V3/R1-style serving workloads, Waterfill improves total throughput by **+1.48% to +4.66%** across MMLU, GPQA, and GSM8K. On DeepSeek V4 Flash, the best measured point improved from **49,253 tok/s** to **51,677 tok/s** (**+4.92%**).
 - **LPLB**, a linear-programming-based load balancer for redundant expert replicas. In the same DeepSeek-V3/R1-style matrix, LPLB improves redundant-EPLB configurations by up to **+7.34%**.
 
 The Waterfill work is built on two SGLang PRs: [shared expert fusion under EP](https://github.com/sgl-project/sglang/pull/20089) and [Waterfill dispatch balancing](https://github.com/sgl-project/sglang/pull/19290). DeepSeek V4 Flash support is added in [#25391](https://github.com/sgl-project/sglang/pull/25391). LPLB is introduced in [#24515](https://github.com/sgl-project/sglang/pull/24515).
@@ -179,7 +179,7 @@ The table below corresponds to the direct SGLang integration run
 The benchmark configuration was:
 
 - Model: DeepSeek-V3 FP8, used as the DeepSeek-V3/R1-style serving workload.
-- Hardware: two Hopper nodes, 16 GPUs total.
+- Hardware: two Hopper GPU nodes, 16 GPUs total.
 - Parallelism and backend: TP16, DP16, EP16, DP attention, DeepEP normal mode.
 - Datasets: MMLU, GPQA, and GSM8K prompt pools.
 - Benchmark shape: `batch_size=1000`, `concurrency=256`,
@@ -213,7 +213,7 @@ and remap the shared-expert slot in the `HashTopK` output path as well.
 [#25391](https://github.com/sgl-project/sglang/pull/25391) extends Waterfill to
 DeepSeek V4 Flash `HashTopK`.
 
-Two-node Hopper DeepSeek V4 Flash FP8 showed consistent throughput improvement on the MMLU-style serving workload. This V4 Flash run uses the 14,042-prompt MMLU pool, batch=512, concurrency=128, `max_tokens=1`, 2 warmup rounds, and 4 measured rounds. The table reports trimmed mean total throughput. Because the V4 Flash model and `HashTopK` path were evaluated with a smaller batch/concurrency shape, these numbers should be read as V4-specific validation rather than a direct throughput comparison against the DeepSeek-V3/R1-style matrix above.
+DeepSeek V4 Flash FP8 on two Hopper GPU nodes showed consistent throughput improvement on the MMLU-style serving workload. This V4 Flash run uses the 14,042-prompt MMLU pool, batch=512, concurrency=128, `max_tokens=1`, 2 warmup rounds, and 4 measured rounds. The table reports trimmed mean total throughput. Because the V4 Flash model and `HashTopK` path were evaluated with a smaller batch/concurrency shape, these numbers should be read as V4-specific validation rather than a direct throughput comparison against the DeepSeek-V3/R1-style matrix above.
 
 | Configuration | Baseline | Waterfill | Gain |
 | --- | ---: | ---: | ---: |
