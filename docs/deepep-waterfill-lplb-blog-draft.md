@@ -12,7 +12,7 @@ Mixture-of-Experts (MoE) models rely on Expert Parallelism (EP) to scale inferen
 This blog introduces two dispatch-time load balancing features in SGLang:
 
 - **Waterfill**, a lightweight shared-expert load balancing method for DeepEP. It dispatches the shared expert through DeepEP and assigns it to less-loaded ranks. On two Hopper GPU nodes with DeepSeek-V3/R1-style serving workloads, Waterfill improves total throughput by **+1.48% to +4.66%** across MMLU, GPQA, and GSM8K. On DeepSeek V4 Flash, the best measured point improved from **49,253 tok/s** to **51,677 tok/s** (**+4.92%**).
-- **LPLB**, a linear-programming-based load balancer for redundant expert replicas. In the same DeepSeek-V3/R1-style matrix, LPLB improves redundant-EPLB configurations by up to **+7.34%**.
+- **LPLB**, a linear-programming-based load balancer for redundant expert replicas. It solves a per-layer dispatch optimization problem over redundant experts. With redundant EPLB placement on the same two Hopper GPU nodes, LPLB improves total throughput by **+0.84% to +7.34%** across MMLU, GPQA, and GSM8K.
 
 The Waterfill work is built on two SGLang PRs: [shared expert fusion under EP](https://github.com/sgl-project/sglang/pull/20089) and [Waterfill dispatch balancing](https://github.com/sgl-project/sglang/pull/19290). DeepSeek V4 Flash support is added in [#25391](https://github.com/sgl-project/sglang/pull/25391). LPLB is introduced in [#24515](https://github.com/sgl-project/sglang/pull/24515).
 
@@ -128,8 +128,8 @@ LPLB closes this gap at dispatch time. For each MoE layer, on each batch, it loo
 LPLB casts this as a small linear program solved per layer. The intuition maps directly onto the constraints:
 
 - **Objective — minimize the peak.** Introduce a scalar `M` representing the maximum load over all ranks, and minimize it. Driving `M` down pulls the busiest rank toward the average, which is exactly what shortens the grouped-GEMM tail that EP imbalance creates.
-- **Rank-load constraints.** For every rank, *(load from its redundant-expert copies) + (load from its single-copy experts) + (slack to the peak) = M*. The single-copy load on each rank is fixed input — those experts have no dispatch choice — so it moves to the right-hand side. Each rank gets one such equation; the slack is non-negative, so `M` is forced to be at least every rank's true load.
-- **Redundant-expert conservation.** For every replicated logical expert, the loads assigned to its copies must sum to that expert's total observed load: *copy₁ + copy₂ + … + copyₙ = total load*. This guarantees LPLB only redistributes existing traffic and never invents or drops tokens.
+- **Rank-load constraints.** For every rank, *(load from its redundant-expert copies) + (load from its single-copy experts) + (slack to the peak) = M*. The single-copy load on each rank is fixed input — those experts have no dispatch choice. Each rank gets one such equation; the slack is non-negative, so `M` is forced to be at least every rank's true load.
+- **Redundant-expert conservation.** For every replicated logical expert, the loads assigned to its copies must sum to that expert's total observed load: `x_1 + x_2 + ... + x_n = L`, where `x_i` is the load placed on copy `i` and `L` is the expert's total observed load. This guarantees LPLB only redistributes existing traffic and never invents or drops tokens.
 
 The decision variables are the per-copy loads of the replicated experts plus the per-rank slacks and `M`. Single-copy experts are not variables — they contribute only fixed terms — which keeps the LP small: its size scales with the number of *redundant* experts and the number of ranks, not the full expert count.
 
@@ -204,7 +204,7 @@ physical replicas of the same logical expert.
 | GSM8K | Static EPLB, red16 | 34,026 tok/s | 35,226 tok/s | +3.53% | 35,474 tok/s | +4.26% |
 | GSM8K | Static EPLB, red32 | 33,988 tok/s | 35,070 tok/s | +3.19% | 36,482 tok/s | +7.34% |
 
-These results indicate that Waterfill improves throughput while preserving model quality, because it only changes physical shared-expert placement and does not change the logical expert computation. LPLB is strongest when redundant expert replicas provide useful dispatch choices, as shown by the red16 and red32 rows.
+These results indicate that Waterfill improves throughput while preserving model quality, because it only changes physical shared-expert placement and does not change the logical expert computation. LPLB is strongest when redundant expert replicas provide useful dispatch choices, as shown by the red16 and red32 rows. In contrast, when no redundant experts are provided, LPLB has no room to balance the load and thus shows only the algorithm overhead.
 
 ### Waterfill on DeepSeek V4 Flash
 
