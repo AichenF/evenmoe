@@ -88,7 +88,7 @@ By shifting shared-expert work away from already-heavy ranks and toward lighter 
 
 ![Waterfill timeline before and after shared-expert balancing](assets/waterfill_timeline_nature_redraw.png)
 
-Figure: Waterfill moves shared-expert work from overloaded ranks to lighter ranks while keeping the routed expert choices unchanged.
+Figure 1. Waterfill moves shared-expert work from overloaded ranks to lighter ranks while keeping the routed expert choices unchanged, shortening the slowest MoE-layer path without changing model semantics.
 
 ### Shared Expert Fusion as the Enabling Mechanism
 
@@ -149,6 +149,10 @@ The LP itself is solved on-GPU by a fused interior-point-method (IPM) kernel bui
 
 The LP returns, for each replicated logical expert, how its load *should* be divided across its physical copies. LPLB normalizes this into a per-expert probability distribution over the valid physical copies (`log2phy_prob`). At dispatch, each token routed to a replicated logical expert samples a physical copy from that distribution; single-copy experts map to their one physical location as before. This is a drop-in replacement for the existing `dynamic` policy, which picks a copy uniformly at random — LPLB keeps the same probabilistic, per-token dispatch shape but replaces the uniform draw with the load-optimal distribution computed for the batch.
 
+![LPLB load-aware split across redundant expert replicas](assets/lplb_redundant_traffic_diagram.png)
+
+Figure 2. LPLB shifts replicated-expert traffic toward lighter ranks without changing logical expert routing, so the same selected expert can finish on a less-loaded physical replica when redundant copies are available.
+
 ### How LPLB Differs from Waterfill
 
 Waterfill and LPLB share the end goal — flatten per-rank load under DeepEP — but act on different dispatch choices, with different machinery:
@@ -204,6 +208,14 @@ physical replicas of the same logical expert.
 | GSM8K | Static EPLB, red16 | 34,026 tok/s | 35,226 tok/s | +3.53% | 35,474 tok/s | +4.26% |
 | GSM8K | Static EPLB, red32 | 33,988 tok/s | 35,070 tok/s | +3.19% | 36,482 tok/s | +7.34% |
 
+![Waterfill throughput on DeepSeek V3/R1-style workloads](assets/fig1_baseline_vs_waterfill.png)
+
+Figure 3. Across MMLU, GPQA, and GSM8K, Waterfill consistently raises total throughput over the matched baseline by shifting shared-expert work toward less-loaded EP ranks.
+
+![LPLB throughput on DeepSeek V3/R1-style workloads](assets/fig2_baseline_vs_lplb.png)
+
+Figure 4. LPLB improves throughput when redundant expert replicas exist (`red16`/`red32`) because the LP has physical copies to choose among. With `red0`, there are no redundant replicas to rebalance, so the algorithm cannot improve dispatch and its all-reduce/solve path appears only as overhead.
+
 These results indicate that Waterfill improves throughput while preserving model quality, because it only changes physical shared-expert placement and does not change the logical expert computation. LPLB is strongest when redundant expert replicas provide useful dispatch choices, as shown by the red16 and red32 rows. In contrast, when no redundant experts are provided, LPLB has no room to balance the load and thus shows only the algorithm overhead.
 
 ### Waterfill on DeepSeek V4 Flash
@@ -221,6 +233,10 @@ DeepSeek V4 Flash FP8 on two Hopper GPU nodes showed consistent throughput impro
 | Static EPLB, red0 | 49,253 tok/s | 51,677 tok/s | +4.92% |
 | Static EPLB, red16 | 50,006 tok/s | 51,655 tok/s | +3.30% |
 | Static EPLB, red32 | 50,167 tok/s | 51,813 tok/s | +3.28% |
+
+![Waterfill throughput on DeepSeek V4 Flash](assets/fig3_v4_waterfill.png)
+
+Figure 5. On the DeepSeek V4 Flash `HashTopK` path, Waterfill remains directionally positive across no-EPLB and static-EPLB settings, with gains from +3.28% to +4.92%.
 
 These results use the V4 Flash `HashTopK` path and validate that Waterfill remains
 directionally positive on DeepSeek V4 Flash.
