@@ -220,12 +220,13 @@ These results indicate that Waterfill improves throughput while preserving model
 
 ### Waterfill on DeepSeek V4 Flash
 
-Because DeepSeek V4 Flash uses a `HashTopK` routing path, Waterfill must append
+DeepSeek V4 Flash can use a `HashTopK` routing path, where Waterfill must append
 and remap the shared-expert slot in the `HashTopK` output path as well.
 [#25391](https://github.com/sgl-project/sglang/pull/25391) extends Waterfill to
-DeepSeek V4 Flash `HashTopK`.
+that path. The shared-expert balancing idea itself is not specific to
+`HashTopK`; it also applies to non-`HashTopK` routing paths.
 
-DeepSeek V4 Flash FP8 on two Hopper GPU nodes showed consistent throughput improvement on the MMLU-style serving workload. This V4 Flash run uses the 14,042-prompt MMLU pool, batch=512, concurrency=128, `max_tokens=1`, 2 warmup rounds, and 4 measured rounds. The table reports trimmed mean total throughput. Because the V4 Flash model and `HashTopK` path were evaluated with a smaller batch/concurrency shape, these numbers should be read as V4-specific validation rather than a direct throughput comparison against the DeepSeek-V3/R1-style matrix above.
+DeepSeek V4 Flash FP8 on two Hopper GPU nodes showed consistent throughput improvement on the MMLU-style serving workload. This V4 Flash run uses the 14,042-prompt MMLU pool, batch=512, concurrency=128, `max_tokens=1`, 2 warmup rounds, and 4 measured rounds. The table reports trimmed mean total throughput. Because this V4 Flash run used a smaller batch/concurrency shape, these numbers should be read as V4-specific validation rather than a direct throughput comparison against the DeepSeek-V3/R1-style matrix above.
 
 | Configuration | Baseline | Waterfill | Gain |
 | --- | ---: | ---: | ---: |
@@ -236,10 +237,10 @@ DeepSeek V4 Flash FP8 on two Hopper GPU nodes showed consistent throughput impro
 
 ![Waterfill throughput on DeepSeek V4 Flash](assets/fig3_v4_waterfill.png)
 
-Figure 5. On the DeepSeek V4 Flash `HashTopK` path, Waterfill remains directionally positive across no-EPLB and static-EPLB settings, with gains from +3.28% to +4.92%.
+Figure 5. Waterfill is also effective on DeepSeek V4 Flash, improving throughput across no-EPLB and static-EPLB settings with gains from +3.28% to +4.92%.
 
-These results use the V4 Flash `HashTopK` path and validate that Waterfill remains
-directionally positive on DeepSeek V4 Flash.
+These results validate that Waterfill remains directionally positive on
+DeepSeek V4 Flash in addition to the DeepSeek-V3/R1-style workloads above.
 
 ### Accuracy Validation
 
