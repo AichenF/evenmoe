@@ -312,8 +312,8 @@ class RoutingLoadHistory:
     ``live_rank_load`` is intentionally distinct from request-local
     ``RoutingRequest.routed_rank_load`` / ``active_rank_token_count``: it is a
     reference-style channel for frameworks that maintain a long-lived live
-    counter (e.g. SGLang EPLB recorder). Adapters expose the live tensor
-    without copying so policies can read the latest value each routing call.
+    counter. Adapters expose the live tensor without copying so policies
+    can read the latest value each routing call.
 
     LP / LB-style policies (LPLB, Metro) use ``historical_expert_load`` and
     ``historical_rank_expert_load`` for the per-expert and 2-D
@@ -367,18 +367,16 @@ class RoutingRequest:
     ``active_rank_token_count`` signals dynamic mode; its absence signals
     static mode. The policy combines them as needed (e.g. ``effective =
     routed + active`` for Waterfill dynamic). Adapters compute these from
-    framework state (e.g. SGLang adapter via ``count_local_routed_per_rank``
-    and an EP-group all-reduce); callers in CPU-only test paths can pass plain
-    sequences.
+    framework state via a per-rank routed-count helper and an EP-group
+    all-reduce; callers in CPU-only test paths can pass plain sequences.
 
     ``global_logical_count`` is the canonical raw input for LPLB-class
     policies that redistribute tokens among physical replicas of replicated
     logical experts. It is orthogonal to ``routed_rank_load`` (per-rank
     aggregation): both can be populated simultaneously by combined runtimes
-    that share a single EP all-reduce upstream of LPLB and Waterfill (see
-    ``docs/sglang-integration.md``). Adapters set it from a local scatter-add
-    over ``logical_topk_ids`` followed by an EP-group all-reduce; the policy
-    consumes it sync-free.
+    that share a single EP all-reduce upstream. Adapters set it from a local
+    scatter-add over ``logical_topk_ids`` followed by an EP-group all-reduce;
+    the policy consumes it sync-free.
     """
 
     layer_id: int
@@ -388,12 +386,9 @@ class RoutingRequest:
     stage: Optional[RoutingStage] = None
     routed_rank_load: Optional[TensorLike] = None
     active_rank_token_count: Optional[TensorLike] = None
-<<<<<<< HEAD
     # ``[num_logical_experts]`` per-logical token count for this batch — local
     # or post-EP-all-reduce depending on the adapter / env. Consumed by L2
     # algorithms that re-balance across logical-expert replicas (LPLB).
-=======
->>>>>>> 2d45db9 (core: add RoutingRequest.global_logical_count for LPLB-class policies)
     global_logical_count: Optional[TensorLike] = None
     token_count: Optional[TensorLike] = None
     lb_token_mask: Optional[TensorLike] = None
@@ -412,7 +407,8 @@ class RoutingDecision:
     ``routed_physical_topk_ids`` lives in the physical-id namespace defined by
     the accompanying ``PlacementSnapshot`` (i.e. indices into
     ``logical_to_physical_candidates``-resolvable physical experts), not in
-    SGLang/DeepEP interleaved id space — that mapping is the adapter's job.
+    any framework-specific interleaved id space — that mapping is the
+    adapter's job.
     """
 
     routed_physical_topk_ids: TensorLike
