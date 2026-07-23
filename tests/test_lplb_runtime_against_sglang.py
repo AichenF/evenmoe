@@ -109,7 +109,7 @@ def _build_metadata(num_layers: int = 2):
 
 def _build_runtime(*, layer_id: int = 0, ep_group=None) -> LPLBRuntime:
     meta = _build_metadata()
-    adapter = SGLangPlacementAdapter(metadata_source=meta)
+    adapter = SGLangPlacementAdapter(meta)
     return LPLBRuntime(
         layer_id=layer_id,
         ep_group=ep_group,
