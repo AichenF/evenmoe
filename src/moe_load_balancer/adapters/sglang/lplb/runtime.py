@@ -180,7 +180,7 @@ class LPLBRuntime:
 
     # -- public API --------------------------------------------------------
 
-    def route(self, topk_output, *, forward_batch=None):
+    def route(self, topk_output, *, forward_batch=None, num_token_non_padded=None):
         """Run LPLB on this layer for the current forward pass.
 
         Mirrors the role of ``LPLBSolver.solve`` + ``topk_ids_logical_to_physical``
@@ -197,7 +197,7 @@ class LPLBRuntime:
         topk_weights = topk_output.topk_weights
 
         # Step 1: count local logical-expert hits.
-        local_counts = self._count_local_logical(topk_ids)
+        local_counts = self._count_local_logical(topk_ids, num_token_non_padded)
 
         # Step 2: EP all-reduce. Every rank participates (zero-token ranks
         # contribute a zero vector). Output is identical across ranks.
@@ -206,7 +206,7 @@ class LPLBRuntime:
         # Step 3: decompose forward_batch.
         stage = _resolve_stage_from_forward_batch(forward_batch)
         lb_token_mask = _resolve_lb_token_mask(forward_batch)
-        token_count = _resolve_num_token_non_padded(forward_batch)
+        token_count = num_token_non_padded if num_token_non_padded is not None else _resolve_num_token_non_padded(forward_batch)
 
         # Step 4: framework-neutral RoutingRequest. The placement snapshot
         # comes from a PlacementProvider that may itself wrap SGLang's live
@@ -237,7 +237,7 @@ class LPLBRuntime:
 
     # -- Internal helpers --------------------------------------------------
 
-    def _count_local_logical(self, topk_ids: Tensor) -> Tensor:
+    def _count_local_logical(self, topk_ids: Tensor, num_token_non_padded=None) -> Tensor:
         """Scatter-add per-logical-expert token counts.
 
         Mirrors :meth:`LPLBSolver.solve` step 1 in PR #24515. Uses
@@ -252,6 +252,8 @@ class LPLBRuntime:
         else:
             self._local_counts.zero_()
 
+        if num_token_non_padded is not None:
+            topk_ids = topk_ids[:num_token_non_padded]
         flat_ids = topk_ids.flatten()
         # scatter_add over an empty flat_ids is a no-op, no host sync.
         self._local_counts.scatter_add_(
