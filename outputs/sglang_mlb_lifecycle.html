@@ -748,8 +748,8 @@
         <p class="hero-copy">
           Current 与 Target 使用完全相同的阶段和步骤。页面一次只显示一个状态：
           点击图面即可原位切换。Current 中 EPLB、Waterfill、LP-CF 各自形成 runtime；
-          Target 中每个 ModelRunner 显式持有一个 <code>MoELoadBalancer</code>，
-          由统一 SGLang Adapter 和 Orchestrator 连接 L1/L2。
+          Target 中由一个顶层 <code>MoELoadBalancer</code> 统一编排 L1/L2，
+          SGLang metadata 始终是权重 placement 的唯一权威来源。
         </p>
       </div>
       <div class="controls" aria-label="图表缩放">
@@ -781,8 +781,8 @@
         <span>interval、统计汇总、EPLB placement plan</span>
       </div>
       <div class="key-step">
-        <strong>04 · Apply & publish</strong>
-        <span>权重搬运、metadata commit、下一轮生效</span>
+        <strong>04 · Apply & activate</strong>
+        <span>权重搬运、metadata update、下一轮生效</span>
       </div>
     </section>
 
@@ -826,7 +826,7 @@
             </div>
             <div class="phase-label publish">
               <span class="phase-no">04</span>
-              <span class="phase-name">APPLY + PUBLISH</span>
+              <span class="phase-name">APPLY + ACTIVATE</span>
               <span class="phase-cn">搬权重 / 下一轮生效</span>
             </div>
 
@@ -855,7 +855,7 @@
               <path class="flow dashed" d="M1391 456 L1391 530 L344 530 L344 650"/>
 
               <path class="flow" d="M459 710 L487 710"/>
-              <path class="flow bad" d="M863 710 L891 710"/>
+              <path class="flow" d="M863 710 L891 710"/>
               <path class="flow" d="M1239 710 L1267 710"/>
               <path class="flow" d="M1391 778 L1391 875 L344 875 L344 934"/>
 
@@ -867,7 +867,7 @@
               <text class="flow-label" x="895" y="239">model ready</text>
               <text class="flow-label bad" x="877" y="376">分支调用</text>
               <text class="flow-label" x="835" y="510">TopK / dispatcher hooks</text>
-              <text class="flow-label bad" x="877" y="698">global lookup</text>
+              <text class="flow-label" x="877" y="698">drain window</text>
               <text class="flow-label" x="870" y="867">candidate layout</text>
               <text class="flow-label bad" x="1021" y="977">可见性竞态</text>
               <text class="flow-label" x="1559" y="615" transform="rotate(-90 1559 615)">next forward</text>
@@ -893,9 +893,9 @@
               <span class="step">STEP 02 · CURRENT MLB OBJECTS</span>
               <span class="card-title">MLB 被拆成多套顶层 runtime</span>
               <div class="mini-stack">
-                <div class="mini bad">SGLangEPLBRuntime<em>进程级 default registry</em></div>
-                <div class="mini bad">WaterfillRuntime × layer<em>自己持有 Waterfill router</em></div>
-                <div class="mini bad">LPCFRuntime × layer<em>自己持有 LP-CF router</em></div>
+                <div class="mini bad">SGLangEPLBRuntime<em>L1 recorder + planner + provider</em></div>
+                <div class="mini bad">WaterfillRuntime × layer<em>每层 L2 adapter + router</em></div>
+                <div class="mini bad">LPCFRuntime × layer<em>每层 L2 adapter + router</em></div>
               </div>
             </div>
 
@@ -963,17 +963,17 @@
               <span class="card-code">EPLBManager.rebalance()</span>
             </a>
 
-            <div class="card problem" style="left:891px;top:630px;width:348px;height:180px">
-              <span class="step">STEP 09 · CURRENT MLB L1</span>
-              <span class="card-title">去 MLB 全局表里找 EPLB runtime</span>
-              <span class="card-copy">stats bridge / manager 通过 default registry 重新找对象；first caller wins，多模型共享冲突。</span>
-              <span class="card-code">get_default_runtime() / drain_stats()</span>
+            <div class="card l1" style="left:891px;top:630px;width:348px;height:180px">
+              <span class="step">STEP 09 · MLB L1 STATE</span>
+              <span class="card-title">Read L1 statistics window</span>
+              <span class="card-copy">EPLBRecorder 取出最近 N 次 forward 聚合的 logical expert load，供本次 placement 计算。</span>
+              <span class="card-code">runtime.drain_stats()</span>
             </div>
 
             <div class="card l1" style="left:1267px;top:630px;width:248px;height:180px">
               <span class="step">STEP 10 · MLB L1 POLICY</span>
               <span class="card-title">Compute placement</span>
-              <span class="card-copy">EPLB 算法、负载历史、policy、latest placement 都挂在专用 runtime。</span>
+              <span class="card-copy">EPLB planner 根据 logical load 与拓扑计算 candidate maps。</span>
               <span class="card-code">SGLangEPLBRuntime.compute_placement</span>
             </div>
 
@@ -986,18 +986,18 @@
             </a>
 
             <div class="card problem" style="left:637px;top:920px;width:370px;height:145px">
-              <span class="step">STEP 12 · TWO SOURCES OF VISIBILITY</span>
-              <span class="card-title">MLB provider 与 SGLang metadata 不原子</span>
-              <span class="card-copy">新 placement 可能在权重搬运成功前被 L2 读到；MLB 状态和执行侧权威存在竞态。</span>
-              <span class="card-code">publish before apply completes?</span>
+              <span class="step">STEP 12 · EARLY PROVIDER UPDATE</span>
+              <span class="card-title">MLB provider 提前发布 candidate</span>
+              <span class="card-copy">compute_placement() 已更新 provider，但 SGLang 权重与 authoritative metadata 尚未完成更新。</span>
+              <span class="card-code">provider.update_with(plan) before apply</span>
             </div>
 
             <a class="card sglang" href="../../sglang/python/sglang/srt/eplb/expert_location.py"
                style="left:1035px;top:934px;width:392px;height:125px">
               <span class="step">STEP 13 · NEXT FORWARD</span>
-              <span class="card-title">SGLang metadata 更新后继续执行</span>
-              <span class="card-copy">下一次 forward 读取新的 placement；但 L1/L2 并非同一实例状态。</span>
-              <span class="card-code">ExpertLocationMetadata</span>
+              <span class="card-title">SGLang 完成权重与 metadata 更新</span>
+              <span class="card-copy">真实 placement 此时才生效；此前 MLB provider 已经领先于执行侧状态。</span>
+              <span class="card-code">ExpertLocationMetadata.update(...)</span>
             </a>
 
             <svg class="connector-labels" viewBox="0 0 1640 1120" aria-hidden="true">
@@ -1017,9 +1017,9 @@
                 <rect x="-90" y="-10" width="180" height="20" rx="5"/>
                 <text x="0" y="1">TopK / dispatcher hooks</text>
               </g>
-              <g class="flow-caption bad" transform="translate(877 617)">
-                <rect x="-55" y="-10" width="110" height="20" rx="5"/>
-                <text x="0" y="1">global lookup</text>
+              <g class="flow-caption" transform="translate(877 617)">
+                <rect x="-57" y="-10" width="114" height="20" rx="5"/>
+                <text x="0" y="1">drain window</text>
               </g>
               <g class="flow-caption" transform="translate(870 878)">
                 <rect x="-58" y="-10" width="116" height="20" rx="5"/>
@@ -1042,12 +1042,12 @@
               问题 ② 两个 policy 可能各做一次通信和写回
             </div>
             <div class="note bad" style="left:960px;top:820px;width:288px">
-              问题 ③ 生命周期所有权藏进 MLB 全局变量
+              问题 ③ L1 / L2 各自独立 runtime，缺少统一编排
             </div>
 
             <div class="summary-strip">
               <strong>结果：M×N</strong>
-              <span>算法 runtime 按框架复制；状态分裂、启动顺序敏感、组合路径缺失、通信无法共享。</span>
+              <span>算法 runtime 按框架复制；L1/L2 组合路径缺失、通信无法共享，且 L1 candidate 被过早发布。</span>
             </div>
           </div>
         </div>
@@ -1065,11 +1065,11 @@
       <header class="figure-head">
         <div>
           <div class="figure-kicker">FIGURE 02 · TO-BE</div>
-          <h2>目标：一个 MLB 实例贯穿同一生命周期，Adapter 与算法正交</h2>
+          <h2>目标：一个顶层 MLB 实例编排 L1 / L2，SGLang 保持执行权威</h2>
           <p class="figure-summary">
             SGLang 仍然决定何时 init、forward、rebalance 和搬权重；MLB 只在这些既有
-            hook 上被调用。每个模型一个统一实例，Orchestrator 合并 policy 需求，
-            Adapter 只收集通用 observation 并一次性 materialize。
+            hook 上被调用。Orchestrator 合并 policy 需求，Adapter 只收集通用
+            observation 并一次性 materialize；active placement 始终读取 SGLang metadata。
           </p>
         </div>
         <div class="figure-badge">M policies + N adapters</div>
@@ -1101,7 +1101,7 @@
             </div>
             <div class="phase-label publish">
               <span class="phase-no">04</span>
-              <span class="phase-name">APPLY + PUBLISH</span>
+              <span class="phase-name">APPLY + ACTIVATE</span>
               <span class="phase-cn">搬权重 / 下一轮生效</span>
             </div>
 
@@ -1142,9 +1142,9 @@
               <text class="flow-label good" x="877" y="376">single entry</text>
               <text class="flow-label" x="835" y="510">observe load</text>
               <text class="flow-label good" x="877" y="698">typed observation</text>
-              <text class="flow-label good" x="1255" y="545">shared state</text>
+              <text class="flow-label good" x="1255" y="545">shared observations</text>
               <text class="flow-label" x="870" y="867">candidate only</text>
-              <text class="flow-label good" x="1021" y="977">commit after success</text>
+              <text class="flow-label good" x="1021" y="977">metadata updated</text>
               <text class="flow-label" x="1559" y="615" transform="rotate(-90 1559 615)">next forward</text>
             </svg>
 
@@ -1168,7 +1168,7 @@
               <span class="step">STEP 02 · ONE MoELoadBalancer INSTANCE</span>
               <span class="card-title">同一引用注入 EPLBManager 与所有 TopK 层</span>
               <div class="mini-stack">
-                <div class="mini good">State Store<em>placement / load / layer state</em></div>
+                <div class="mini good">MLB State<em>load history / per-layer policy state</em></div>
                 <div class="mini good">L1 EPLB policy<em>low-frequency placement</em></div>
                 <div class="mini good">Ordered L2 pipeline<em>LPLB / LP-CF → Waterfill</em></div>
               </div>
@@ -1178,8 +1178,8 @@
                style="left:1296px;top:75px;width:242px;height:140px">
               <span class="step">STEP 03 · SGLANG</span>
               <span class="card-title">Initial placement ready</span>
-              <span class="card-copy">权重与 Adapter snapshot 同版本提交。</span>
-              <span class="card-code">committed PlacementSnapshot</span>
+              <span class="card-copy">初始权重与 authoritative metadata 已就绪。</span>
+              <span class="card-code">ExpertLocationMetadata</span>
             </a>
 
             <a class="card sglang" href="../../sglang/python/sglang/srt/layers/moe/topk.py"
@@ -1240,8 +1240,8 @@
 
             <div class="card adapter" style="left:891px;top:630px;width:348px;height:180px">
               <span class="step">STEP 09 · SGLANG ADAPTER</span>
-              <span class="card-title">收集并规范化一次</span>
-              <span class="card-copy">drain native counters → EP all-reduce → typed PlacementRequest；通信组仍由 SGLang 控制。</span>
+              <span class="card-title">读取窗口并构造 L1 request</span>
+              <span class="card-copy">取得 logical load，补充 topology / active ranks 等 SGLang context；通信组仍由 SGLang 控制。</span>
               <span class="card-code">collect_placement_observation()</span>
             </div>
 
@@ -1255,24 +1255,24 @@
             <a class="card sglang" href="../../sglang/python/sglang/srt/eplb/expert_location_updater.py"
                style="left:226px;top:934px;width:383px;height:125px">
               <span class="step">STEP 11 · SGLANG</span>
-              <span class="card-title">Adapter 转 native maps；SGLang 搬权重</span>
-              <span class="card-copy">真实模型、权重、P2P 和失败恢复始终留在 SGLang。</span>
-              <span class="card-code">apply_placement_plan()</span>
+              <span class="card-title">SGLang applies expert weights</span>
+              <span class="card-copy">Adapter 转 native maps；P2P、DRAM/disk recovery 与真实权重始终留在 SGLang。</span>
+              <span class="card-code">ExpertLocationUpdater.update(...)</span>
             </a>
 
             <div class="card success" style="left:637px;top:920px;width:370px;height:145px">
-              <span class="step">STEP 12 · ATOMIC COMMIT</span>
-              <span class="card-title">apply 成功后才 publish</span>
-              <span class="card-copy">Adapter 确认 SGLang metadata 生效；Orchestrator 再提交相同版本的 PlacementSnapshot。</span>
-              <span class="card-code">candidate → apply → commit(version+1)</span>
+              <span class="step">STEP 12 · SGLANG AUTHORITY</span>
+              <span class="card-title">SGLang updates authoritative metadata</span>
+              <span class="card-copy">权重搬运完成后，SGLang 原地更新 ExpertLocationMetadata；MLB 不保存第二份 active placement。</span>
+              <span class="card-code">weights → metadata.update(layer_ids)</span>
             </div>
 
             <a class="card sglang" href="../../sglang/python/sglang/srt/eplb/expert_location.py"
                style="left:1035px;top:934px;width:392px;height:125px">
               <span class="step">STEP 13 · NEXT FORWARD</span>
-              <span class="card-title">同一 MLB 实例消费最新 committed state</span>
-              <span class="card-copy">L2 自动按 layer_id 读取 L1 的最新 snapshot；SGLang 无需手工接线。</span>
-              <span class="card-code">one owner · one version · one path</span>
+              <span class="card-title">L2 reads latest SGLang placement</span>
+              <span class="card-copy">SGLang Adapter 按 layer_id 从最新 metadata 构造 PlacementSnapshot，供 LPLB / LP-CF 使用。</span>
+              <span class="card-code">SGLangPlacementAdapter.snapshot(layer_id)</span>
             </a>
 
             <svg class="connector-labels" viewBox="0 0 1640 1120" aria-hidden="true">
@@ -1297,16 +1297,16 @@
                 <text x="0" y="1">typed observation</text>
               </g>
               <g class="flow-caption good" transform="translate(1255 555)">
-                <rect x="-52" y="-10" width="104" height="20" rx="5"/>
-                <text x="0" y="1">shared state</text>
+                <rect x="-82" y="-10" width="164" height="20" rx="5"/>
+                <text x="0" y="1">shared observations</text>
               </g>
               <g class="flow-caption" transform="translate(870 878)">
                 <rect x="-57" y="-10" width="114" height="20" rx="5"/>
                 <text x="0" y="1">candidate only</text>
               </g>
               <g class="flow-caption good" transform="translate(1021 909)">
-                <rect x="-79" y="-10" width="158" height="20" rx="5"/>
-                <text x="0" y="1">commit after success</text>
+                <rect x="-72" y="-10" width="144" height="20" rx="5"/>
+                <text x="0" y="1">metadata updated</text>
               </g>
               <g class="flow-caption" transform="translate(1572 615) rotate(-90)">
                 <rect x="-48" y="-10" width="96" height="20" rx="5"/>
@@ -1315,7 +1315,7 @@
             </svg>
 
             <div class="note good" style="left:818px;top:222px;width:316px">
-              原则 ① 每个模型一个实例，不是进程全局单例
+              原则 ① 一个顶层 MLB 编排 L1/L2；内部保留 per-layer state
             </div>
             <div class="note good" style="left:930px;top:489px;width:303px">
               原则 ② LPLB → Waterfill，共享一次通信和一次写回
@@ -1326,7 +1326,7 @@
 
             <div class="summary-strip">
               <strong>结果：M+N</strong>
-              <span>M 个框架无关 policy + N 套框架 Adapter + 1 个统一 Orchestrator；L1/L2 通过实例内部状态自然连接。</span>
+              <span>M 个框架无关 policy + N 套框架 Adapter + 1 个 Orchestrator；placement 始终以 SGLang metadata 为准。</span>
             </div>
           </div>
         </div>
@@ -1342,8 +1342,8 @@
 
       <div class="comparison" aria-label="目标设计关键约束">
         <div class="comparison-card">
-          <strong>实例所有权</strong>
-          <span><code>ModelRunner</code> 创建、持有、注入、销毁 MLB；删除 process-wide default runtime registry。</span>
+          <strong>顶层结构</strong>
+          <span>一个 <code>MoELoadBalancer</code> 统一编排 L1/L2；算法内部仍可保留模型级与 per-layer state。</span>
         </div>
         <div class="comparison-card">
           <strong>调用方向</strong>
@@ -1351,7 +1351,7 @@
         </div>
         <div class="comparison-card">
           <strong>状态一致性</strong>
-          <span>L1 plan 是 candidate；只有 SGLang 权重和 metadata 成功应用后，才 commit 给后续 L2。</span>
+          <span>MLB L1 只返回 plan；SGLang 搬权重并更新 metadata，L2 Adapter 随后直接读取最新 placement。</span>
         </div>
       </div>
     </section>
