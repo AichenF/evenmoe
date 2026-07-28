@@ -48,7 +48,7 @@
     }
 
     .page {
-      width: min(1680px, calc(100% - 32px));
+      width: min(1857px, calc(100% - 32px));
       margin: 0 auto;
       padding: 28px 0 36px;
     }
@@ -160,7 +160,7 @@
 
     svg {
       display: block;
-      width: calc(1540px * var(--zoom));
+      width: calc(1825px * var(--zoom));
       min-width: calc(1220px * var(--zoom));
       height: auto;
     }
@@ -507,11 +507,14 @@
       <strong>dump、汇总和 reset 都由 SGLang 执行</strong>，Adapter 不执行 dump，
       只把 SGLang 已经生成的 dump result 翻译成 <code>PlacementStats</code>。
       到周期后由同一个 EPLB Policy 依次执行 threshold/skip 判断和 placement 算法。
+      L1 返回的 plan 只是 candidate；只有 SGLang 完成权重迁移、metadata 更新以及必要的
+      missing-weight recovery 后，Adapter 才能从真实生效状态生成 <code>PlacementSnapshot</code>
+      提供给 L2。
       这是 Review 提议的后续 L1 重构，不是当前 Stage 3 POC 合约。
     </p>
 
     <section class="diagram-shell" aria-label="SGLang EPLB 生命周期图">
-      <svg viewBox="0 0 1540 1020" role="img" aria-labelledby="diagram-title diagram-desc">
+      <svg viewBox="0 0 1825 1020" role="img" aria-labelledby="diagram-title diagram-desc">
         <title id="diagram-title">SGLang EPLB 完整运行生命周期</title>
         <desc id="diagram-desc">
           从服务器参数、ModelRunner 初始化和初始权重加载开始，经过每次 forward 的逻辑专家选择、
@@ -534,8 +537,8 @@
         <rect class="band" x="25" y="562" width="1250" height="220" rx="12"/>
         <text class="band-label" x="48" y="592">PER-LAYER RECORDING → WHOLE-FORWARD END → PERIODIC REBALANCE</text>
 
-        <rect class="band" x="595" y="812" width="900" height="180" rx="12"/>
-        <text class="band-label" x="618" y="838">APPLY + PUBLISH</text>
+        <rect class="band" x="595" y="812" width="1190" height="180" rx="12"/>
+        <text class="band-label" x="618" y="838">APPLY + EFFECTIVE METADATA</text>
 
         <!-- Startup -->
         <a href="../../sglang/python/sglang/srt/server_args.py">
@@ -653,9 +656,9 @@
         <a href="../../sglang/python/sglang/srt/eplb/eplb_manager.py">
           <g class="node eplb">
             <rect x="640" y="625" width="250" height="120"/>
-            <text class="node-title" x="656" y="652">11. Cadence → dump / skip</text>
-            <text class="node-copy" x="656" y="679">one tick per completed forward</text>
-            <text class="node-copy" x="656" y="698">every N: aggregate/reset/threshold</text>
+            <text class="node-title" x="656" y="652">11. Dump + ALL-REDUCE</text>
+            <text class="node-copy" x="656" y="679">only every N complete forwards</text>
+            <text class="node-copy" x="656" y="698">SUM all ranks → same global counts</text>
             <text class="node-file" x="656" y="731">eplb_manager.py</text>
           </g>
         </a>
@@ -833,7 +836,7 @@
           <!-- Cadence advances once per complete forward; only every N triggers dump and policy. -->
           <rect class="owner-frame sglang" x="630" y="615" width="270" height="140" rx="12"/>
           <rect class="owner-label-bg sglang" x="650" y="596" width="230" height="25" rx="5"/>
-          <text class="owner-label" x="662" y="613">SGLANG · CADENCE → DUMP</text>
+          <text class="owner-label" x="662" y="613">SGLANG · DUMP + ALL-REDUCE</text>
           <rect class="owner-frame policy" x="650" y="704" width="230" height="36" rx="7"/>
           <text class="owner-label" x="765" y="727" text-anchor="middle">EPLB POLICY · THRESHOLD</text>
           <rect class="owner-frame policy" x="915" y="615" width="270" height="140" rx="12"/>
@@ -849,6 +852,19 @@
           <rect class="owner-frame adapter" x="915" y="772" width="280" height="48" rx="12"/>
           <text class="owner-label" x="1055" y="792" text-anchor="middle">ADAPTER · PLAN → SGLANG MAPS</text>
           <text class="owner-note" x="1055" y="809" text-anchor="middle">只转换 candidate；节点 13 由 SGLang 执行</text>
+
+          <!-- L2 may observe only the placement whose weights are already usable. -->
+          <path class="edge" d="M1460 910 L1495 910"/>
+          <g class="node eplb">
+            <rect x="1495" y="850" width="250" height="120"/>
+            <text class="node-title" x="1511" y="877">15. Expose PlacementSnapshot</text>
+            <text class="node-copy" x="1511" y="904">after weights + recovery succeed</text>
+            <text class="node-copy" x="1511" y="923">never publish the L1 candidate</text>
+            <text class="node-file" x="1511" y="956">adapters/sglang/providers.py</text>
+          </g>
+          <rect class="owner-frame adapter" x="1485" y="840" width="270" height="140" rx="12"/>
+          <rect class="owner-label-bg adapter" x="1505" y="836" width="230" height="25" rx="5"/>
+          <text class="owner-label" x="1517" y="853">ADAPTER · APPLIED STATE → L2</text>
 
           <!-- Both cold-start and periodic paths use the same Adapter and EPLB Policy. -->
           <rect class="target-callout" x="1288" y="55" width="200" height="250" rx="10"/>
@@ -923,11 +939,11 @@
       </div>
       <div class="boundary-card policy">
         <strong>EPLB Policy · 判断并生成布局</strong>
-        <span>SGLang EPLBManager 自己维护 every-N cadence。到周期后，SGLang recorder 才执行 dump、distributed all-reduce 和 reset；Adapter 将结果翻译为 <code>PlacementStats</code>。同一个 EPLB Policy 先判断 utilization threshold：高于阈值就结束，不高于阈值则在同一调用链中立即运行 placement 算法，无需另设中间决策层。</span>
+        <span>SGLang EPLBManager 自己维护 every-N cadence。到周期后，SGLang recorder 才执行 dump；<code>ALL-REDUCE(SUM)</code> 使用官方当前的 default distributed group，让各 rank 得到同一份全局 logical count，然后 reset。Adapter 将结果翻译为 <code>PlacementStats</code>。同一个 EPLB Policy 先判断 utilization threshold：高于阈值就结束，不高于阈值则在同一调用链中立即运行 placement 算法。</span>
       </div>
       <div class="boundary-card sglang">
-        <strong>SGLang · 让方案生效</strong>
-        <span>EPLBManager 校验并排期；ExpertLocationUpdater 搬权重；metadata 是唯一执行真值。底图节点 14→Missing recovery 是官方当前顺序；若目标引入 placement version，应由 SGLang 在缺失权重恢复也成功后再推进可见版本，这属于 SGLang 事务改造。</span>
+        <strong>真实生效后，L2 才能看到新的 PlacementSnapshot</strong>
+        <span>EPLB Policy 返回的 <code>PlacementPlan</code> 只是 candidate，不能立即发布给 L2。SGLang EPLBManager 必须先校验并排期，ExpertLocationUpdater 完成权重搬运，metadata 更新，并完成必要的 missing-weight recovery。全部成功后，黄色 Adapter 才从 SGLang 的真实生效 metadata 生成 <code>PlacementSnapshot</code> 供 L2 读取。否则 L2 可能把 token 路由到尚未拥有正确权重的 physical expert。</span>
       </div>
     </div>
   </main>
