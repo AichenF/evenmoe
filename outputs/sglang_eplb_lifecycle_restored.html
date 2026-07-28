@@ -501,10 +501,11 @@
       目标 Tab 与原图使用同一个 SVG。绿色完整框是 SGLang Glue；黄色是 MLB 内的
       SGLang Adapter；紫色是 EPLB Policy。冷启动仍保留 SGLang 的
       <code>init_by_eplb()</code> 入口，
-      但布局计算改为 Adapter → EPLB Policy；步骤 9+10 复用 SGLang 自己的 recording pipeline，
+      但布局计算改为 Adapter → EPLB Policy。步骤 9 是每层 hook 的临时计数；
+      只有所有 MoE layer 完成、整个 forward 结束时，步骤 10 才 append 一条完整 forward 记录，
+      随后步骤 11 才让 cadence 前进一步。只有到达 every-N 时才执行 dump、汇总和 reset。
       <strong>dump、汇总和 reset 都由 SGLang 执行</strong>，Adapter 不执行 dump，
       只把 SGLang 已经生成的 dump result 翻译成 <code>PlacementStats</code>。
-      每 N 次 forward 的时钟仍由 SGLang EPLBManager 掌握；
       到周期后由同一个 EPLB Policy 依次执行 threshold/skip 判断和 placement 算法。
       这是 Review 提议的后续 L1 重构，不是当前 Stage 3 POC 合约。
     </p>
@@ -531,7 +532,7 @@
         <text class="band-label" x="48" y="332">EVERY FORWARD PASS</text>
 
         <rect class="band" x="25" y="562" width="1250" height="220" rx="12"/>
-        <text class="band-label" x="48" y="592">RECORDING WINDOW / PERIODIC REBALANCE</text>
+        <text class="band-label" x="48" y="592">PER-LAYER RECORDING → WHOLE-FORWARD END → PERIODIC REBALANCE</text>
 
         <rect class="band" x="595" y="812" width="900" height="180" rx="12"/>
         <text class="band-label" x="618" y="838">APPLY + PUBLISH</text>
@@ -632,9 +633,9 @@
         <a href="../../sglang/python/sglang/srt/eplb/expert_distribution.py">
           <g class="node eplb">
             <rect x="70" y="625" width="250" height="120"/>
-            <text class="node-title" x="86" y="652">9. Record physical counts</text>
-            <text class="node-copy" x="86" y="679">TopK hook or dispatcher hook</text>
-            <text class="node-copy" x="86" y="698">per layer × physical expert</text>
+            <text class="node-title" x="86" y="652">9. Per-layer temporary count</text>
+            <text class="node-copy" x="86" y="679">TopK hook OR dispatcher hook</text>
+            <text class="node-copy" x="86" y="698">repeat once per MoE layer</text>
             <text class="node-file" x="86" y="731">expert_distribution.py</text>
           </g>
         </a>
@@ -642,9 +643,9 @@
         <a href="../../sglang/python/sglang/srt/eplb/expert_distribution.py">
           <g class="node eplb">
             <rect x="355" y="625" width="250" height="120"/>
-            <text class="node-title" x="371" y="652">10. Normalize + aggregate</text>
-            <text class="node-copy" x="371" y="679">physical counts → logical counts</text>
-            <text class="node-copy" x="371" y="698">distributed all-reduce + balancedness</text>
+            <text class="node-title" x="371" y="652">10. Whole-forward finalize</text>
+            <text class="node-copy" x="371" y="679">after all MoE layers complete</text>
+            <text class="node-copy" x="371" y="698">collect() → append one window item</text>
             <text class="node-file" x="371" y="731">expert_distribution.py</text>
           </g>
         </a>
@@ -652,9 +653,9 @@
         <a href="../../sglang/python/sglang/srt/eplb/eplb_manager.py">
           <g class="node eplb">
             <rect x="640" y="625" width="250" height="120"/>
-            <text class="node-title" x="656" y="652">11. Trigger / skip</text>
-            <text class="node-copy" x="656" y="679">every N forward passes</text>
-            <text class="node-copy" x="656" y="698">skip if already balanced</text>
+            <text class="node-title" x="656" y="652">11. Cadence → dump / skip</text>
+            <text class="node-copy" x="656" y="679">one tick per completed forward</text>
+            <text class="node-copy" x="656" y="698">every N: aggregate/reset/threshold</text>
             <text class="node-file" x="656" y="731">eplb_manager.py</text>
           </g>
         </a>
@@ -725,6 +726,8 @@
         <text class="edge-label" x="335" y="538">TopK hook</text>
         <path class="edge" d="M1050 485 L1050 545 L195 545 L195 625"/>
         <text class="edge-label" x="835" y="538">dispatcher hook</text>
+        <path class="edge dashed" d="M70 685 L40 685 L40 425 L70 425"/>
+        <text class="edge-label" x="48" y="555">next MoE layer</text>
 
         <!-- Rebalance -->
         <path class="edge" d="M320 685 L355 685"/>
@@ -738,7 +741,7 @@
         <path class="edge dashed" d="M1050 970 L1050 1000 L18 1000 L18 425 L70 425"/>
         <path class="edge dashed" d="M1335 970 L1335 1010 L18 1010 L18 425 L70 425"/>
         <path class="edge dashed" d="M765 745 L765 795 L18 795 L18 425 L70 425"/>
-        <text class="edge-label skip-label" x="390" y="788">skip when balanced</text>
+        <text class="edge-label skip-label" x="350" y="788">not every-N / already balanced</text>
 
         <!-- Current MLB POC overlay: implemented components plus the SGLang wiring gaps. -->
         <g class="current-overlay" aria-label="当前 MLB EPLB 实现与问题">
@@ -759,17 +762,17 @@
           <!-- Current Bridge path mixes the SGLang hook, Adapter and MLB recorder state. -->
           <rect class="owner-frame adapter" x="55" y="608" width="565" height="154" rx="13"/>
           <rect class="owner-label-bg adapter" x="145" y="596" width="385" height="25" rx="5"/>
-          <text class="owner-label" x="157" y="613">CURRENT PIPELINE · SGLang → StatsBridge → Recorder</text>
+          <text class="owner-label" x="157" y="613">CURRENT · PER-LAYER HOOK → StatsBridge → Recorder</text>
 
           <!-- Recorder stores observations but does not make a policy decision. -->
           <rect class="owner-frame support" x="345" y="615" width="270" height="140" rx="12"/>
           <rect class="owner-label-bg support" x="365" y="611" width="230" height="25" rx="5"/>
           <text class="owner-label" x="377" y="628">MLB STATE · EPLB RECORDER</text>
 
-          <!-- Current step 11 is split: SGLang owns cadence; runtime drains; skip is a policy decision. -->
+          <!-- Only after a whole forward ends: SGLang ticks cadence; runtime drains; skip is policy. -->
           <rect class="owner-frame sglang" x="630" y="615" width="270" height="140" rx="12"/>
           <rect class="owner-label-bg sglang" x="650" y="611" width="230" height="25" rx="5"/>
-          <text class="owner-label" x="662" y="628">SGLANG · EVERY-N TRIGGER</text>
+          <text class="owner-label" x="662" y="628">SGLANG · FORWARD-END CADENCE</text>
           <rect class="owner-label-bg adapter" x="650" y="758" width="126" height="25" rx="5"/>
           <text class="owner-label" x="713" y="775" text-anchor="middle">RUNTIME · DRAIN</text>
           <rect class="owner-label-bg policy" x="782" y="758" width="98" height="25" rx="5"/>
@@ -822,15 +825,15 @@
           <rect class="owner-frame policy" x="764" y="181" width="116" height="38" rx="7"/>
           <text class="owner-label" x="822" y="204" text-anchor="middle">EPLB POLICY</text>
 
-          <!-- Target keeps record + window + aggregation as one SGLang-owned pipeline. -->
+          <!-- Per-layer hooks accumulate; forward end appends one complete-forward item. -->
           <rect class="owner-frame sglang" x="55" y="608" width="565" height="154" rx="13"/>
           <rect class="owner-label-bg sglang" x="145" y="596" width="385" height="25" rx="5"/>
-          <text class="owner-label" x="157" y="613">SGLANG · RECORD + WINDOW + AGGREGATE</text>
+          <text class="owner-label" x="157" y="613">SGLANG · PER-LAYER COUNT → FORWARD-END APPEND</text>
 
-          <!-- SGLang owns cadence; EPLB Policy owns the threshold decision and placement algorithm. -->
+          <!-- Cadence advances once per complete forward; only every N triggers dump and policy. -->
           <rect class="owner-frame sglang" x="630" y="615" width="270" height="140" rx="12"/>
           <rect class="owner-label-bg sglang" x="650" y="596" width="230" height="25" rx="5"/>
-          <text class="owner-label" x="662" y="613">SGLANG · EVERY-N TRIGGER</text>
+          <text class="owner-label" x="662" y="613">SGLANG · CADENCE → DUMP</text>
           <rect class="owner-frame policy" x="650" y="704" width="230" height="36" rx="7"/>
           <text class="owner-label" x="765" y="727" text-anchor="middle">EPLB POLICY · THRESHOLD</text>
           <rect class="owner-frame policy" x="915" y="615" width="270" height="140" rx="12"/>
@@ -838,14 +841,14 @@
           <text class="owner-label" x="947" y="613">MLB POLICY · EPLB PLANNER</text>
 
           <!-- Adapter converts SGLang's completed dump into a framework-neutral view. -->
-          <rect class="owner-frame adapter" x="340" y="772" width="280" height="48" rx="12"/>
-          <text class="owner-label" x="480" y="792" text-anchor="middle">ADAPTER · DUMP RESULT → PlacementStats</text>
-          <text class="owner-note" x="480" y="809" text-anchor="middle">不执行 dump；只翻译 SGLang 已生成的结果</text>
+          <rect class="owner-frame adapter" x="625" y="772" width="280" height="48" rx="12"/>
+          <text class="owner-label" x="765" y="792" text-anchor="middle">ADAPTER · DUMP RESULT → PlacementStats</text>
+          <text class="owner-note" x="765" y="809" text-anchor="middle">完整 forward 到周期后才出现；Adapter 只翻译</text>
 
           <!-- Adapter translates the candidate plan, but does not invoke the updater. -->
-          <rect class="owner-frame adapter" x="690" y="772" width="430" height="48" rx="12"/>
-          <text class="owner-label" x="905" y="792" text-anchor="middle">ADAPTER · PLACEMENTPLAN → SGLANG MAPS</text>
-          <text class="owner-note" x="905" y="809" text-anchor="middle">只转换 candidate；节点 13 仍由 SGLang 主动执行</text>
+          <rect class="owner-frame adapter" x="915" y="772" width="280" height="48" rx="12"/>
+          <text class="owner-label" x="1055" y="792" text-anchor="middle">ADAPTER · PLAN → SGLANG MAPS</text>
+          <text class="owner-note" x="1055" y="809" text-anchor="middle">只转换 candidate；节点 13 由 SGLang 执行</text>
 
           <!-- Both cold-start and periodic paths use the same Adapter and EPLB Policy. -->
           <rect class="target-callout" x="1288" y="55" width="200" height="250" rx="10"/>
@@ -889,11 +892,11 @@
       </div>
       <div class="boundary-card adapter">
         <strong>Recording 入口：StatsBridge</strong>
-        <span>SGLang 的 TopK/DeepEP 等 backend 仍负责产生 physical count。<code>SGLangStatsBridge.append_per_forward()</code> 只在计数产生后接收 tensor 和当前 map，再 push 给 MLB Recorder。</span>
+        <span>SGLang 的 TopK/DeepEP 等 backend 在每一层产生 physical count；这些 hook 先写本次 forward 的临时 gatherer。只有所有 MoE layer 完成，forward-end 才把完整 tensor 交给 <code>SGLangStatsBridge.append_per_forward()</code>，再 push 给 MLB Recorder。它不是每记录一层就判断 rebalance。</span>
       </div>
       <div class="boundary-card support">
         <strong>数据保存：EPLBRecorder 在 MLB</strong>
-        <span>每个 forward 都复制一份 <code>[layer, physical expert]</code> 计数到 MLB 的 deque，只保留最近 N 次；<code>collect()</code> 求和、physical→logical，并清空窗口。Recorder 只保存和整理数据，不做 placement 决策，因此用中性灰色，不归入 Policy。</span>
+        <span>每个完整 forward 只复制一份 <code>[layer, physical expert]</code> tensor 到 MLB 的 deque，只保留最近 N 次；<code>collect()</code> 求和、physical→logical，并清空窗口。Recorder 只保存和整理数据，不做 placement 决策，因此用中性灰色，不归入 Policy。</span>
       </div>
       <div class="boundary-card problem">
         <strong>另一条 Recording 路径仍存在</strong>
@@ -915,8 +918,8 @@
         <span>步骤 2 的 Glue 调用 <code>init_by_eplb()</code>。步骤 3 的“创建并保存 metadata”仍属于 SGLang；只把其中“普通输入算出 candidate maps”的嵌套调用替换为 Adapter 构造 <code>PlacementRequest</code> → EPLB Policy 生成 plan → Adapter 返回 maps。步骤 12 复用同一个 Policy。</span>
       </div>
       <div class="boundary-card sglang">
-        <strong>SGLang dump；Adapter 只翻译结果</strong>
-        <span>TopK/dispatcher 产生 physical count；SGLang 原生 recorder 保存窗口，并按官方当前语义使用默认 distributed group 完成 physical→logical、all-reduce、utilization 汇总和 reset。黄色 Adapter 不发起 dump，只接收已经生成的 payload，把 <code>logical_count</code> 和 <code>average_utilization_rate_over_window</code> 翻译成 <code>PlacementStats</code>；它不生成 <code>PlacementSnapshot</code>，也不维护第二份统计窗口。</span>
+        <strong>每层只计数；整个 forward 完成后才推进时钟</strong>
+        <span>TopK/dispatcher hook 在每个 MoE layer 内只更新本次 forward 的临时 physical count；执行完所有 layer 后，recorder 才 collect 并向窗口 append 一条完整记录。随后 EPLBManager 的 cadence 才前进一步。未到 every-N 就直接进入下一个 forward；到周期后 SGLang 才 dump、physical→logical、all-reduce、汇总 utilization 并 reset。黄色 Adapter 只把最终 payload 翻译成 <code>PlacementStats</code>。</span>
       </div>
       <div class="boundary-card policy">
         <strong>EPLB Policy · 判断并生成布局</strong>
