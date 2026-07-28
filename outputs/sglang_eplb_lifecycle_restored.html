@@ -507,9 +507,10 @@
       <strong>dump、汇总和 reset 都由 SGLang 执行</strong>，Adapter 不执行 dump，
       只把 SGLang 已经生成的 dump result 翻译成 <code>PlacementStats</code>。
       到周期后由同一个 EPLB Policy 依次执行 threshold/skip 判断和 placement 算法。
-      L1 返回的 plan 只是 candidate；只有 SGLang 完成权重迁移、metadata 更新以及必要的
-      missing-weight recovery 后，Adapter 才能从真实生效状态生成 <code>PlacementSnapshot</code>
-      提供给 L2。
+      L1 算出新的 plan 后，不能马上让 L2 切换到这个布局；SGLang 必须先按该 plan 完成权重迁移、
+      metadata 更新以及必要的 missing-weight recovery。在此之前 L2 继续使用旧的
+      <code>PlacementSnapshot</code>；迁移成功后，Adapter 才把与真实权重一致的新
+      <code>PlacementSnapshot</code> 提供给 L2。
       这是 Review 提议的后续 L1 重构，不是当前 Stage 3 POC 合约。
     </p>
 
@@ -853,18 +854,18 @@
           <text class="owner-label" x="1055" y="792" text-anchor="middle">ADAPTER · PLAN → SGLANG MAPS</text>
           <text class="owner-note" x="1055" y="809" text-anchor="middle">只转换 candidate；节点 13 由 SGLang 执行</text>
 
-          <!-- L2 may observe only the placement whose weights are already usable. -->
+          <!-- L2 switches only after SGLang has moved the weights for the L1 plan. -->
           <path class="edge" d="M1460 910 L1495 910"/>
           <g class="node eplb">
             <rect x="1495" y="850" width="250" height="120"/>
-            <text class="node-title" x="1511" y="877">15. Expose PlacementSnapshot</text>
-            <text class="node-copy" x="1511" y="904">after weights + recovery succeed</text>
-            <text class="node-copy" x="1511" y="923">never publish the L1 candidate</text>
+            <text class="node-title" x="1511" y="877">15. Weight migration done</text>
+            <text class="node-copy" x="1511" y="904">build the matching new snapshot</text>
+            <text class="node-copy" x="1511" y="923">then switch L2 to this placement</text>
             <text class="node-file" x="1511" y="956">adapters/sglang/providers.py</text>
           </g>
           <rect class="owner-frame adapter" x="1485" y="840" width="270" height="140" rx="12"/>
           <rect class="owner-label-bg adapter" x="1505" y="836" width="230" height="25" rx="5"/>
-          <text class="owner-label" x="1517" y="853">ADAPTER · APPLIED STATE → L2</text>
+          <text class="owner-label" x="1517" y="853">ADAPTER · NEW SNAPSHOT → L2</text>
 
           <!-- Both cold-start and periodic paths use the same Adapter and EPLB Policy. -->
           <rect class="target-callout" x="1288" y="55" width="200" height="250" rx="10"/>
@@ -942,8 +943,8 @@
         <span>SGLang EPLBManager 自己维护 every-N cadence。到周期后，SGLang recorder 才执行 dump；<code>ALL-REDUCE(SUM)</code> 使用官方当前的 default distributed group，让各 rank 得到同一份全局 logical count，然后 reset。Adapter 将结果翻译为 <code>PlacementStats</code>。同一个 EPLB Policy 先判断 utilization threshold：高于阈值就结束，不高于阈值则在同一调用链中立即运行 placement 算法。</span>
       </div>
       <div class="boundary-card sglang">
-        <strong>真实生效后，L2 才能看到新的 PlacementSnapshot</strong>
-        <span>EPLB Policy 返回的 <code>PlacementPlan</code> 只是 candidate，不能立即发布给 L2。SGLang EPLBManager 必须先校验并排期，ExpertLocationUpdater 完成权重搬运，metadata 更新，并完成必要的 missing-weight recovery。全部成功后，黄色 Adapter 才从 SGLang 的真实生效 metadata 生成 <code>PlacementSnapshot</code> 供 L2 读取。否则 L2 可能把 token 路由到尚未拥有正确权重的 physical expert。</span>
+        <strong>L1 算完新布局后，不能马上让 L2 切换</strong>
+        <span>EPLB Policy 先算出新的 <code>PlacementPlan</code>，但这时权重还没有按照新布局迁移，L2 必须继续使用旧的 <code>PlacementSnapshot</code>。SGLang EPLBManager 随后校验并排期，ExpertLocationUpdater 完成权重搬运，再更新 metadata 并完成必要的 missing-weight recovery。全部成功后，黄色 Adapter 才从真实生效的 metadata 生成新的 <code>PlacementSnapshot</code>，让 L2 切换到新布局。这样 L2 看到的 placement 始终与机器上实际可用的专家权重一致。</span>
       </div>
     </div>
   </main>
