@@ -21,10 +21,10 @@
       --glue-fill: rgba(67, 214, 194, .07);
       --adapter: #f4c84a;
       --adapter-fill: rgba(244, 200, 74, .07);
-      --core: #ff5f6d;
-      --core-fill: rgba(255, 95, 109, .07);
       --policy: #b58cff;
       --policy-fill: rgba(181, 140, 255, .08);
+      --support: #91a4b8;
+      --support-fill: rgba(145, 164, 184, .06);
       --problem: #ff5f6d;
       --problem-fill: rgba(255, 95, 109, .08);
       --zoom: 1;
@@ -260,14 +260,14 @@
       stroke: var(--glue);
     }
 
-    .owner-frame.core {
-      fill: var(--core-fill);
-      stroke: var(--core);
-    }
-
     .owner-frame.policy {
       fill: var(--policy-fill);
       stroke: var(--policy);
+    }
+
+    .owner-frame.support {
+      fill: var(--support-fill);
+      stroke: var(--support);
     }
 
     .owner-frame.sglang {
@@ -291,14 +291,14 @@
       stroke: var(--glue);
     }
 
-    .owner-label-bg.core {
-      fill: #571820;
-      stroke: var(--core);
-    }
-
     .owner-label-bg.policy {
       fill: #392657;
       stroke: var(--policy);
+    }
+
+    .owner-label-bg.support {
+      fill: #273544;
+      stroke: var(--support);
     }
 
     .owner-label-bg.sglang {
@@ -382,13 +382,13 @@
       border: 3px solid var(--glue);
       background: var(--glue-fill);
     }
-    .sample-box.core {
-      border: 3px solid var(--core);
-      background: var(--core-fill);
-    }
     .sample-box.policy {
       border: 3px solid var(--policy);
       background: var(--policy-fill);
+    }
+    .sample-box.support {
+      border: 2px solid var(--support);
+      background: var(--support-fill);
     }
     .sample-box.problem {
       border: 3px dashed var(--problem);
@@ -443,8 +443,8 @@
 
     .boundary-card.adapter strong { color: var(--adapter); }
     .boundary-card.glue strong { color: var(--glue); }
-    .boundary-card.core strong { color: var(--core); }
     .boundary-card.policy strong { color: var(--policy); }
+    .boundary-card.support strong { color: var(--support); }
     .boundary-card.problem strong { color: var(--problem); }
     .boundary-card.sglang strong { color: var(--accent); }
 
@@ -490,17 +490,20 @@
       都在 SGLang 内形成完整闭环。
     </p>
     <p class="mode-note current-only">
-      绿色表示 SGLang 仓库里的 Glue 调用位置；黄色、红色和紫色表示 MLB 仓库里的
-      Adapter、Core 和 Policy。所在节点表示组件预期介入生命周期的位置；
+      绿色表示 SGLang 仓库里的 Glue 调用位置；黄色表示 MLB SGLang Adapter；
+      紫色表示 EPLB Policy 功能（包括当前仍混在 Runtime 里的 skip 决策）；
+      灰色表示当前 MLB 中只保存数据、不做决策的状态组件。
+      所在节点表示组件预期介入生命周期的位置；
       本图不评价尚在开发中的 SGLang 接入分支。
       红色虚线只表示 MLB 当前实现自身的设计问题。
     </p>
     <p class="mode-note target-only">
       目标 Tab 与原图使用同一个 SVG。绿色完整框是 SGLang Glue；黄色是 MLB 内的
-      SGLang Adapter；红色是统一 MLB L1 Controller / Core。冷启动仍保留 SGLang 的
+      SGLang Adapter；紫色是 EPLB Policy。冷启动仍保留 SGLang 的
       <code>init_by_eplb()</code> 入口，
-      但布局计算改为 Adapter → MLB Core；步骤 9+10 合并为 SGLang 自己的一条 recording pipeline，
-      Adapter 只读取最终统计。每 N 次 forward 的时钟仍由 SGLang EPLBManager 掌握。
+      但布局计算改为 Adapter → EPLB Policy；步骤 9+10 复用 SGLang 自己的 recording pipeline，
+      Adapter 只读取最终统计。每 N 次 forward 的时钟仍由 SGLang EPLBManager 掌握；
+      到周期后由同一个 EPLB Policy 依次执行 threshold/skip 判断和 placement 算法。
       这是 Review 提议的后续 L1 重构，不是当前 Stage 3 POC 合约。
     </p>
 
@@ -746,25 +749,29 @@
           <rect class="owner-frame glue" x="630" y="95" width="270" height="140" rx="12"/>
           <rect class="owner-label-bg glue" x="650" y="91" width="230" height="25" rx="5"/>
           <text class="owner-label" x="662" y="108">SGLANG · CREATE METADATA</text>
-          <rect class="owner-frame adapter" x="650" y="185" width="230" height="34" rx="7"/>
-          <text class="owner-label" x="765" y="206" text-anchor="middle">CURRENT RUNTIME ↔ POLICY</text>
+          <rect class="owner-frame adapter" x="650" y="181" width="106" height="38" rx="7"/>
+          <text class="owner-label" x="703" y="204" text-anchor="middle">ADAPTER</text>
+          <rect class="owner-frame policy" x="764" y="181" width="116" height="38" rx="7"/>
+          <text class="owner-label" x="822" y="204" text-anchor="middle">EPLB POLICY</text>
 
-          <!-- Current Bridge path is one mixed pipeline across SGLang, Adapter and Core. -->
+          <!-- Current Bridge path mixes the SGLang hook, Adapter and MLB recorder state. -->
           <rect class="owner-frame adapter" x="55" y="608" width="565" height="154" rx="13"/>
           <rect class="owner-label-bg adapter" x="145" y="596" width="385" height="25" rx="5"/>
           <text class="owner-label" x="157" y="613">CURRENT PIPELINE · SGLang → StatsBridge → Recorder</text>
 
-          <!-- Within that mixed path, MLB Recorder owns the deque and p→l aggregation. -->
-          <rect class="owner-frame core" x="345" y="615" width="270" height="140" rx="12"/>
-          <rect class="owner-label-bg core" x="365" y="611" width="230" height="25" rx="5"/>
-          <text class="owner-label" x="377" y="628">MLB CORE PART · RECORDER</text>
+          <!-- Recorder stores observations but does not make a policy decision. -->
+          <rect class="owner-frame support" x="345" y="615" width="270" height="140" rx="12"/>
+          <rect class="owner-label-bg support" x="365" y="611" width="230" height="25" rx="5"/>
+          <text class="owner-label" x="377" y="628">MLB STATE · EPLB RECORDER</text>
 
-          <!-- Current step 11 is also split: SGLang owns cadence; MLB runtime drains/skips. -->
+          <!-- Current step 11 is split: SGLang owns cadence; runtime drains; skip is a policy decision. -->
           <rect class="owner-frame sglang" x="630" y="615" width="270" height="140" rx="12"/>
           <rect class="owner-label-bg sglang" x="650" y="611" width="230" height="25" rx="5"/>
           <text class="owner-label" x="662" y="628">SGLANG · EVERY-N TRIGGER</text>
-          <rect class="owner-label-bg adapter" x="650" y="758" width="230" height="25" rx="5"/>
-          <text class="owner-label" x="662" y="775">MLB RUNTIME · DRAIN + SKIP</text>
+          <rect class="owner-label-bg adapter" x="650" y="758" width="126" height="25" rx="5"/>
+          <text class="owner-label" x="713" y="775" text-anchor="middle">RUNTIME · DRAIN</text>
+          <rect class="owner-label-bg policy" x="782" y="758" width="98" height="25" rx="5"/>
+          <text class="owner-label" x="831" y="775" text-anchor="middle">POLICY · SKIP</text>
 
           <!-- Framework-neutral planner and classic DeepSeek algorithm are extracted. -->
           <rect class="owner-frame policy" x="915" y="615" width="270" height="140" rx="12"/>
@@ -797,31 +804,33 @@
           <text class="target-callout-copy" x="1304" y="246">vec / elasticity: stubs</text>
         </g>
 
-        <!-- Target overlay: complete, non-overlapping regions only. -->
-        <g class="ownership-overlay" aria-label="MLB Adapter 与 MLB Core 目标边界">
+        <!-- Target overlay: SGLang Glue, MLB Adapter and EPLB Policy. -->
+        <g class="ownership-overlay" aria-label="MLB Adapter 与 EPLB Policy 目标边界">
           <!-- Step 2 owns the SGLang-side nested call into init_by_eplb. -->
           <rect class="owner-frame glue" x="345" y="95" width="270" height="140" rx="12"/>
           <rect class="owner-label-bg glue" x="365" y="91" width="230" height="25" rx="5"/>
           <text class="owner-label" x="377" y="108">SGLANG GLUE · CALL INIT_BY_EPLB</text>
 
-          <!-- Step 3 remains SGLang-owned metadata. Its nested calculation crosses Adapter/Core. -->
+          <!-- Step 3 remains SGLang-owned metadata; nested placement uses Adapter then Policy. -->
           <rect class="owner-frame glue" x="630" y="95" width="270" height="140" rx="12"/>
           <rect class="owner-label-bg glue" x="650" y="91" width="230" height="25" rx="5"/>
           <text class="owner-label" x="662" y="108">SGLANG · CREATE METADATA</text>
-          <rect class="owner-frame adapter" x="650" y="185" width="230" height="34" rx="7"/>
-          <text class="owner-label" x="765" y="206" text-anchor="middle">ADAPTER ↔ EPLB POLICY</text>
+          <rect class="owner-frame adapter" x="650" y="181" width="106" height="38" rx="7"/>
+          <text class="owner-label" x="703" y="204" text-anchor="middle">ADAPTER</text>
+          <rect class="owner-frame policy" x="764" y="181" width="116" height="38" rx="7"/>
+          <text class="owner-label" x="822" y="204" text-anchor="middle">EPLB POLICY</text>
 
           <!-- Target keeps record + window + aggregation as one SGLang-owned pipeline. -->
           <rect class="owner-frame sglang" x="55" y="608" width="565" height="154" rx="13"/>
           <rect class="owner-label-bg sglang" x="145" y="596" width="385" height="25" rx="5"/>
           <text class="owner-label" x="157" y="613">SGLANG · RECORD + WINDOW + AGGREGATE</text>
 
-          <!-- SGLang owns the every-N trigger; MLB owns the generic skip gate and planner. -->
+          <!-- SGLang owns cadence; EPLB Policy owns the threshold decision and placement algorithm. -->
           <rect class="owner-frame sglang" x="630" y="615" width="270" height="140" rx="12"/>
           <rect class="owner-label-bg sglang" x="650" y="596" width="230" height="25" rx="5"/>
           <text class="owner-label" x="662" y="613">SGLANG · EVERY-N TRIGGER</text>
-          <rect class="owner-frame core" x="650" y="704" width="230" height="36" rx="7"/>
-          <text class="owner-label" x="765" y="727" text-anchor="middle">MLB CORE · SKIP GATE</text>
+          <rect class="owner-frame policy" x="650" y="704" width="230" height="36" rx="7"/>
+          <text class="owner-label" x="765" y="727" text-anchor="middle">EPLB POLICY · THRESHOLD</text>
           <rect class="owner-frame policy" x="915" y="615" width="270" height="140" rx="12"/>
           <rect class="owner-label-bg policy" x="935" y="596" width="230" height="25" rx="5"/>
           <text class="owner-label" x="947" y="613">MLB POLICY · EPLB PLANNER</text>
@@ -836,17 +845,17 @@
           <text class="owner-label" x="905" y="792" text-anchor="middle">ADAPTER · PLACEMENTPLAN → SGLANG MAPS</text>
           <text class="owner-note" x="905" y="809" text-anchor="middle">只转换 candidate；节点 13 仍由 SGLang 主动执行</text>
 
-          <!-- Both cold-start and periodic paths use the same Adapter/Core. -->
+          <!-- Both cold-start and periodic paths use the same Adapter and EPLB Policy. -->
           <rect class="target-callout" x="1288" y="55" width="200" height="232" rx="10"/>
           <text class="target-callout-title" x="1304" y="78">TARGET CALL PATHS</text>
           <text class="target-callout-copy" x="1304" y="101">COLD START</text>
           <text class="target-callout-copy" x="1304" y="122">Glue: init_by_eplb()</text>
           <text class="target-callout-copy" x="1304" y="143">→ MLB Adapter: request</text>
-          <text class="target-callout-copy" x="1304" y="164">→ Core: initial plan</text>
+          <text class="target-callout-copy" x="1304" y="164">→ EPLB Policy: initial plan</text>
           <text class="target-callout-copy" x="1304" y="185">→ SGLang: metadata</text>
           <text class="target-callout-copy" x="1304" y="212">PERIODIC</text>
           <text class="target-callout-copy" x="1304" y="233">SGLang every-N trigger</text>
-          <text class="target-callout-copy" x="1304" y="254">→ Adapter.dump → Core plan</text>
+          <text class="target-callout-copy" x="1304" y="254">→ Adapter → EPLB Policy</text>
           <text class="target-callout-copy" x="1304" y="275">→ SGLang: Updater</text>
         </g>
       </svg>
@@ -859,15 +868,15 @@
       <span class="legend-item"><span class="sample-box gray"></span>普通 MoE / 独立 LPLB 上下文</span>
       <span class="legend-item current-only"><span class="sample-box glue"></span>绿色：SGLang 仓库里的 Glue 调用点</span>
       <span class="legend-item current-only"><span class="sample-box adapter"></span>黄色：MLB 仓库里的 SGLang Adapter</span>
-      <span class="legend-item current-only"><span class="sample-box core"></span>红色实线：当前 MLB Recorder 等 Core</span>
-      <span class="legend-item current-only"><span class="sample-box policy"></span>紫色：已抽出的 MLB policy</span>
+      <span class="legend-item current-only"><span class="sample-box support"></span>灰色：当前 MLB Recorder 等状态组件</span>
+      <span class="legend-item current-only"><span class="sample-box policy"></span>紫色：Policy 功能（Planner / 当前 Runtime 内的 skip）</span>
       <span class="legend-item current-only"><span class="sample-box problem"></span>红色虚线：MLB 当前实现自身的设计问题</span>
       <span class="legend-item target-only"><span class="sample-box glue"></span>绿色：SGLang Glue</span>
       <span class="legend-item target-only"><span class="sample-box adapter"></span>黄色：MLB SGLang Adapter</span>
-      <span class="legend-item target-only"><span class="sample-box core"></span>红色：MLB Core / L1 Controller</span>
+      <span class="legend-item target-only"><span class="sample-box policy"></span>紫色：EPLB Policy（threshold + placement）</span>
       <span class="hint original-only">点击节点可打开对应的 SGLang 源文件</span>
       <span class="hint current-only">不评价尚未完成的 SGLang 接入分支</span>
-      <span class="hint target-only">蓝框 9+10 与步骤 11 的时钟属于 SGLang；MLB Core 只接 trigger 后的通用决策</span>
+      <span class="hint target-only">步骤 11 的时钟属于 SGLang；到周期后由 EPLB Policy 判断 threshold 并生成布局</span>
     </div>
 
     <div class="current-explanation" aria-label="当前 MLB EPLB 实现说明">
@@ -879,9 +888,9 @@
         <strong>Recording 入口：StatsBridge</strong>
         <span>SGLang 的 TopK/DeepEP 等 backend 仍负责产生 physical count。<code>SGLangStatsBridge.append_per_forward()</code> 只在计数产生后接收 tensor 和当前 map，再 push 给 MLB Recorder。</span>
       </div>
-      <div class="boundary-card core">
+      <div class="boundary-card support">
         <strong>数据保存：EPLBRecorder 在 MLB</strong>
-        <span>每个 forward 都复制一份 <code>[layer, physical expert]</code> 计数到 MLB 的 deque，只保留最近 N 次；<code>collect()</code> 求和、physical→logical，并清空窗口。节点 10 中官方使用默认 distributed group 的 all-reduce 和 utilization 通信仍依赖 SGLang，并不在 Recorder 内。你记得是对的。</span>
+        <span>每个 forward 都复制一份 <code>[layer, physical expert]</code> 计数到 MLB 的 deque，只保留最近 N 次；<code>collect()</code> 求和、physical→logical，并清空窗口。Recorder 只保存和整理数据，不做 placement 决策，因此用中性灰色，不归入 Policy。</span>
       </div>
       <div class="boundary-card problem">
         <strong>另一条 Recording 路径仍存在</strong>
@@ -889,7 +898,7 @@
       </div>
       <div class="boundary-card problem">
         <strong>第 11 步当前也被拆开</strong>
-        <span>“每 N 次 forward”由 SGLang EPLBManager 触发，这一点与目标一致；问题是触发后进入了算法专用 <code>SGLangEPLBRuntime</code>。目标应进入每模型唯一的 <code>MoELoadBalancer</code> L1 controller，再做 skip 和 planner 调度。</span>
+        <span>“每 N 次 forward”由 SGLang EPLBManager 触发，这一点与目标一致；当前触发后进入算法专用 <code>SGLangEPLBRuntime</code>，其中混合了 drain 和 threshold/skip。目标边界只保留 Adapter 和 EPLB Policy：Adapter 读取统计，Policy 依次做 threshold 判断和 placement。</span>
       </div>
       <div class="boundary-card problem">
         <strong>Provider 发布时机存在问题</strong>
@@ -906,9 +915,9 @@
         <strong>Recording · 步骤 9+10 都留在 SGLang</strong>
         <span>TopK/dispatcher 产生 physical count；SGLang 原生 recorder 保存窗口，并按官方当前语义使用默认 distributed group 完成 physical→logical、all-reduce 和 utilization 汇总。Adapter 只把最终 dump 翻译为 PlacementStats，不再维护第二份 buffer。</span>
       </div>
-      <div class="boundary-card core">
-        <strong>MLB Core · 做通用决定</strong>
-        <span>SGLang EPLBManager 自己维护 every-N cadence。到周期后，它让 Adapter 读取 SGLang recorder 已完成 EP 汇总的 dump；每模型唯一的 MLB L1 controller 执行通用 skip gate，并调用框架无关 EPLB Planner。MLB 不接管框架时钟。</span>
+      <div class="boundary-card policy">
+        <strong>EPLB Policy · 判断并生成布局</strong>
+        <span>SGLang EPLBManager 自己维护 every-N cadence。到周期后，SGLang recorder 才执行 dump、distributed all-reduce 和 reset；Adapter 将结果翻译为 <code>PlacementStats</code>。同一个 EPLB Policy 先判断 utilization threshold：高于阈值就结束，不高于阈值则在同一调用链中立即运行 placement 算法，无需另设中间决策层。</span>
       </div>
       <div class="boundary-card sglang">
         <strong>SGLang · 让方案生效</strong>
