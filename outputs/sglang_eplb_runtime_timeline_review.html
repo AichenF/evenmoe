@@ -1,0 +1,1543 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SGLang EPLB → MoE Load Balancer 完整集成 Review</title>
+  <style>
+    :root {
+      --bg:#f3f6fb; --panel:#fff; --ink:#172033; --muted:#617087;
+      --line:#d9e1ec; --shadow:0 10px 28px rgba(29,45,72,.08);
+      --sg:#6941c6; --sg-bg:#f2edff;
+      --adapter:#1769aa; --adapter-bg:#eaf5ff;
+      --core:#147a50; --core-bg:#e9f8f0;
+      --danger:#b4233c; --danger-bg:#fff0f2;
+      --warn:#a95500; --warn-bg:#fff3df;
+      --good:#087443; --good-bg:#e9f8f0;
+      --gray-bg:#f6f8fb;
+    }
+    * { box-sizing:border-box; }
+    html { scroll-behavior:smooth; }
+    body {
+      margin:0; color:var(--ink); background:var(--bg);
+      font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",
+        "Microsoft YaHei",sans-serif; line-height:1.68;
+    }
+    a { color:#1f61c3; text-decoration:none; }
+    a:hover { text-decoration:underline; }
+    code,pre { font-family:"SFMono-Regular",Consolas,monospace; }
+    code { padding:.1em .34em; border-radius:5px; background:#edf1f6; font-size:.91em; }
+    .wrap { width:min(1180px,calc(100% - 32px)); margin:0 auto; }
+    .hero {
+      padding:52px 24px 44px; color:#fff;
+      background:
+        radial-gradient(circle at 82% 18%,rgba(89,157,255,.3),transparent 30%),
+        linear-gradient(135deg,#111827,#172554 58%,#214b7f);
+    }
+    .eyebrow { color:#a9c8ff; font-size:12px; font-weight:850; letter-spacing:.14em; }
+    h1 {
+      max-width:1040px; margin:10px 0 14px; font-size:clamp(31px,5vw,51px);
+      line-height:1.15; letter-spacing:-.035em;
+    }
+    .hero p { max-width:990px; margin:0; color:#d9e6f8; font-size:17px; }
+    .hero strong { color:#fff; }
+    .meta { display:flex; flex-wrap:wrap; gap:8px; margin-top:18px; }
+    .meta span {
+      padding:5px 9px; border:1px solid rgba(255,255,255,.18);
+      border-radius:999px; color:#e8f0ff; background:rgba(255,255,255,.07);
+      font-size:11px;
+    }
+    .actions { display:flex; flex-wrap:wrap; gap:9px; margin-top:20px; }
+    .button {
+      display:inline-flex; padding:8px 12px; border-radius:8px;
+      color:#17305d; background:#fff; font-weight:780;
+    }
+    .button.alt {
+      color:#fff; border:1px solid rgba(255,255,255,.23);
+      background:rgba(255,255,255,.08);
+    }
+    main { padding:26px 0 64px; }
+    nav {
+      position:sticky; top:0; z-index:10; display:flex; flex-wrap:wrap; gap:5px;
+      margin-bottom:20px; padding:10px; border:1px solid var(--line);
+      border-radius:11px; background:rgba(255,255,255,.94); backdrop-filter:blur(10px);
+    }
+    nav a {
+      padding:6px 8px; border-radius:6px; color:#48566b;
+      font-size:11px; font-weight:780;
+    }
+    nav a:hover { text-decoration:none; background:#edf3ff; }
+    section {
+      scroll-margin-top:72px; margin:21px 0; padding:27px;
+      border:1px solid var(--line); border-radius:15px; background:var(--panel);
+      box-shadow:var(--shadow);
+    }
+    h2 { margin:0 0 14px; font-size:26px; line-height:1.3; letter-spacing:-.02em; }
+    h3 { margin:21px 0 8px; font-size:18px; line-height:1.4; }
+    h4 { margin:13px 0 6px; font-size:15px; }
+    p { margin:8px 0; }
+    ul,ol { padding-left:22px; }
+    li + li { margin-top:6px; }
+    .lede { color:#344159; font-size:18px; }
+    .summary-grid,.three-col,.two-col {
+      display:grid; gap:14px; margin:17px 0;
+    }
+    .summary-grid { grid-template-columns:repeat(3,1fr); }
+    .three-col { grid-template-columns:repeat(3,1fr); }
+    .two-col { grid-template-columns:repeat(2,1fr); }
+    .card {
+      padding:18px; border:1px solid var(--line); border-radius:11px;
+      background:#fbfcfe;
+    }
+    .card h3,.card h4 { margin-top:0; }
+    .card.sg { border-top:4px solid var(--sg); background:var(--sg-bg); }
+    .card.adapter { border-top:4px solid var(--adapter); background:var(--adapter-bg); }
+    .card.core { border-top:4px solid var(--core); background:var(--core-bg); }
+    .number { font-size:30px; font-weight:900; line-height:1; }
+    .small { color:var(--muted); font-size:12px; }
+    .callout {
+      margin:15px 0; padding:16px 18px; border-left:4px solid #2768e8;
+      border-radius:8px; background:#edf3ff;
+    }
+    .callout.good { border-color:var(--good); background:var(--good-bg); }
+    .callout.warn { border-color:var(--warn); background:var(--warn-bg); }
+    .callout.danger { border-color:var(--danger); background:var(--danger-bg); }
+    .verdict {
+      display:inline-flex; padding:3px 8px; border-radius:999px;
+      font-size:11px; font-weight:850; white-space:nowrap;
+    }
+    .v-good { color:#08643d; background:#d9f3e6; }
+    .v-part { color:#8b4a00; background:#ffe5b8; }
+    .v-bad { color:#982039; background:#ffdfe5; }
+    .v-stay { color:#5133a1; background:#e8dfff; }
+    .legend { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; }
+    .owner {
+      display:inline-flex; align-items:center; gap:5px; padding:3px 8px;
+      border-radius:999px; font-size:11px; font-weight:850;
+    }
+    .owner.sg { color:#5331ac; background:#e9e0ff; }
+    .owner.adapter { color:#145b92; background:#d9edff; }
+    .owner.core { color:#0c6944; background:#d9f2e5; }
+    .timeline {
+      position:relative; margin:17px 0 24px; padding-left:34px;
+    }
+    .timeline::before {
+      content:""; position:absolute; left:13px; top:8px; bottom:8px;
+      width:3px; border-radius:3px; background:#d8e0eb;
+    }
+    .event {
+      position:relative; margin:0 0 12px; padding:15px 17px;
+      border:1px solid var(--line); border-radius:11px; background:#fff;
+    }
+    .event::before {
+      content:""; position:absolute; left:-27px; top:20px; width:12px; height:12px;
+      border:3px solid #fff; border-radius:50%; box-shadow:0 0 0 1px #b9c5d4;
+      background:#8491a4;
+    }
+    .event.sg { border-left:5px solid var(--sg); background:var(--sg-bg); }
+    .event.sg::before { background:var(--sg); }
+    .event.adapter { border-left:5px solid var(--adapter); background:var(--adapter-bg); }
+    .event.adapter::before { background:var(--adapter); }
+    .event.core { border-left:5px solid var(--core); background:var(--core-bg); }
+    .event.core::before { background:var(--core); }
+    .event.danger { border-left:5px solid var(--danger); background:var(--danger-bg); }
+    .event.danger::before { background:var(--danger); }
+    .event-head {
+      display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:5px;
+    }
+    .event-head b { font-size:15px; }
+    .event p { margin:4px 0; color:#3f4d63; }
+    .code-loc { display:block; margin-top:5px; color:#6a778c; font-size:11px; }
+    .code-loc code { font-size:11px; }
+    .handoff {
+      margin:-3px 0 10px 20px; color:#728095; font-size:12px; font-weight:750;
+    }
+    .handoff::before { content:"↓ "; color:#9aa6b7; }
+    table { width:100%; border-collapse:collapse; margin:14px 0; font-size:13px; }
+    th,td {
+      padding:10px 9px; border-bottom:1px solid var(--line);
+      text-align:left; vertical-align:top;
+    }
+    th { color:#46546a; background:#f5f7fa; font-size:11px; }
+    tr:last-child td { border-bottom:0; }
+    .table-wrap { overflow-x:auto; }
+    pre {
+      margin:12px 0; padding:16px; overflow:auto; border-radius:9px;
+      color:#dbe7f7; background:#111827; font-size:12px; line-height:1.55;
+    }
+    .review {
+      margin:13px 0; padding:17px; border:1px solid var(--line);
+      border-radius:11px; background:#fcfdff;
+    }
+    .review h3 { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:0 0 7px; }
+    .quote {
+      margin:11px 0 0; padding:13px 15px; border-radius:8px;
+      color:#35445c; background:#f1f4f8; font-size:13px;
+    }
+    details {
+      margin:10px 0; padding:12px 14px; border:1px solid var(--line);
+      border-radius:9px; background:#fbfcfe;
+    }
+    summary { cursor:pointer; font-weight:780; }
+    .footer { padding:24px; color:#748197; text-align:center; font-size:11px; }
+    @media (max-width:900px) {
+      .summary-grid,.three-col { grid-template-columns:1fr; }
+    }
+    @media (max-width:720px) {
+      .two-col { grid-template-columns:1fr; }
+      .wrap { width:min(100% - 18px,1180px); }
+      section { padding:20px 15px; }
+      .hero { padding:39px 14px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="wrap">
+      <div class="eyebrow">EPLB INTEGRATION REVIEW · NATIVE → BOUNDARY → CURRENT</div>
+      <h1>SGLang EPLB 集成到 MoE Load Balancer：完整路径与代码边界</h1>
+      <p>
+        这份 Review 不只说“应该放哪边”，也不罗列所有函数。它沿着 EPLB 真正运行的顺序，
+        解释每一环做什么、关键函数在哪里、当前迁移到了哪里，以及最后应该怎样形成
+        <strong>一个 SGLang Adapter + 一个 MoELoadBalancer 实例</strong>。
+      </p>
+      <div class="meta">
+        <span>官方 SGLang main：c6a6200a1a77（重新检查于 2026-07-27）</span>
+        <span>本地 MLB main：17cc0f43aa17</span>
+        <span>同事 MLB→SGLang 接入分支：423a44ebdf0b</span>
+      </div>
+      <div class="actions">
+        <a class="button" href="aichenf_eplb_code_review_notes.md">Review 意见文档</a>
+        <a class="button alt" href="https://github.com/xutizhou/moe_load_balancer/compare/f9125d00f30181d2fc84d381a25ae6562b5f2ea2...review/aichenf-only">同事完整 MLB Diff</a>
+        <a class="button alt" href="https://github.com/xutizhou/sglang-moe-lb-waterfill-dev/commit/423a44ebdf0b3b3a6a79a480a415bfbd00043d27">SGLang 接入 Commit</a>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <nav>
+      <a href="#answer">先看结论</a>
+      <a href="#boundary">三层边界</a>
+      <a href="#native-map">原生全景</a>
+      <a href="#init">初始化</a>
+      <a href="#record">Recording</a>
+      <a href="#trigger">判断与计算</a>
+      <a href="#apply">搬权重与生效</a>
+      <a href="#current">当前集成</a>
+      <a href="#coverage">算法覆盖</a>
+      <a href="#findings">Review 问题</a>
+      <a href="#target">目标设计</a>
+    </nav>
+
+    <section id="answer">
+      <h2>1. 先看结论：这不是“一个算法函数”的迁移</h2>
+      <p class="lede">
+        原生 SGLang EPLB 是一条完整闭环。只有中间“根据普通负载数字算新布局”是纯算法；
+        前后还有框架埋点、EP 通信、生命周期、权重加载、P2P 搬运和路由映射更新。
+      </p>
+      <div class="callout">
+        <strong>本文术语固定：</strong>“SGLang EPLB”只指官方 SGLang main
+        中的原生实现；你提供的仓库 <code>eplb</code> 分支只称为“同事 MLB→SGLang
+        接入分支”，仅用于检查同事如何替换官方实现中的接入点。
+      </div>
+
+      <div class="summary-grid">
+        <div class="card">
+          <div class="number">6</div>
+          <h3>个核心环节</h3>
+          <p>初始化、采样、跨 rank 汇总、触发判断、布局规划、搬权重并生效。</p>
+        </div>
+        <div class="card">
+          <div class="number">1 / 3</div>
+          <h3>算法家族完整迁入</h3>
+          <p>经典 DeepSeek EPLB 已完整复制；<code>deepseek_vec</code> 与 <code>elasticity_aware</code> 仍是 stub。</p>
+        </div>
+        <div class="card">
+          <div class="number">4</div>
+          <h3>类证据严格分开</h3>
+          <p>官方现状、MLB 组件现状、目标建议、尚未验证假设不再混写。</p>
+        </div>
+      </div>
+
+      <div class="callout good">
+        <strong>迁移方向正确的核心：</strong>
+        DeepSeek EPLB 布局算法、rebalance skip 策略和框架中立的
+        <code>PlacementPlan</code> 适合在 MLB 内复用。SGLang 已有的 backend hooks、统计窗口和
+        EP 汇总则直接复用，不再在 MLB 建第二套生产 recorder。
+      </div>
+      <div class="callout">
+        <strong>Review 范围：</strong>
+        SGLang 接入分支已明确仍在开发，因此本文不再把“尚未接线”列为组件设计缺陷；
+        只评审官方 SGLang 行为、当前 MLB 已实现组件自身的边界，以及目标方案。
+      </div>
+      <div class="callout warn">
+        <strong>目标不应是每个算法一个 SGLang runtime。</strong>
+        SGLang 应创建一个 <code>MoELoadBalancer</code>，再创建一个只与 SGLang 绑定的 Adapter。
+        Adapter 负责 SGLang 的数据/通信/模型操作转换，MLB 内部 Orchestrator 负责依次运行 L1、L2 或组合算法。
+      </div>
+      <div class="callout">
+        <strong>架构合约状态：</strong>
+        <code>docs/architecture.md</code> 和 <code>docs/poc-plan.md</code> 对当前 Stage 3
+        的约束仍是“L1 只读取 SGLang EPLB placement，新的 PlacementPlanner 不进入当前 POC”。
+        本文 A/B/C/D-Target 是针对后续“把 L1 planner 迁入 MLB”的 Review 提案；
+        实施前需要先正式更新这些架构文档，不能把目标图当成当前合约或当前实现。
+      </div>
+    </section>
+
+    <section id="boundary">
+      <h2>2. 最清晰的三层边界</h2>
+      <div class="legend">
+        <span class="owner sg">紫色：SGLang 原生能力</span>
+        <span class="owner adapter">蓝色：SGLang Adapter</span>
+        <span class="owner core">绿色：MLB Core / Policy</span>
+      </div>
+      <div class="three-col">
+        <div class="card sg">
+          <h3>留在 SGLang</h3>
+          <ul>
+            <li>在 TopK、DeepEP、MORI 等真正执行位置采到原始数据。</li>
+            <li><code>ModelRunner</code> 决定何时初始化、forward 何时结束、模型何时销毁。</li>
+            <li>持有模型参数、权重 loader、DRAM backup、磁盘 loader。</li>
+            <li>SGLang EPLBManager 决定何时应用候选 plan，并调用自己的 Updater 执行同 GPU copy、NCCL P2P、故障恢复和 metadata 更新。</li>
+            <li>保存当前真正生效的 placement，并在成功更新后推进 SGLang 自己的 placement version。</li>
+            <li>在下一次 TopK 中把逻辑 expert id 映射到已生效的物理副本。</li>
+          </ul>
+          <p class="small">原因：这些代码直接依赖 SGLang 的模型、backend、process group 和执行顺序。</p>
+        </div>
+        <div class="card adapter">
+          <h3>放在一个 SGLang Adapter</h3>
+          <ul>
+            <li>把 SGLang 的采样结果整理成普通 Tensor。</li>
+            <li>使用 SGLang 的 EP group 做 all-reduce / broadcast。</li>
+            <li>从 <code>server_args</code>、model config、metadata 提取普通标量。</li>
+            <li>构造 MLB 的 <code>PlacementRequest</code> / <code>RoutingRequest</code>。</li>
+            <li>提供 plan / decision 与 SGLang 数据结构之间的纯转换；转换结果返回给 SGLang 调用方。</li>
+            <li>从 SGLang 当前 metadata/version 构造只读 <code>PlacementSnapshot</code>，供 MLB 的 L1/L2 使用。</li>
+          </ul>
+          <p class="small">它只与框架绑定，不与 EPLB、LPLB、Waterfill 中任一算法绑定。</p>
+        </div>
+        <div class="card core">
+          <h3>放在 MLB Core / Policy</h3>
+          <ul>
+            <li>收到 SGLang recorder 已完成汇总的 <code>PlacementStats</code> 后，决定是否运行 L1 rebalance。</li>
+            <li>运行 DeepSeek EPLB 等 L1 planner，输出候选布局。</li>
+            <li>定义框架中立的 <code>PlacementRequest</code>、<code>PlacementPlan</code> 和 <code>PlacementSnapshot</code> 接口。</li>
+            <li>让 L2 从 Adapter 提供的 SGLang 当前 snapshot 读取已经生效的 L1 布局。</li>
+            <li>按配置执行 LPLB → Waterfill 等有顺序的组合。</li>
+          </ul>
+          <p class="small">它不 import SGLang，不知道 ModelRunner、NCCL group 或真实权重对象。</p>
+        </div>
+      </div>
+      <div class="callout">
+        <strong>一句话：</strong>SGLang 产生事实、控制生命周期并修改模型；Adapter 翻译数据与结果；
+        MLB 根据框架中立的数据作决定。
+      </div>
+      <div class="callout warn">
+        <strong>“执行框架动作”不等于 Adapter 接管框架生命周期：</strong>
+        Adapter 可以做普通数据转换、调用 EP collective、把最终 routing decision 写成 TopK/DeepEP 所需格式；
+        但“何时搬模型权重、调用哪个 Updater、失败后怎样恢复”必须由 SGLang EPLBManager 主动控制。
+        调用方向应是 SGLang Manager → Adapter 转换 → SGLang Updater，而不是 Adapter → SGLang Updater。
+      </div>
+      <div class="callout good">
+        <strong>为什么 placement 生效状态留在 SGLang：</strong>
+        判断标准不是这段代码只有几行还是很多行，而是谁能证明状态真的生效。
+        只有 SGLang 知道真实权重是否已经搬完、执行 metadata 是否已经更新；
+        因此 MLB 负责“算出候选方案”，SGLang 负责“保存当前事实”，Adapter 负责“把事实翻译给 MLB 看”。
+      </div>
+    </section>
+
+    <section id="native-map">
+      <h2>3. 官方 SGLang main 的 EPLB 全景</h2>
+      <p>
+        以下只描述官方 SGLang main 在
+        <code>c6a6200a1a778a799ba61c395ac292317f01ebc9</code> 的当前实现，
+        不混入“以后应该放到 Adapter 或 MLB”的设计建议。官方实现主要集中在
+        <code>python/sglang/srt/eplb/</code>，但真正的闭环横跨配置、ModelRunner、TopK、
+        token dispatcher、FusedMoE weight loader、Elastic EP 和 HTTP 控制入口。
+      </p>
+      <div class="callout warn">
+        <strong>重新校验后的结论：</strong>原表列出的“初始化 → 记录 → 汇总 → 判断 →
+        计算 → 搬权重 → 下次 forward”主线基本正确，但不够全面，而且
+        “建议归属”一列把目标设计混进了官方现状。下面改成
+        <strong>官方正常主线</strong>和<strong>官方特殊/辅助分支</strong>两部分。
+      </div>
+
+      <h3>3.1 正常启动与周期性 EPLB 主线</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>阶段</th><th>官方当前具体做什么</th><th>关键代码</th><th>结果交给谁</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>0 · 配置与模型准入</td>
+              <td>
+                解析是否启用 EPLB、算法、周期、统计窗口和利用率阈值。
+                开启 EPLB 会自动启用 stat recorder，并要求 EP size 合法。
+                模型类还必须提供专家层结构信息；并非任意 MoE 模型都自动可用。
+              </td>
+              <td>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/server_args.py#L2303-L2345">server_args.py:2303–2345</a><br>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/server_args.py#L6586-L6626">server_args.py:6586–6626</a><br>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/expert_location.py#L744-L760">expert_location.py:744–760</a>
+              </td>
+              <td>生成 SGLang 的启动配置和模型专家结构描述。</td>
+            </tr>
+            <tr>
+              <td>1 · 创建进程内状态</td>
+              <td>
+                <code>ModelRunner.initialize()</code> 先在同一个 helper 中创建 placement metadata
+                和 recorder，再依次创建 LPLB solver、EPLBManager、ExpertLocationUpdater。
+                metadata、recorder、LPLB solver
+                被放在 SGLang 的进程级 <code>runtime_context.Resources</code> 槽位中；
+                Manager 和 Updater 则由 ModelRunner 持有。官方没有一个统一的
+                <code>EPLBRuntime</code> 对象。
+              </td>
+              <td>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/model_executor/model_runner.py#L561-L578">model_runner.py:561–578</a><br>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/runtime_context.py#L407-L423">runtime_context.py:407–423</a>
+              </td>
+              <td>供同一进程中的 TopK、recorder、manager 和 updater 读取。</td>
+            </tr>
+            <tr>
+              <td>2 · 冷启动 placement 与加载</td>
+              <td>
+                初始布局可以来自 <code>trivial</code>、PT/JSON 文件、内联 JSON、
+                已有 physical-to-logical map，或一份 logical load count。
+                只有最后一种会在启动时运行 EPLB 算法。随后 FusedMoE weight loader
+                按 logical-to-physical 映射，把同一逻辑专家权重装入它的所有物理副本。
+              </td>
+              <td>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/expert_location.py#L763-L802">expert_location.py:763–802</a><br>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/layers/moe/fused_moe_triton/layer.py#L811-L884">fused_moe_triton/layer.py:811–884</a>
+              </td>
+              <td>得到第一次 forward 使用的专家副本布局和真实权重。</td>
+            </tr>
+            <tr>
+              <td>3 · 每次 forward 记录负载</td>
+              <td>
+                forward 进入 recorder 的一次采样窗口。普通路径在 TopK 后记录；
+                DeepEP normal/low-latency、NIXL、Mooncake、Mori 等路径在各自 dispatcher
+                中记录。记录的是<strong>已经映射到物理副本后的 routed expert load</strong>，
+                不是一份脱离执行路径的原始逻辑 TopK。
+              </td>
+              <td>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/model_executor/model_runner.py#L1372-L1417">model_runner.py:1372–1417</a><br>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/layers/moe/topk.py#L2237-L2249">topk.py:2237–2249</a><br>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/layers/moe/token_dispatcher/deepep.py#L578-L708">deepep.py:578–708</a>
+              </td>
+              <td>进入 recorder 的按层、按物理专家统计窗口。</td>
+            </tr>
+            <tr>
+              <td>4 · 两条统计通信</td>
+              <td>
+                供 planner 使用的路径：累计物理副本计数，dump 时转成逻辑专家计数，
+                再调用未显式传 group 的 <code>torch.distributed.all_reduce(SUM)</code>，
+                即使用 SGLang 当前默认 distributed process group。
+                判断均衡程度的路径：每次 forward 把物理专家计数归并到 GPU，
+                <code>reduce</code> 到 rank 0；窗口结束后再把平均利用率
+                <code>broadcast</code> 给所有 rank。两条通信不能混成一次 all-reduce。
+              </td>
+              <td>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/expert_distribution.py#L697-L802">expert_distribution.py:697–802</a><br>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/expert_distribution.py#L875-L960">expert_distribution.py:875–960</a>
+              </td>
+              <td>产生全局 logical count，以及各 rank 一致的窗口平均利用率。</td>
+            </tr>
+            <tr>
+              <td>5 · 周期与阈值判断</td>
+              <td>
+                每经过配置的 forward 次数，EPLBManager 从 recorder dump 一个窗口。
+                如果有利用率指标且已经高于阈值，就跳过；如果该 recorder
+                没有提供利用率，官方逻辑会直接允许 rebalance。
+              </td>
+              <td>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/eplb_manager.py#L73-L112">eplb_manager.py:73–112</a><br>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/eplb_manager.py#L165-L178">eplb_manager.py:165–178</a>
+              </td>
+              <td>决定本轮“不动”，或进入布局计算。</td>
+            </tr>
+            <tr>
+              <td>6 · 算新布局</td>
+              <td>
+                <code>ExpertLocationMetadata.init_by_eplb()</code> 把 logical count、
+                冗余副本数、GPU/node 数等交给算法。官方可选 DeepSeek、向量化 DeepSeek、
+                elasticity-aware 及其 hierarchical 版本；<code>auto</code> 会根据拓扑选择。
+                输出核心是新的 physical-to-logical 与 logical-to-physical 映射。
+              </td>
+              <td>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/expert_location.py#L175-L218">expert_location.py:175–218</a><br>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/eplb_algorithms/__init__.py#L1-L87">eplb_algorithms/__init__.py:1–87</a>
+              </td>
+              <td>得到候选 placement metadata；此时真实权重还没搬。</td>
+            </tr>
+            <tr>
+              <td>7 · 搬权重并恢复缺失权重</td>
+              <td>
+                updater 比较 old/new map，区分无需移动、同 GPU copy、同节点传输和跨节点 P2P。
+                普通 copy/P2P 返回后，updater 先更新相应 layer 的 metadata，再把 missing list
+                交回 Manager；对故障或 inactive rank 造成的缺失专家，Manager 随后从 DRAM backup 或 checkpoint
+                过滤重载；无法过滤时退化为完整 reload。可按 layer chunk 跨多个
+                forward 边界逐段执行。
+              </td>
+              <td>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/expert_location_updater.py#L136-L514">expert_location_updater.py:136–514</a><br>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/eplb_manager.py#L115-L163">eplb_manager.py:115–163</a><br>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/eplb_manager.py#L235-L284">eplb_manager.py:235–284</a>
+              </td>
+              <td>正常路径完成后 metadata 立即更新；missing-weight 恢复随后同步完成，之后本次 apply 才返回。</td>
+            </tr>
+            <tr>
+              <td>8 · 下一次 forward 使用新布局</td>
+              <td>
+                TopK 先得到逻辑专家，再由 dispatch 根据最新 metadata 选择物理副本。
+                static、dynamic/fake 和 LP dispatch 的选择方法不同。若使用 LPLB，
+                EPLB 更新后会重建 solver；若同时使用 Waterfill，它读取的是包含冗余副本的
+                物理 routed-expert 数。
+              </td>
+              <td>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/expert_location_dispatch.py#L52-L91">expert_location_dispatch.py:52–91</a><br>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/layers/moe/topk.py#L1850-L2013">topk.py:1850–2013</a><br>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/model_executor/model_runner_components/moe_ep_setup.py#L27-L74">moe_ep_setup.py:27–74</a>
+              </td>
+              <td>新 placement 成为后续路由、统计和下一轮 EPLB 的共同事实。</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>3.2 官方特殊路径和辅助入口</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>分支</th><th>官方当前行为</th><th>为什么不能从“全景”省略</th><th>关键代码</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Recorder 模式选择</td>
+              <td>
+                recorder 不是只有一种实现。它会根据 per-token/stat/stat-approx、
+                DeepEP normal/low-latency、Mori 或其他 backend 选择不同 gatherer，
+                不支持时才使用 noop recorder。
+              </td>
+              <td>决定“负载事实从哪里来、精度是多少、是否能算利用率”。</td>
+              <td>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/expert_distribution.py#L61-L80">expert_distribution.py:61–80</a><br>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/expert_distribution.py#L306-L343">expert_distribution.py:306–343</a>
+              </td>
+            </tr>
+            <tr>
+              <td>手动统计控制面</td>
+              <td>
+                除了 EPLBManager 自动启动 recorder，官方还提供 HTTP
+                start / stop / dump 接口，经 tokenizer manager 广播到 scheduler 执行。
+              </td>
+              <td>它不是自动 rebalance 主链路，但属于官方 expert-distribution 功能面。</td>
+              <td>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/entrypoints/http_server.py#L1138-L1168">http_server.py:1138–1168</a><br>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/managers/tokenizer_control_mixin.py#L377-L390">tokenizer_control_mixin.py:377–390</a><br>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/managers/scheduler.py#L4497-L4507">scheduler.py:4497–4507</a>
+              </td>
+            </tr>
+            <tr>
+              <td>Elastic EP 故障与扩缩容</td>
+              <td>
+                rank 故障时可绕过普通周期，强制立即 rebalance，并可能重跑当前 forward；
+                rank 恢复/加入时会从健康 rank 广播权威 metadata、重建 recorder、
+                reset manager generator，扩容时还会扩展 placement。
+              </td>
+              <td>
+                这条路径改变触发时机、metadata 来源和当前 forward 是否重跑，
+                是完整生命周期的一部分，不只是异常日志。
+              </td>
+              <td>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/elastic_ep/elastic_ep.py#L462-L520">elastic_ep.py:462–520</a><br>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/model_executor/model_runner.py#L399-L463">model_runner.py:399–463</a><br>
+                <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/model_executor/model_runner.py#L1882-L1897">model_runner.py:1882–1897</a>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout">
+        <strong>官方实现的本质：</strong>它不是“一个 EPLB 算法文件”，也不是“一个 Runtime class”。
+        它是由 SGLang 自己持有状态的一条完整运行闭环：
+        <strong>执行路径采样 → 分布式汇总 → manager 触发 → planner 产出映射 →
+        updater 搬真实权重 → dispatch 使用新映射</strong>，并另有 Elastic EP 和手动统计分支。
+      </div>
+    </section>
+
+    <section id="init">
+      <h2>4. Timeline A：初始化与第一次模型权重加载</h2>
+      <div class="callout warn">
+        <strong>先区分现状和建议：</strong>下面第一条 Timeline 完整描述
+        <strong>官方 SGLang main 当前怎么做</strong>；第二条 Timeline 才描述
+        <strong>接入 MLB 后建议怎样替换中间的布局计算</strong>。它们都不表示同事接入分支已经完整实现。
+      </div>
+
+      <h3>A-Current · 官方 SGLang main 当前实现</h3>
+      <p>这一条只描述官方源码现状，不包含我们的目标架构。</p>
+      <div class="timeline">
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">官方当前</span><b>A-C1 · 解析 EPLB 配置</b></div>
+          <p>
+            <code>--enable-eplb</code> 会自动打开 stat recorder；非 trivial placement 会自动选择
+            static dispatch。rebalance 周期、窗口、算法和阈值都来自 SGLang server args。
+          </p>
+          <span class="code-loc">
+            <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/server_args.py#L2303-L2345">server_args.py:2303–2345</a>，
+            <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/server_args.py#L6586-L6599">6586–6599</a>
+          </span>
+        </div>
+        <div class="handoff">SGLang 启动 ModelRunner</div>
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">官方当前</span><b>A-C2 · ModelRunner 初始化 placement 与 recorder</b></div>
+          <p>
+            <code>initialize()</code> 先计算初始 metadata，再创建 recorder 和 EPLBManager，之后才加载模型。
+            这个顺序保证 weight loader 在第一次读 checkpoint 时已经知道目标物理槽。
+          </p>
+          <span class="code-loc">
+            <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/model_executor/model_runner.py#L561-L578">model_runner.py:561–578</a>，
+            <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/model_executor/model_runner.py#L614-L659">614–659</a>
+          </span>
+        </div>
+        <div class="handoff">若 init_expert_location 给的是 logical_count，则需要算布局</div>
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">官方当前</span><b>A-C3 · SGLang 内部直接运行 EPLB 算法</b></div>
+          <p>
+            <code>compute_initial_expert_location_metadata()</code> 调
+            <code>ExpertLocationMetadata.init_by_eplb()</code>，后者在 SGLang 仓库内部调用
+            <code>eplb_algorithms.rebalance_experts()</code> 计算两个映射。官方当前没有调用 MLB。
+          </p>
+          <span class="code-loc">
+            <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/expert_location.py#L175-L225">expert_location.py:175–225</a>，
+            <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/expert_location.py#L763-L802">763–802</a>
+          </span>
+        </div>
+        <div class="handoff">SGLang 把算法输出构造成自己的 metadata</div>
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">官方当前</span><b>A-C4 · 构造 SGLang ExpertLocationMetadata</b></div>
+          <p>
+            <code>_init_raw()</code> 生成 GPU/CPU maps、valid-count 和 dispatch map，并把它保存为
+            SGLang 当前 placement。这里仍全部发生在 SGLang 内部。
+          </p>
+        </div>
+        <div class="handoff">SGLang 根据 metadata 加载 checkpoint</div>
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">官方当前</span><b>A-C5 · 权重加载到正确物理副本</b></div>
+          <p>
+            FusedMoE <code>weight_loader()</code> 用 <code>logical_to_all_physical()</code>
+            找到一个 checkpoint 逻辑专家对应的所有物理槽，并写到本 rank 实际持有的参数。
+            所以“加载模型权重”必须留在 SGLang。
+          </p>
+          <span class="code-loc">
+            <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/layers/moe/fused_moe_triton/layer.py#L811-L884">fused_moe_triton/layer.py:811–884</a>
+          </span>
+        </div>
+      </div>
+
+      <h3>A-Target · 接入 MLB 后建议只替换哪里</h3>
+      <p>
+        官方当前 A-C1、A-C2 和 A-C5 都保留；只把 A-C3 的通用布局算法移到 MLB，
+        并在两边之间增加一个统一 SGLang Adapter。
+      </p>
+      <div class="timeline">
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">SGLang</span><b>A-T1 · ModelRunner 持有一个统一 MLB 实例</b></div>
+          <p>
+            每个模型/engine 启动时创建一次 <code>MoELoadBalancer</code> 和一个
+            <code>SGLangAdapter</code>；不创建 EPLB 专用 runtime，也不使用 MLB 全局 registry。
+          </p>
+        </div>
+        <div class="handoff">Adapter 汇总 SGLang 参数</div>
+        <div class="event adapter">
+          <div class="event-head"><span class="owner adapter">目标方案</span><b>A-T2 · 构造一个 PlacementRequest</b></div>
+          <p>
+            Adapter 从 server args、model config 和 logical count 提取普通数据，汇总成
+            当前已有的 <code>PlacementRequest</code>：负载放进
+            <code>stats.logical_count</code>，算法名和 layout 标量放进
+            <code>PlacementPolicyConfig.metadata</code>，当前 snapshot 可放
+            <code>current</code>；不额外臆造一个 <code>topology</code> 参数。
+          </p>
+        </div>
+        <div class="handoff">一个 request 进入 MLB</div>
+        <div class="event core">
+          <div class="event-head"><span class="owner core">目标方案</span><b>A-T3 · MLB L1 planner 计算 candidate plan</b></div>
+          <p>
+            MLB 运行框架中立的 EPLB policy，返回
+            <code>physical_to_logical_map</code> 和 <code>logical_to_all_physical_map</code>；
+            此时只是候选结果，不修改 SGLang 当前 placement；L2 仍从 Adapter 读到旧的 SGLang snapshot。
+          </p>
+          <span class="code-loc">
+            已有算法骨架：<a href="../src/moe_load_balancer/policies/l1/eplb/planner.py">policies/l1/eplb/planner.py</a>
+          </span>
+        </div>
+        <div class="handoff">candidate plan 返回 SGLang 初始化路径</div>
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">SGLang + Adapter 纯转换</span><b>A-T4 · SGLang 构造初始 metadata</b></div>
+          <p>
+            SGLang 初始化代码取得 candidate plan；它可以调用 Adapter 的纯转换函数，
+            补齐 GPU/CPU maps、valid-count 和 dispatch map，然后由 SGLang 自己继续官方 weight-loader 路径。
+          </p>
+        </div>
+        <div class="handoff">继续复用官方 SGLang A-C5</div>
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">SGLang</span><b>A-T5 · 加载真实权重并建立权威 placement</b></div>
+          <p>
+            权重和执行 metadata 成功加载后，SGLang 保存当前 placement/version。
+            Adapter 以后只把这份真实状态转换成只读 snapshot；MLB 不再保存第二份 committed placement。
+          </p>
+        </div>
+      </div>
+      <div class="callout">
+        <strong>范围说明：</strong>A-Target 是建议边界，不表示当前 MLB 或仍在开发的
+        SGLang 接入分支已经实现；本轮不把接入分支尚未完成的部分列为设计问题。
+      </div>
+    </section>
+
+    <section id="record">
+      <h2>5. Timeline B：每次 forward 的 Recording</h2>
+      <div class="callout warn">
+        <strong>先区分现状和目标：</strong>B-Current 描述官方 SGLang 当前如何在自己内部完成采样和缓存；
+        B-Target 说明接入 MLB 后仍复用这条原生 Recording 路径。
+        目标方案<strong>不会在每次 forward 调 MLB，也不会在每次 forward 做 EP all-reduce</strong>。
+      </div>
+
+      <h3>B-Current · 官方 SGLang main 当前实现</h3>
+      <p>
+        “Recording”就是在一次 forward 内数清楚每层每个物理专家实际收到多少 token。
+        当前没有 SGLang Adapter，也没有调用 MLB；采样、窗口和通信都在 SGLang recorder 内部。
+      </p>
+      <div class="timeline">
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">官方当前</span><b>B-C1 · forward 开始，重置本次 gatherer</b></div>
+          <p>
+            <code>ModelRunner.forward()</code> 进入 recorder 的 <code>with_forward_pass()</code>；
+            recorder 为已经选定的 gatherer 清空本次临时数据。
+          </p>
+          <span class="code-loc">
+            <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/model_executor/model_runner.py#L1372-L1394">model_runner.py:1372–1394</a>，
+            <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/expert_distribution.py#L138-L207">expert_distribution.py:138–207</a>
+          </span>
+        </div>
+        <div class="handoff">模型执行到专家选择或 token dispatch</div>
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">官方当前</span><b>B-C2 · backend-specific hook 取得物理专家计数</b></div>
+          <p>
+            普通路径在 TopK 后统计 <code>topk_ids</code>；DeepEP normal 从 dispatch 返回值取计数；
+            DeepEP low-latency、MORI、NIXL、Mooncake 也各有自己的 hook。
+            recorder 根据 backend/mode 选择不同 gatherer。
+          </p>
+          <span class="code-loc">
+            <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/expert_distribution.py#L306-L343">expert_distribution.py:306–343</a>，
+            <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/layers/moe/topk.py#L2237-L2249">topk.py:2237–2249</a>，
+            <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/layers/moe/token_dispatcher/deepep.py#L578-L597">deepep.py:578–597</a>，
+            <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/layers/moe/token_dispatcher/deepep.py#L694-L708">694–708</a>
+          </span>
+        </div>
+        <div class="handoff">forward 结束，gatherer collect</div>
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">官方当前</span><b>B-C3 · SGLang accumulator 保存本 rank observation</b></div>
+          <p>
+            gatherer 输出形状使用全局 physical-expert id，但这不代表已经跨 rank 汇总。
+            <code>_StatAccumulator</code> 把本次
+            <code>[layers, num_physical_experts]</code> 计数写入 SGLang 自己的循环 buffer。
+          </p>
+          <span class="code-loc">
+            <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/expert_distribution.py#L875-L905">expert_distribution.py:875–905</a>
+          </span>
+        </div>
+        <div class="handoff">若启用 balancedness metric</div>
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">官方当前</span><b>B-C4 · 单独统计每次 forward 的 GPU 利用率</b></div>
+          <p>
+            SGLang 把物理专家计数归并成 GPU load，再 <code>reduce</code> 到 rank 0，
+            用于 heatmap 和窗口 balancedness。这条通信不是 planner 使用的 logical-count all-reduce。
+          </p>
+          <span class="code-loc">
+            <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/expert_distribution.py#L697-L802">expert_distribution.py:697–802</a>
+          </span>
+        </div>
+        <div class="handoff">forward 结束</div>
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">官方当前</span><b>B-C5 · EPLBManager 的 generator 前进一步</b></div>
+          <p>
+            <code>ModelRunner</code> 在 forward 最后调用
+            <code>EPLBManager.on_forward_pass_end()</code>。达到周期前只推进 generator，不运行算法。
+          </p>
+          <span class="code-loc">
+            <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/model_executor/model_runner.py#L1416-L1417">model_runner.py:1416–1417</a>
+          </span>
+        </div>
+      </div>
+
+      <h3>B-Target · 接入 MLB 后建议怎样 Recording</h3>
+      <p>
+        B-C1/B-C2 的埋点位置保留，因为只有 SGLang 知道当前 backend 从哪里取得正确计数；
+        B-C3/B-C4 的窗口、physical→logical 转换和通信也直接复用 SGLang 原生 recorder。
+        每次 forward 不调用 MLB；只有达到 rebalance 周期时，Adapter 才在 Timeline C
+        读取一次已经完成汇总的 dump。
+      </p>
+      <div class="timeline">
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">SGLang 原生路径</span><b>B-T1 · 在原有 backend 位置取得 rank-local 计数</b></div>
+          <p>
+            TopK、DeepEP、MORI、NIXL、Mooncake 保留已有 hook 和 gatherer；
+            不新增逐 backend 的 MLB Glue，也不在每次 forward 调某个 EPLB runtime。
+          </p>
+        </div>
+        <div class="handoff">SGLang gatherer collect</div>
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">SGLang 原生路径</span><b>B-T2 · 原生 recorder 保存窗口并计算利用率</b></div>
+          <p>
+            <code>_StatAccumulator</code> 继续保存最近 N 次 physical count；
+            balancedness/utilization 继续由 SGLang 自己统计。这里不复制一份 MLB buffer。
+          </p>
+        </div>
+        <div class="handoff">forward 结束</div>
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">SGLang lifecycle</span><b>B-T3 · EPLBManager 时钟前进一步</b></div>
+          <p>
+            <code>ModelRunner</code> 继续调用 <code>EPLBManager.on_forward_pass_end()</code>。
+            every-N cadence 属于 SGLang；Adapter 和 MLB Core 不在这里各自再维护计数器。
+          </p>
+        </div>
+      </div>
+      <div class="callout warn">
+        <strong>当前 MLB 代码还不是 B-Target：</strong><code>SGLangStatsBridge</code> 文档把
+        <code>global_physical_count</code> 说成“already all-reduced”，但
+        <code>SGLangEPLBRuntime.drain_stats()</code> 又把结果称为 per-rank view；同时还存在
+        <code>SGLangStatsCollector</code> 包装官方 recorder 的另一条路径。目标生产路径应选择后者：
+        复用官方 recorder，在触发时只做一次 dump→<code>PlacementStats</code> 转换；
+        删除 EPLB 专用 runtime/全局 registry 和第二份 MLB recorder。
+      </div>
+    </section>
+
+    <section id="trigger">
+      <h2>6. Timeline C：什么时候 Rebalance、如何算新布局</h2>
+      <div class="callout warn">
+        <strong>先区分现状和目标：</strong>C-Current 全部发生在官方 SGLang；
+        C-Target 才由统一 Adapter 构造一个 <code>PlacementRequest</code> 调 MLB。
+        “何时检查”属于 SGLang lifecycle，“是否值得算、用哪个 L1 policy”属于 MLB。
+      </div>
+
+      <h3>C-Current · 官方 SGLang main 当前实现</h3>
+      <div class="timeline">
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">官方当前</span><b>C-C1 · generator 每 N 次 forward 进入 rebalance()</b></div>
+          <p>
+            <code>EPLBManager._entrypoint()</code> 用 generator 数
+            <code>eplb_rebalance_num_iterations</code>。如果分层 chunk 更新，它还会在 chunk 间让出一次 forward。
+          </p>
+          <span class="code-loc">
+            <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/eplb_manager.py#L71-L90">eplb_manager.py:71–90</a>
+          </span>
+        </div>
+        <div class="handoff">SGLang recorder dump</div>
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">官方当前</span><b>C-C2 · 物理计数转逻辑计数并做 distributed all-reduce</b></div>
+          <p>
+            <code>_StatAccumulator.dump()</code> 读取 SGLang buffer，根据当前
+            physical-to-logical map 转成 logical count，然后调用未显式传 group 的
+            <code>torch.distributed.all_reduce(SUM)</code>。这时才得到 planner 的全局输入。
+          </p>
+          <span class="code-loc">
+            <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/expert_distribution.py#L907-L926">expert_distribution.py:907–926</a>
+          </span>
+        </div>
+        <div class="handoff">同时结束 balancedness 窗口</div>
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">官方当前</span><b>C-C3 · rank 0 计算的平均利用率 broadcast</b></div>
+          <p>
+            rank 0 从每次 forward 的利用率历史计算窗口平均值，再 broadcast 给所有 rank。
+            如果该 recorder/mode 没有利用率，结果为 <code>None</code>。
+          </p>
+          <span class="code-loc">
+            <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/expert_distribution.py#L937-L960">expert_distribution.py:937–960</a>
+          </span>
+        </div>
+        <div class="handoff">EPLBManager 读取 dump 结果</div>
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">官方当前</span><b>C-C4 · SGLang 自己检查利用率阈值</b></div>
+          <p>
+            当前利用率高于阈值，说明 placement 已经比较均衡，跳过本次昂贵的布局计算和权重搬运。
+            利用率为 <code>None</code> 时，官方当前会继续 rebalance。
+          </p>
+          <span class="code-loc">
+            <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/eplb_manager.py#L110-L124">eplb_manager.py:110–124</a>，
+            <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/eplb_manager.py#L165-L178">165–178</a>
+          </span>
+        </div>
+        <div class="handoff">需要 rebalance</div>
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">官方当前</span><b>C-C5 · SGLang 内部直接运行 EPLB planner</b></div>
+          <p>
+            <code>ExpertLocationMetadata.init_by_eplb()</code> 直接调用 SGLang 仓库内的
+            DeepSeek / DeepSeek Vec / elasticity-aware 算法，构造新的 candidate metadata。
+            官方当前没有统一 MLB 实例，也没有 <code>PlacementRequest</code>。
+          </p>
+          <span class="code-loc">
+            <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/eplb_manager.py#L122-L124">eplb_manager.py:122–124</a>，
+            <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/expert_location.py#L175-L218">expert_location.py:175–218</a>
+          </span>
+        </div>
+        <div class="handoff">candidate metadata 直接进入官方 apply 循环</div>
+      </div>
+
+      <h3>C-Target · 接入 MLB 后怎样触发与规划</h3>
+      <p>
+        C-C1 的框架时钟和 SGLang EP communication 保留；C-C4/C-C5 的通用策略与算法进入统一 MLB。
+        Adapter 一次性构造一个 request，不把一串 SGLang 参数分散传给某个算法 runtime。
+      </p>
+      <div class="timeline">
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">SGLang lifecycle</span><b>C-T1 · EPLBManager 每 N 次 forward 发起一次 planning</b></div>
+          <p>
+            engine/ModelRunner 仍决定周期和 chunk 间何时让出 forward；
+            EPLBManager 只把“读统计并计算 candidate”的部分委托给统一 Adapter/MLB，
+            自己继续掌握生命周期和后面的 apply。
+          </p>
+        </div>
+        <div class="handoff">调用一次 Adapter.collect_placement_stats()</div>
+        <div class="event adapter">
+          <div class="event-head"><span class="owner adapter">目标方案</span><b>C-T2 · Adapter 翻译 SGLang recorder dump 并构造 PlacementRequest</b></div>
+          <p>
+            <code>SGLangStatsCollector.collect()</code> 调用官方
+            <code>dump_record(output_mode="object")</code>。官方 dump 已完成
+            physical→logical、默认 distributed group 的 all-reduce 和利用率汇总；Adapter 只做字段/类型转换，
+            再把 global stats、当前 placement、topology、policy config 和 active ranks
+            汇总进一个 typed request，不能重复 all-reduce。
+          </p>
+        </div>
+        <div class="handoff">一个框架中立 request</div>
+        <div class="event core">
+          <div class="event-head"><span class="owner core">目标方案</span><b>C-T3 · MoELoadBalancer 判断是否运行 L1 pipeline</b></div>
+          <p>
+            统一 orchestrator 检查阈值，并按配置组合 replica-budget 与 placement policy。
+            当前可以运行 DeepSeek EPLB；以后可以是 CRAFT → DeepSeek 或 MoETuner-style，
+            都不新增 SGLang-specific runtime。
+          </p>
+        </div>
+        <div class="handoff">需要更新时运行框架中立 planner</div>
+        <div class="event core">
+          <div class="event-head"><span class="owner core">目标方案</span><b>C-T4 · 返回 candidate PlacementPlan</b></div>
+          <p>
+            当前 <code>PlacementPlan</code> 已有 maps/snapshots，但没有正式的
+            <code>base_version</code> 和 affected-layer 字段。目标若需要并发校验，应先扩展架构合约，
+            再让 plan 携带 physical-to-logical、logical-to-physical、受影响 layer ids 和 base version。
+            其中 base version 来自 Adapter 读取的 SGLang 当前 snapshot。plan 只是候选方案，
+            不修改 SGLang 的真实权重和当前 placement；因此 L2 此时自然仍读到旧 snapshot。
+          </p>
+          <span class="code-loc">
+            已有算法骨架：<a href="../src/moe_load_balancer/policies/l1/eplb/planner.py">policies/l1/eplb/planner.py</a>
+          </span>
+        </div>
+        <div class="handoff">candidate plan 返回 SGLang EPLBManager</div>
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">SGLang + Adapter 纯转换</span><b>C-T5 · SGLang 接收并排期 candidate</b></div>
+          <p>
+            EPLBManager 接收 candidate，决定按哪些 layer chunk、在哪些 forward 间隙执行。
+            它可以调用 Adapter 的纯转换函数生成 CPU/GPU maps、valid-count 和 dispatch map；
+            Adapter 不调用 Updater，转换完成也不等于 placement 已生效。
+          </p>
+        </div>
+      </div>
+      <div class="callout danger">
+        <strong>当前 MLB 的 <code>SGLangEPLBRuntime</code> 不是 C-Target：</strong>
+        它仍然把 recorder、planner、provider 包成 EPLB×SGLang 专用对象，而且
+        <code>compute_placement()</code> 在 SGLang apply 成功前就更新 provider。
+        目标是统一 <code>MoELoadBalancer</code> + typed request；planner 只返回 candidate，
+        已生效状态始终从 SGLang 的权威 metadata 读取。
+      </div>
+    </section>
+
+    <section id="apply">
+      <h2>7. Timeline D：真正 Rebalance——搬权重、恢复、更新路由</h2>
+      <div class="callout warn">
+        <strong>先区分现状和目标：</strong>D-Current 描述官方 SGLang 如何直接搬权重并更新自己的 metadata；
+        D-Target 增加 Adapter 的 plan 转换与 snapshot 读取，但不在 MLB 复制一份 committed state。两条路径都必须坚持：
+        <strong>算出 map 不等于 rebalance 完成</strong>。
+      </div>
+
+      <h3>D-Current · 官方 SGLang main 当前实现</h3>
+      <div class="timeline">
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">官方当前</span><b>D-C1 · EPLBManager 按 layer chunk 直接调用 updater</b></div>
+          <p>
+            SGLang 计算 update layer chunks；多个 chunk 时在每个 chunk 前让出一个 forward，
+            然后直接调用 <code>update_expert_location_with_recovery()</code>。
+          </p>
+          <span class="code-loc">
+            <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/eplb_manager.py#L130-L154">eplb_manager.py:130–154</a>
+          </span>
+        </div>
+        <div class="handoff">进入 SGLang ExpertLocationUpdater</div>
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">官方当前</span><b>D-C2 · 比较 old/new map，决定每个目标槽的数据来源</b></div>
+          <p>
+            每个目标物理槽会落入：完全不变、同 GPU copy、复用刚收到的副本、同节点 P2P、跨节点 P2P。
+            这是运行时权重搬运，不是 EPLB 规划算法。
+          </p>
+          <span class="code-loc">
+            <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/expert_location_updater.py#L136-L490">expert_location_updater.py:136–490</a>
+          </span>
+        </div>
+        <div class="handoff">生成匹配的 send / recv</div>
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">官方当前</span><b>D-C3 · 批量执行 P2P 并写回参数</b></div>
+          <p>
+            SGLang 按 expert id 排序 P2P op，分 batch 调
+            <code>torch.distributed.batch_isend_irecv()</code>，等待完成后从临时 buffer copy 到真实权重。
+          </p>
+          <span class="code-loc">
+            <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/expert_location_updater.py#L465-L514">expert_location_updater.py:465–514</a>
+          </span>
+        </div>
+        <div class="handoff">Updater 随即更新当前 metadata，并返回 missing list</div>
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">官方当前</span><b>D-C4 · 先更新 SGLang metadata</b></div>
+          <p>
+            <code>ExpertLocationUpdater.update()</code> 在常规 copy/P2P 路径返回后，
+            立即把相应 layer 的 old metadata 更新为 new metadata，然后把 missing logical experts
+            返回给 Manager。也就是说，官方当前的 metadata 更新发生在缺失权重恢复之前。
+          </p>
+          <span class="code-loc">
+            <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/expert_location_updater.py#L42-L76">expert_location_updater.py:42–76</a>
+          </span>
+        </div>
+        <div class="handoff">若 missing list 非空，Manager 再执行恢复</div>
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">官方当前</span><b>D-C5 · 补缺失权重；之后重建 LPLB solver</b></div>
+          <p>
+            Elastic EP 下源 rank 可能失效。Manager 根据 missing list 生成 weight-name filter，
+            优先从 DRAM backup 恢复，否则从磁盘加载；完成后，若 dispatch algorithm 是
+            <code>lp</code>，再按新 placement 重建 LPLB solver。
+          </p>
+          <span class="code-loc">
+            <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/eplb_manager.py#L235-L284">eplb_manager.py:235–284</a>
+          </span>
+        </div>
+        <div class="handoff">下一次 forward</div>
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">官方当前</span><b>D-C6 · TopK 使用更新后的物理副本映射</b></div>
+          <p>
+            TopK 的模型语义仍是选择逻辑专家；<code>topk_ids_logical_to_physical()</code>
+            根据 SGLang 当前 metadata 选择 static / dynamic / lp 对应的物理副本。
+            官方当前没有 MLB placement version，也没有对 MLB provider 做 commit。
+          </p>
+          <span class="code-loc">
+            <a href="https://github.com/sgl-project/sglang/blob/c6a6200a1a778a799ba61c395ac292317f01ebc9/python/sglang/srt/eplb/expert_location_dispatch.py#L52-L91">expert_location_dispatch.py:52–91</a>
+          </span>
+        </div>
+      </div>
+
+      <h3>D-Target · 接入 MLB 后怎样 apply 并让新布局生效</h3>
+      <p>
+        D-C2 到 D-C5 的真实权重操作全部保留在 SGLang；MLB 不接触模型参数、NCCL group 或 checkpoint。
+        SGLang 是 placement/version 的唯一真值来源。SGLang EPLBManager 从 MLB 取得 candidate 后，
+        自己调度官方 apply；Adapter 只做数据结构转换以及把已生效状态读成 snapshot，MLB 不执行额外 commit。
+      </p>
+      <div class="timeline">
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">SGLang EPLBManager</span><b>D-T1 · 校验 base version 并安排 apply</b></div>
+          <p>
+            EPLBManager 确认 plan 的 base version 等于 SGLang 当前 placement version，
+            再决定一次更新全部层还是按 chunk 跨 forward 更新。必要的数据格式转换可以调用 Adapter，
+            但 lifecycle、并发安全和失败处理仍由 SGLang 掌握。
+          </p>
+        </div>
+        <div class="handoff">SGLang EPLBManager 主动调用官方 ExpertLocationUpdater</div>
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">SGLang</span><b>D-T2 · 搬运权重并更新权威 metadata/version</b></div>
+          <p>
+            复用官方的 map 比较、同卡 copy、P2P、DRAM/磁盘恢复和 LPLB solver 重建机制；
+            但目标事务语义比官方当前更严格：一个 apply 单元的普通搬运与 missing-weight
+            恢复都成功后，SGLang 才推进自己的 placement version；失败时不把对应层暴露成新布局。
+            这需要 SGLang apply 路径配合，不是 MLB Adapter 单独能够保证。
+          </p>
+        </div>
+        <div class="handoff">返回实际成功的 layer ids 和 SGLang 当前 version</div>
+        <div class="event adapter">
+          <div class="event-head"><span class="owner adapter">目标方案</span><b>D-T3 · Adapter 读取 SGLang 当前 snapshot</b></div>
+          <p>
+            Adapter 从 SGLang 实际 metadata 读取 physical/logical maps 和 version，构造只读
+            <code>PlacementSnapshot</code>。chunk 更新时，snapshot 只反映已经成功应用的层。
+          </p>
+        </div>
+        <div class="handoff">同一份真实状态通过 Adapter 暴露</div>
+        <div class="event adapter">
+          <div class="event-head"><span class="owner adapter">目标方案</span><b>D-T4 · PlacementProvider 只读地暴露 snapshot</b></div>
+          <p>
+            MLB Core 可以定义 <code>PlacementProvider</code> 协议，但 SGLang Adapter 实现它；
+            provider 每次读取 SGLang 当前 metadata，不拥有、也不更新第二份 placement 状态。
+          </p>
+        </div>
+        <div class="handoff">下一次 forward / L2 调度读取同一 SGLang version</div>
+        <div class="event core">
+          <div class="event-head"><span class="owner core">MLB L2 + Adapter</span><b>D-T5 · L2 消费已生效 snapshot</b></div>
+          <p>
+            SGLang TopK/DeepEP 继续用自己的 execution metadata；统一 Adapter 给 LPLB、Waterfill
+            等 L2 policy 提供由同一份 metadata 转换出的 snapshot，最后再把 routing decision 写回 SGLang。
+          </p>
+        </div>
+      </div>
+      <div class="callout danger">
+        <strong>当前 MLB 代码的 blocker：</strong><code>SGLangEPLBRuntime.compute_placement()</code>
+        在返回 candidate tensors 时已经调用 provider update。这样如果 SGLang 后续搬权重失败，
+        L2 会读到“地图已更新、真实权重未更新”的状态。目标实现应移除这次 update：
+        planner 只返回 plan，生产路径的 provider 直接读取 SGLang 已生效的 metadata。
+      </div>
+    </section>
+
+    <section id="current">
+      <h2>8. 当前 MLB 仓库已经实现了哪些 EPLB 组件？</h2>
+      <p class="lede">
+        本节只看 MLB 仓库里已经存在的组件和它们自身的接口语义。
+        尚未完成的 SGLang 接入分支不作为问题来源，也不据此判断组件设计好坏。
+      </p>
+      <div class="callout warn">
+        <strong>文档与源码当前不一致：</strong>
+        Stage 3 架构文档仍规定“L1 只读取 SGLang EPLB placement，不实现新的
+        <code>PlacementPlanner</code>”，但源码已经加入 <code>DeepSeekEPLBPlanner</code>、
+        recorder/provider/runtime。所以下表是“已存在的源码组件”，不是“已由 Stage 3
+        合约正式接纳的设计”。合并前必须二选一：回到现有 POC scope，或更新架构合约。
+      </div>
+
+      <h3>8.1 MLB 仓库当前实现（不评价接入完成度）</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>组件</th><th>实际做什么</th><th>判断</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>DeepSeekEPLBPlanner</code></td>
+              <td>把普通 request 交给 vendored DeepSeek EPLB，打包成 <code>PlacementPlan</code>。</td>
+              <td><span class="verdict v-good">方向正确</span></td>
+            </tr>
+            <tr>
+              <td><code>EPLBRecorder</code></td>
+              <td>保存最近 N 次物理计数，窗口求和并转为逻辑计数。</td>
+              <td><span class="verdict v-part">通用代码，但接 SGLang 时与官方 recorder 重复；目标生产路径不采用</span></td>
+            </tr>
+            <tr>
+              <td><code>SGLangStatsBridge</code></td>
+              <td>试图把 SGLang accumulator 的 append/dump 接到 MLB recorder。</td>
+              <td><span class="verdict v-part">与官方 recorder 路径重复，且通信契约矛盾</span></td>
+            </tr>
+            <tr>
+              <td><code>SGLangStatsCollector</code></td>
+              <td>另一条相反路径：继续使用 SGLang 原生 recorder，再包装成 MLB stats。</td>
+              <td><span class="verdict v-good">目标选这一条：最少 Glue，复用官方完整统计语义</span></td>
+            </tr>
+            <tr>
+              <td><code>SGLangEPLBRuntime</code></td>
+              <td>组合 planner、recorder、provider，并提供 drain / compute 两段式 API。</td>
+              <td><span class="verdict v-bad">算法专用 runtime，破坏 M+N</span></td>
+            </tr>
+            <tr>
+              <td>default runtime registry</td>
+              <td>把一个 SGLang EPLB runtime 保存到 MLB 进程级全局 slot，让多个入口查找。</td>
+              <td><span class="verdict v-bad">生命周期归属错误</span></td>
+            </tr>
+            <tr>
+              <td><code>EPLBPlacementProvider</code></td>
+              <td>保存 planner 最新结果，给 L2 读取并带 version。</td>
+              <td><span class="verdict v-bad">生产路径不应保存第二份真值；改由 SGLangPlacementAdapter 读取真实 metadata</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout">
+        <strong>明确排除：</strong>“某个 SGLang 开发分支还没有调用这些组件”不属于本轮问题。
+        真正保留的 review 只包括：算法专用 runtime/全局 registry、两套 stats 契约、
+        provider 提前 publish，以及未完成的算法 stub。
+      </div>
+    </section>
+
+    <section id="coverage">
+      <h2>9. 算法迁移覆盖：具体哪些 EPLB 算法进来了？</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>SGLang main 算法</th><th>作用</th><th>MLB 当前状态</th><th>结论</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>deepseek</code></td>
+              <td>全局复制热点专家并把物理专家均匀打包到 GPU。</td>
+              <td><code>algorithms/deepseek.py</code> 与官方当前文件内容一致。</td>
+              <td><span class="verdict v-good">完整迁入</span></td>
+            </tr>
+            <tr>
+              <td><code>deepseek_hierarchical</code></td>
+              <td>先 group→node，再 node 内 expert→GPU，考虑跨节点网络差异。</td>
+              <td>由同一完整文件支持；<code>auto</code> 在 group 能整除 node 时会选它。</td>
+              <td><span class="verdict v-good">完整迁入</span></td>
+            </tr>
+            <tr>
+              <td><code>deepseek_vec*</code></td>
+              <td>向量化版本，输入保留多步 token-per-expert 结构。</td>
+              <td>只有 enum 和 dispatcher；调用会抛 <code>NotImplementedError</code>。</td>
+              <td><span class="verdict v-bad">未迁入</span></td>
+            </tr>
+            <tr>
+              <td><code>elasticity_aware*</code></td>
+              <td>结合 active ranks，在 Elastic EP 故障/扩缩容场景计算布局。</td>
+              <td>只有接口 stub；即使 Adapter 提供 <code>active_ranks</code> 也会报错。</td>
+              <td><span class="verdict v-bad">未迁入</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout danger">
+        当前公开枚举看起来支持 6 个名字，但实际只有 classic DeepSeek 两个变体可运行。
+        如果 SGLang 使用 Elastic EP，官方 server args 会把 <code>auto</code> 改为
+        <code>elasticity_aware</code>，而 MLB POC 会立即进入 stub。这是功能兼容性的 blocker，不只是“后续优化”。
+      </div>
+    </section>
+
+    <section id="findings">
+      <h2>10. 本轮 Review 的核心问题</h2>
+
+      <div class="review">
+        <h3><span class="verdict v-bad">Blocker / Major</span> #8 · Planner 结果在权重 apply 前就 publish</h3>
+        <p>
+          当前 <code>compute_placement()</code> 在返回 candidate map 前就执行
+          <code>self._provider.update_with(plan)</code>。如果 L2 此时读取 provider，它会按“新布局”路由，
+          但 SGLang 的真实权重可能还没搬、甚至搬运失败。
+        </p>
+        <div class="quote">
+          建议：<code>plan()</code> 只返回 candidate；SGLang EPLBManager 校验 base version，
+          调用自己的 <code>apply()</code>。删除 MLB provider 的提前 update，L2 通过
+          <code>SGLangPlacementAdapter</code> 只读地取得 SGLang 当前真实 placement。
+        </div>
+      </div>
+
+      <div class="review">
+        <h3><span class="verdict v-bad">Major</span> #9 · 统计张量的通信语义自相矛盾</h3>
+        <p>
+          <code>SGLangStatsBridge</code> 说输入已经跨 EP all-reduce；
+          <code>SGLangEPLBRuntime.drain_stats()</code> 又要求 caller 对结果 all-reduce。
+          官方 SGLang 实际是在 physical→logical 转换后、dump 时 all-reduce logical count。
+        </p>
+        <div class="quote">
+          建议：SGLang 生产路径只保留 <code>SGLangStatsCollector</code>：
+          官方 <code>dump_record(output_mode="object")</code> 负责
+          physical→logical 和官方 distributed all-reduce，Adapter 只把已是全局结果的 dump 转成
+          <code>PlacementStats</code>。不要再对它重复通信。
+        </div>
+      </div>
+
+      <div class="review">
+        <h3><span class="verdict v-bad">Major</span> #10 · 算法支持面与官方 SGLang 不一致</h3>
+        <p>
+          MLB 保留了 <code>deepseek_vec</code> 和 <code>elasticity_aware</code> 的公开枚举，
+          实现却是 stub。尤其 Elastic EP 会由官方配置自动选到未实现路径。
+        </p>
+        <div class="quote">
+          建议：要么本 PR 完整迁入并加等价测试；要么暂时从公开 capability 中移除并在 Adapter 初始化时 fail fast，
+          不要等第一次 rebalance 才报错。
+        </div>
+      </div>
+
+      <div class="review">
+        <h3><span class="verdict v-bad">Major</span> #2/#3/#6 · runtime 形状仍是“框架 × 算法”</h3>
+        <p>
+          当前有 <code>SGLangEPLBRuntime</code>、<code>WaterfillRuntime</code>、
+          <code>LPCFRuntime</code>，并且 EPLB 还有进程级 default registry。
+          继续这样扩展会把 M 个框架 × N 个算法变成 M×N 个 runtime。
+        </p>
+        <div class="quote">
+          建议：一个框架只有一个 Adapter；一个模型/engine 只有一个 <code>MoELoadBalancer</code> 实例。
+          算法是实例内部 policy，不拥有框架 lifecycle。
+        </div>
+      </div>
+
+      <div class="review">
+        <h3><span class="verdict v-part">Major</span> #1/#4 · 两套 stats 路径和两个 placement source</h3>
+        <p>
+          一条路径用 <code>SGLangStatsCollector</code> 包装原生 recorder，另一条用
+          <code>SGLangStatsBridge</code> 替换原生 buffer；同时又有 MLB
+          <code>EPLBPlacementProvider</code> 和读取 SGLang metadata 的
+          <code>SGLangPlacementAdapter</code>。这会形成双写和“谁是真值”的问题。
+        </p>
+        <div class="quote">
+          建议：生产 stats 路径只保留包装官方 recorder 的 <code>SGLangStatsCollector</code>；
+          placement 侧只保留一份真值。SGLang metadata/version 是唯一真值；
+          <code>SGLangPlacementAdapter</code> 只把它转换成框架中立 snapshot，MLB 不再维护副本。
+          version 由 SGLang 在 apply 成功后推进。
+        </div>
+      </div>
+
+      <div class="review">
+        <h3><span class="verdict v-bad">Major</span> #11 · SGLang 应传一个统一 Request class</h3>
+        <p>
+          当前 <code>compute_placement()</code> 对外要求分别传
+          <code>logical_count</code>、物理专家数、每 GPU 专家数、group 数、node 数、算法名和
+          active ranks，随后函数内部才把它们重新包装成 <code>PlacementRequest</code>。
+          这会让参数组装和默认值分散到多个 SGLang 调用位置。
+        </p>
+        <div class="quote">
+          建议：唯一的 SGLang Adapter 一次性构造框架中立、带类型的
+          现有 <code>PlacementRequest(stats, policy, current)</code>，layout 标量按当前合约放在
+          <code>PlacementPolicyConfig.metadata</code>，再传给目标顶层
+          <code>MoELoadBalancer.plan_placement(request)</code>（目标概念名，当前尚未实现）。Request 中不能携带
+          <code>ServerArgs</code>、ModelRunner、process group 或模型对象；L2 同样统一使用
+          <code>RoutingRequest</code>。
+        </div>
+      </div>
+
+      <div class="review">
+        <h3><span class="verdict v-bad">Major</span> #12 · L2 仍是每个算法一个 SGLang runtime，无法清晰组合</h3>
+        <p>
+          当前 <code>LPCFRuntime</code> 和 <code>WaterfillRuntime</code> 各自读取
+          <code>ForwardBatch</code>、统计、通信、构造 request、调用 router 并 materialize。
+          同时 <code>RoutingRequest.policy.name</code> 一次只能选择一个 policy；
+          所以“先 LPCF、再 Waterfill”没有统一的中间状态和调度者。
+        </p>
+        <div class="quote">
+          建议：每个模型/engine 只创建一个 <code>L2Runtime</code>。LPCF、Waterfill
+          注册成其内部有顺序的 policy pipeline，共享一个 routing context；
+          SGLang 数据准备、必要 collective 和最终写回只经过同一个 Adapter。
+        </div>
+      </div>
+    </section>
+
+    <section id="target">
+      <h2>11. 建议的最终设计：M + N，而不是 M × N</h2>
+      <div class="callout warn">
+        <strong>这里必须分成两条互不混淆的路径：</strong>
+        L1 EPLB 是每 N 次 forward 才运行的慢路径，负责改变专家副本布局；
+        L2 是每次 forward / TopK 后运行的快路径，负责在当前已生效布局上路由 token。
+        L2 不能被画成“一次周期性 EPLB”的最后一步。
+      </div>
+      <div class="two-col">
+        <div class="card">
+          <h3>SGLang 只初始化两个对象</h3>
+          <pre>self.moe_load_balancer = MoELoadBalancer(config)
+self.moe_lb_adapter = SGLangAdapter(
+    balancer=self.moe_load_balancer,
+    ep_group=self.moe_ep_group,
+    placement_reader=self.read_expert_location,
+)</pre>
+          <p class="small">
+            对象由 ModelRunner/engine 持有，不放进 MLB 全局 registry；Adapter 没有
+            <code>apply_placement</code> / Updater callback。SGLang EPLBManager 自己应用 L1 plan。
+          </p>
+        </div>
+        <div class="card">
+          <h3>一个总 Orchestrator，只持有一个 L2Runtime</h3>
+          <pre>MoELoadBalancer
+├── l1_controller
+│   └── placement policies
+└── l2_runtime              # 每个 model/engine 只有一个
+    ├── policy registry
+    ├── per-layer neutral state
+    └── pipeline: [lpcf, waterfill]</pre>
+          <p class="small">
+            <code>LPCFRouter</code>、<code>WaterfillRouter</code> 是 L2Runtime 内的 policy，
+            不是各自拥有 SGLang lifecycle 的 runtime。一个 runtime 可以用
+            <code>layer_id → state</code> 保存多层状态，不代表每层、每算法再创建 runtime。
+          </p>
+        </div>
+      </div>
+
+      <h3>11.1 当前 L2 为什么不对</h3>
+      <div class="two-col">
+        <div class="card">
+          <h3>当前源码：每个算法各自一套 runtime</h3>
+          <pre>SGLang → LPCFRuntime
+        ├── 统计 / collective
+        ├── 构造 RoutingRequest
+        ├── LPCFL2Router
+        └── materialize TopK
+
+SGLang → WaterfillRuntime
+        ├── 统计 / collective
+        ├── 构造 RoutingRequest
+        ├── WaterfillL2Router
+        └── materialize TopK</pre>
+          <p class="small">
+            两个 runtime 都读取 <code>ForwardBatch</code>、管理 buffer、做 SGLang 通信并写回
+            <code>StandardTopKOutput</code>。新增算法会继续复制框架 glue，形成 M×N。
+          </p>
+        </div>
+        <div class="card">
+          <h3>目标：一次进入、内部组合、一次写回</h3>
+          <pre>SGLang TopK
+  ↓
+one SGLangAdapter.prepare_routing()
+  ↓ one RoutingRequest / RoutingContext
+one MoELoadBalancer.l2_runtime.route()
+  ├── LPCF policy
+  └── Waterfill policy
+  ↓ one final RoutingDecision
+one SGLangAdapter.materialize()
+  ↓
+SGLang TopK / DeepEP</pre>
+          <p class="small">
+            Adapter 只和 SGLang 绑定；L2Runtime 只和 MLB Core 绑定；算法 policy
+            不读取 <code>ForwardBatch</code>、不持有 EP group，也不生成 SGLang 对象。
+          </p>
+        </div>
+      </div>
+      <div class="callout">
+        <strong>目标 L2 API 还需要补一层：</strong>
+        当前 <code>RoutingRequest.policy.name</code> 一次只能表达一个算法。目标应由
+        <code>L2Runtime</code> 接收有顺序的 pipeline 配置，并维护一个共享
+        <code>RoutingContext</code>：前一 policy 的结果成为后一 policy 的输入。
+        例如 LPCF 先选择 routed expert 的物理副本，Waterfill 再基于该结果安排 shared expert。
+      </div>
+      <div class="callout good">
+        <strong>多算法之间的数据依赖也要由这一个 runtime 处理：</strong>
+        Waterfill 需要统计 LPCF 选完之后的 physical ids 落到各 rank 的负载，
+        所以这份数据不能全部在 pipeline 开始前准备。正确流程是 L2Runtime 先运行 LPCF，
+        再让同一个 Adapter 对中间结果做一次必要的统计/collective，然后继续 Waterfill；
+        这仍是一次 <code>route_tokens()</code>、一个 L2Runtime，不是再创建 WaterfillRuntime。
+      </div>
+
+      <h3>11.2 目标 Timeline A：L1 周期性 EPLB 慢路径</h3>
+      <div class="timeline">
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">SGLang 原生 recorder</span><b>1 · forward 采样并保存窗口</b></div>
+          <p>TopK/DeepEP 等现有 hook 产生 rank-local physical count；SGLang recorder 保存窗口并统计利用率。每次 forward 不进入 MLB。</p>
+        </div>
+        <div class="handoff">ModelRunner.on_forward_pass_end()</div>
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">SGLang EPLBManager</span><b>2 · 到周期后发起一次 L1 planning</b></div>
+          <p>EPLBManager 维护 every-N cadence；达到周期后调用一次统一 Adapter。</p>
+        </div>
+        <div class="handoff">Adapter 调官方 recorder.dump_record(object)</div>
+        <div class="event adapter">
+          <div class="event-head"><span class="owner adapter">SGLang Adapter</span><b>3 · dump → PlacementRequest</b></div>
+          <p>官方 dump 完成 physical→logical、默认 distributed group 的 all-reduce 和利用率汇总；Adapter 只做字段/类型转换并补充 topology、policy 和当前 snapshot。</p>
+        </div>
+        <div class="handoff">framework-neutral global request</div>
+        <div class="event core">
+          <div class="event-head"><span class="owner core">MoELoadBalancer / L1 Controller</span><b>4 · 阈值、L1 pipeline、candidate plan</b></div>
+          <p>统一实例返回 candidate plan；L1 可以组合 CRAFT replica budget、DeepSeek placement 或 MoETuner-style placement。</p>
+        </div>
+        <div class="handoff">candidate plan 返回 SGLang EPLBManager</div>
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">SGLang EPLBManager</span><b>5 · 校验、排期并调用自己的 Updater</b></div>
+          <p>
+            EPLBManager 校验 base version，决定 layer chunks；可调用 Adapter 的纯转换函数生成
+            SGLang metadata，然后由 EPLBManager 自己调用 ExpertLocationUpdater 搬权重。
+          </p>
+        </div>
+        <div class="handoff">apply success</div>
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">SGLang</span><b>6 · 更新权威 metadata / placement version</b></div>
+          <p>SGLang 在真实权重可用后推进版本；它是当前生效 placement 的唯一真值来源。</p>
+        </div>
+      </div>
+
+      <h3>11.3 目标 Timeline B：L2 每次 forward 的统一快路径</h3>
+      <div class="timeline">
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">SGLang TopK</span><b>L2-1 · 产生本次 logical topk</b></div>
+          <p>SGLang 把 <code>topk_ids</code>、weights、forward stage 和 token 有效范围交给唯一 Adapter hook。</p>
+        </div>
+        <div class="handoff">一次 adapter.route_tokens(...)</div>
+        <div class="event adapter">
+          <div class="event-head"><span class="owner adapter">一个 SGLang Adapter</span><b>L2-2 · 准备公共输入与框架能力</b></div>
+          <p>
+            Adapter 读取当前 SGLang placement snapshot，整理 logical topk、stage 和 token 范围，
+            并向 L2Runtime 提供统一的“统计/EP 汇总”能力。尚未产生的中间数据不会在这里提前猜。
+          </p>
+        </div>
+        <div class="handoff">一个 framework-neutral routing context</div>
+        <div class="event core">
+          <div class="event-head"><span class="owner core">唯一 L2Runtime</span><b>L2-3 · 解析有顺序的 policy pipeline</b></div>
+          <p>
+            L2Runtime 根据统一配置取得 <code>[lpcf, waterfill]</code>，负责 stage gating、
+            policy 调度、共享中间结果和错误边界；不是根据一个 name 创建某个算法 runtime。
+          </p>
+        </div>
+        <div class="handoff">context：logical ids + current placement</div>
+        <div class="event core">
+          <div class="event-head"><span class="owner core">LPCF policy</span><b>L2-4 · 先选择 routed expert 的物理副本</b></div>
+          <p>LPCF 只读取普通 tensor/snapshot，输出 physical routed ids，并把结果写入共享 context。</p>
+        </div>
+        <div class="handoff">此时才有 LPCF 选择后的 physical ids</div>
+        <div class="event adapter">
+          <div class="event-head"><span class="owner adapter">同一个 SGLang Adapter</span><b>L2-5 · 按下一 policy 的需求补充派生数据</b></div>
+          <p>
+            L2Runtime 通过统一接口让 Adapter 统计这些 physical ids 的 routed-rank load；
+            dynamic Waterfill 需要时只做一次 EP collective，static 模式则不做。结果放回同一 context。
+          </p>
+        </div>
+        <div class="handoff">context：physical routed ids + routed rank load</div>
+        <div class="event core">
+          <div class="event-head"><span class="owner core">Waterfill policy</span><b>L2-6 · 再安排 shared expert</b></div>
+          <p>Waterfill 消费前一阶段结果和刚补充的 load，选择 shared-expert rank；算法本身不读取 SGLang 或持有通信组。</p>
+        </div>
+        <div class="handoff">一个 final RoutingDecision</div>
+        <div class="event adapter">
+          <div class="event-head"><span class="owner adapter">同一个 SGLang Adapter</span><b>L2-7 · 一次 materialize</b></div>
+          <p>Adapter 把最终 physical ids、weights 和 shared-expert 选择一次性转成 SGLang TopK/DeepEP layout。</p>
+        </div>
+        <div class="handoff">返回 SGLang forward</div>
+        <div class="event sg">
+          <div class="event-head"><span class="owner sg">SGLang</span><b>L2-8 · 按最终 layout dispatch token</b></div>
+          <p>DeepEP/其他 backend 继续负责真实 dispatch；MLB L2 不持有通信组或 SGLang 对象。</p>
+        </div>
+      </div>
+
+      <div class="callout good">
+        <strong>这样为什么是 M+N：</strong>
+        新增框架只实现一个框架 Adapter；新增算法只实现一个 Core policy。
+        每个模型/engine 只有一个顶层 MoELoadBalancer 和一个 L2Runtime，不需要为
+        “SGLang×LPCF”、“SGLang×Waterfill”、“vLLM×LPCF” 分别再造 runtime。
+      </div>
+    </section>
+
+    <section id="appendix">
+      <h2>12. 关键函数索引：看代码时从哪里下手</h2>
+      <details open>
+        <summary>初始化与触发</summary>
+        <ul>
+          <li><code>ModelRunner.initialize()</code>：决定 metadata / manager / model load 的顺序。</li>
+          <li><code>maybe_init_expert_location_metadata()</code>：创建初始 placement 和 recorder。</li>
+          <li><code>maybe_init_eplb_manager()</code>：创建周期调度者。</li>
+          <li><code>EPLBManager._entrypoint()</code>：每 N 次 forward 发起 rebalance。</li>
+        </ul>
+      </details>
+      <details>
+        <summary>Recording 与通信</summary>
+        <ul>
+          <li><code>ExpertDistributionRecorder.with_forward_pass()</code>：包住一次 forward。</li>
+          <li><code>on_select_experts()</code> / <code>on_deepep_dispatch_*</code>：backend 埋点。</li>
+          <li><code>_StatAccumulator.append()</code>：加入窗口。</li>
+          <li><code>_StatAccumulator.dump()</code>：physical→logical、all-reduce、利用率 broadcast。</li>
+        </ul>
+      </details>
+      <details>
+        <summary>算法与布局</summary>
+        <ul>
+          <li><code>ExpertLocationMetadata.init_by_eplb()</code>：SGLang 原生算法入口。</li>
+          <li><code>eplb_algorithms.compute_algorithm()</code>：auto 选择。</li>
+          <li><code>deepseek.replicate_experts()</code>：热点专家获得额外副本。</li>
+          <li><code>deepseek.balanced_packing()</code>：等数量约束下平衡 GPU/node 负载。</li>
+          <li><code>DeepSeekEPLBPlanner.plan()</code>：MLB 当前框架中立入口。</li>
+        </ul>
+      </details>
+      <details>
+        <summary>权重搬运与生效</summary>
+        <ul>
+          <li><code>ExpertLocationUpdater.update()</code>：权重搬运成功后更新 metadata。</li>
+          <li><code>update_expert_weights_single_layer()</code>：生成同 GPU/P2P 搬运计划。</li>
+          <li><code>update_expert_location_with_recovery()</code>：缺失权重从 DRAM/磁盘恢复。</li>
+          <li><code>topk_ids_logical_to_physical()</code>：下一次 forward 使用新副本映射。</li>
+        </ul>
+      </details>
+    </section>
+
+    <div class="footer">
+      本文基于上述固定 commit 做代码级核对；“目标设计”是 Review 建议，不表示当前源码已经实现。
+    </div>
+  </main>
+</body>
+</html>
