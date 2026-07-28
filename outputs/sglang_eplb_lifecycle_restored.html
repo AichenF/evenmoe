@@ -1,0 +1,742 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SGLang EPLB 生命周期与 MLB 目标边界（恢复版）</title>
+  <style>
+    :root {
+      --bg: #0b0f14;
+      --panel: #111720;
+      --panel-2: #151d28;
+      --band: #101720;
+      --text: #edf3fa;
+      --muted: #9cacbe;
+      --faint: #8294a7;
+      --line: #4e6072;
+      --line-soft: #273544;
+      --accent: #42a5ff;
+      --accent-fill: #102437;
+      --adapter: #f4c84a;
+      --adapter-fill: rgba(244, 200, 74, .07);
+      --core: #ff5f6d;
+      --core-fill: rgba(255, 95, 109, .07);
+      --zoom: 1;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      min-height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Avenir Next", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+
+    body {
+      background-image:
+        linear-gradient(rgba(255,255,255,.018) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.018) 1px, transparent 1px);
+      background-size: 32px 32px;
+    }
+
+    .page {
+      width: min(1680px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 28px 0 36px;
+    }
+
+    header {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 18px;
+    }
+
+    .eyebrow {
+      margin-bottom: 7px;
+      color: var(--accent);
+      font: 700 11px "SFMono-Regular", Consolas, monospace;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(26px, 3.2vw, 43px);
+      line-height: 1.1;
+      letter-spacing: -.035em;
+    }
+
+    .subtitle {
+      max-width: 1050px;
+      margin: 10px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex: 0 0 auto;
+    }
+
+    button {
+      min-width: 34px;
+      height: 32px;
+      padding: 0 10px;
+      border: 1px solid var(--line-soft);
+      border-radius: 6px;
+      color: var(--text);
+      background: var(--panel-2);
+      font: 600 12px "SFMono-Regular", Consolas, monospace;
+      cursor: pointer;
+    }
+
+    button:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .view-tabs {
+      display: inline-flex;
+      gap: 4px;
+      margin-bottom: 12px;
+      padding: 4px;
+      border: 1px solid var(--line-soft);
+      border-radius: 7px;
+      background: #0d131b;
+    }
+
+    .view-tab {
+      height: 36px;
+      padding: 0 16px;
+      border-color: transparent;
+      background: transparent;
+      color: var(--muted);
+    }
+
+    .view-tab[aria-selected="true"] {
+      border-color: #315779;
+      background: var(--accent-fill);
+      color: var(--text);
+    }
+
+    .mode-note {
+      margin: 0 0 12px;
+      padding: 10px 13px;
+      border: 1px solid var(--line-soft);
+      border-radius: 7px;
+      color: var(--muted);
+      background: rgba(17, 23, 32, .9);
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .target-only { display: none; }
+    body[data-view="target"] .target-only { display: block; }
+    body[data-view="target"] .original-only { display: none; }
+
+    .diagram-shell {
+      overflow: auto;
+      border: 1px solid var(--line-soft);
+      border-radius: 10px;
+      background: rgba(17, 23, 32, .96);
+      scrollbar-color: var(--line) var(--panel);
+    }
+
+    svg {
+      display: block;
+      width: calc(1540px * var(--zoom));
+      min-width: calc(1220px * var(--zoom));
+      height: auto;
+    }
+
+    .band {
+      fill: var(--band);
+      stroke: var(--line-soft);
+      stroke-width: 1;
+    }
+
+    .band-label {
+      fill: var(--faint);
+      font: 700 12px "SFMono-Regular", Consolas, monospace;
+      letter-spacing: .08em;
+    }
+
+    .node rect {
+      fill: var(--panel-2);
+      rx: 8;
+      transition: fill .16s ease, stroke .16s ease;
+    }
+
+    .node.eplb rect {
+      stroke: var(--accent);
+      stroke-width: 1.6;
+    }
+
+    .node.context rect {
+      stroke: var(--line);
+      stroke-width: 1;
+    }
+
+    .node:hover rect {
+      fill: var(--accent-fill);
+      stroke: #78c1ff;
+    }
+
+    .node-title {
+      fill: var(--text);
+      font-size: 15px;
+      font-weight: 700;
+    }
+
+    .node-copy {
+      fill: var(--muted);
+      font-size: 12px;
+    }
+
+    .node-file {
+      fill: #78c1ff;
+      font: 11px "SFMono-Regular", Consolas, monospace;
+    }
+
+    .edge {
+      fill: none;
+      stroke: var(--line);
+      stroke-width: 1.7;
+      marker-end: url(#arrow);
+    }
+
+    .edge.dashed { stroke-dasharray: 7 6; }
+
+    .edge-label {
+      fill: var(--faint);
+      font: 11px "SFMono-Regular", Consolas, monospace;
+      text-anchor: middle;
+    }
+
+    .ownership-overlay {
+      display: none;
+      pointer-events: none;
+    }
+
+    body[data-view="target"] .ownership-overlay { display: inline; }
+
+    .owner-frame {
+      stroke-width: 4;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .owner-frame.adapter {
+      fill: var(--adapter-fill);
+      stroke: var(--adapter);
+    }
+
+    .owner-frame.core {
+      fill: var(--core-fill);
+      stroke: var(--core);
+    }
+
+    .owner-label-bg.adapter {
+      fill: #59470f;
+      stroke: var(--adapter);
+    }
+
+    .owner-label-bg.core {
+      fill: #571820;
+      stroke: var(--core);
+    }
+
+    .owner-label-bg {
+      stroke-width: 1.5;
+    }
+
+    .owner-label {
+      fill: #fff;
+      font: 800 11px "SFMono-Regular", Consolas, monospace;
+      letter-spacing: .04em;
+    }
+
+    .owner-note {
+      fill: #dbe5ef;
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .target-callout {
+      fill: rgba(10, 15, 22, .97);
+      stroke: #66788b;
+      stroke-width: 1.5;
+    }
+
+    .target-callout-title {
+      fill: #fff;
+      font: 800 11px "SFMono-Regular", Consolas, monospace;
+      letter-spacing: .05em;
+    }
+
+    .target-callout-copy {
+      fill: #c7d3df;
+      font-size: 11px;
+      font-weight: 650;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 9px 20px;
+      padding: 14px 2px 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .sample-box {
+      width: 18px;
+      height: 12px;
+      border-radius: 3px;
+      background: var(--panel-2);
+    }
+
+    .sample-box.blue { border: 1.5px solid var(--accent); }
+    .sample-box.gray { border: 1px solid var(--line); }
+    .sample-box.adapter {
+      border: 3px solid var(--adapter);
+      background: var(--adapter-fill);
+    }
+    .sample-box.core {
+      border: 3px solid var(--core);
+      background: var(--core-fill);
+    }
+
+    .sample-line {
+      width: 24px;
+      border-top: 1.5px solid var(--line);
+    }
+
+    .sample-line.dashed { border-top-style: dashed; }
+
+    .hint {
+      margin-left: auto;
+      color: var(--faint);
+      font-family: "SFMono-Regular", Consolas, monospace;
+    }
+
+    .boundary-explanation {
+      display: none;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 9px;
+      margin-top: 14px;
+    }
+
+    body[data-view="target"] .boundary-explanation { display: grid; }
+
+    .boundary-card {
+      min-height: 100px;
+      padding: 13px 14px;
+      border: 1px solid var(--line-soft);
+      border-radius: 8px;
+      background: rgba(17, 23, 32, .92);
+    }
+
+    .boundary-card strong {
+      display: block;
+      margin-bottom: 5px;
+      font-size: 12px;
+    }
+
+    .boundary-card span {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.5;
+    }
+
+    .boundary-card.adapter strong { color: var(--adapter); }
+    .boundary-card.core strong { color: var(--core); }
+    .boundary-card.sglang strong { color: var(--accent); }
+
+    @media (max-width: 900px) {
+      .page { width: calc(100% - 18px); padding-top: 18px; }
+      header { align-items: start; flex-direction: column; }
+      .hint { width: 100%; margin-left: 0; }
+      .boundary-explanation { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body data-view="original">
+  <main class="page">
+    <header>
+      <div>
+        <div class="eyebrow">SGLang · Expert Parallel Load Balancing · Restored</div>
+        <h1>EPLB 完整运行生命周期与 MLB 目标边界</h1>
+        <p class="subtitle">
+          官方 SGLang main（c6a6200a1a77）的 14 步原始路径保持不变；
+          目标视图只叠加 Adapter 与 MLB Core 边界，不重画另一套流程。
+        </p>
+      </div>
+      <div class="controls" aria-label="图表缩放">
+        <button type="button" id="zoom-out" title="缩小">−</button>
+        <button type="button" id="zoom-reset" title="恢复原始大小">100%</button>
+        <button type="button" id="zoom-in" title="放大">+</button>
+      </div>
+    </header>
+
+    <div class="view-tabs" role="tablist" aria-label="EPLB 图表视图">
+      <button type="button" class="view-tab" id="tab-original" role="tab"
+              aria-selected="true" tabindex="0">SGLang 原始设计</button>
+      <button type="button" class="view-tab" id="tab-target" role="tab"
+              aria-selected="false" tabindex="-1">MLB / Adapter 目标边界</button>
+    </div>
+
+    <p class="mode-note original-only">
+      当前 Tab 只描述官方 SGLang：所有节点、统计、trigger、planner、Updater 和 metadata
+      都在 SGLang 内形成完整闭环。
+    </p>
+    <p class="mode-note target-only">
+      目标 Tab 与原图使用同一个 SVG。黄色完整框是 SGLang Adapter 边界；红色完整框是统一
+      MLB L1 Runtime / Core。没有彩色框的节点继续由 SGLang 拥有。
+    </p>
+
+    <section class="diagram-shell" aria-label="SGLang EPLB 生命周期图">
+      <svg viewBox="0 0 1540 1020" role="img" aria-labelledby="diagram-title diagram-desc">
+        <title id="diagram-title">SGLang EPLB 完整运行生命周期</title>
+        <desc id="diagram-desc">
+          从服务器参数、ModelRunner 初始化和初始权重加载开始，经过每次 forward 的逻辑专家选择、
+          物理副本映射和 token dispatch，再由 recorder 聚合统计、EPLBManager 触发 planner，
+          最后迁移权重、更新 metadata 并反馈到下一次 forward。
+        </desc>
+
+        <defs>
+          <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" fill="#4e6072"/>
+          </marker>
+        </defs>
+
+        <rect class="band" x="25" y="42" width="1250" height="220" rx="12"/>
+        <text class="band-label" x="48" y="72">STARTUP / COLD PLACEMENT</text>
+
+        <rect class="band" x="25" y="302" width="1470" height="220" rx="12"/>
+        <text class="band-label" x="48" y="332">EVERY FORWARD PASS</text>
+
+        <rect class="band" x="25" y="562" width="1250" height="220" rx="12"/>
+        <text class="band-label" x="48" y="592">RECORDING WINDOW / PERIODIC REBALANCE</text>
+
+        <rect class="band" x="595" y="812" width="900" height="180" rx="12"/>
+        <text class="band-label" x="618" y="838">APPLY + PUBLISH</text>
+
+        <!-- Startup -->
+        <a href="../../sglang/python/sglang/srt/server_args.py">
+          <g class="node eplb">
+            <rect x="70" y="105" width="250" height="120"/>
+            <text class="node-title" x="86" y="132">1. Server arguments</text>
+            <text class="node-copy" x="86" y="159">enable_eplb / recorder mode</text>
+            <text class="node-copy" x="86" y="178">interval / redundancy / algorithm</text>
+            <text class="node-file" x="86" y="211">server_args.py</text>
+          </g>
+        </a>
+
+        <a href="../../sglang/python/sglang/srt/model_executor/model_runner.py">
+          <g class="node eplb">
+            <rect x="355" y="105" width="250" height="120"/>
+            <text class="node-title" x="371" y="132">2. ModelRunner.initialize</text>
+            <text class="node-copy" x="371" y="159">metadata → recorder → manager</text>
+            <text class="node-copy" x="371" y="178">updater → load_model → TopK</text>
+            <text class="node-file" x="371" y="211">model_runner.py</text>
+          </g>
+        </a>
+
+        <a href="../../sglang/python/sglang/srt/eplb/expert_location.py">
+          <g class="node eplb">
+            <rect x="640" y="105" width="250" height="120"/>
+            <text class="node-title" x="656" y="132">3. Placement metadata</text>
+            <text class="node-copy" x="656" y="159">physical → logical</text>
+            <text class="node-copy" x="656" y="178">logical → replicas / rank choice</text>
+            <text class="node-file" x="656" y="211">expert_location.py</text>
+          </g>
+        </a>
+
+        <a href="../../sglang/python/sglang/srt/layers/moe/fused_moe_triton/layer.py">
+          <g class="node eplb">
+            <rect x="925" y="105" width="250" height="120"/>
+            <text class="node-title" x="941" y="132">4. Initial weight load</text>
+            <text class="node-copy" x="941" y="159">logical checkpoint expert</text>
+            <text class="node-copy" x="941" y="178">→ local physical slot(s)</text>
+            <text class="node-file" x="941" y="211">fused_moe_triton/layer.py</text>
+          </g>
+        </a>
+
+        <!-- Forward -->
+        <a href="../../sglang/python/sglang/srt/models/deepseek_v2.py">
+          <g class="node eplb">
+            <rect x="70" y="365" width="250" height="120"/>
+            <text class="node-title" x="86" y="392">5. Forward + layer context</text>
+            <text class="node-copy" x="86" y="419">with_forward_pass</text>
+            <text class="node-copy" x="86" y="438">with_current_layer(layer_id)</text>
+            <text class="node-file" x="86" y="471">model_runner.py / deepseek_v2.py</text>
+          </g>
+        </a>
+
+        <a href="../../sglang/python/sglang/srt/layers/moe/topk.py">
+          <g class="node context">
+            <rect x="355" y="365" width="250" height="120"/>
+            <text class="node-title" x="371" y="392">6. Existing logical routing</text>
+            <text class="node-copy" x="371" y="419">Gate + TopK are normal MoE logic</text>
+            <text class="node-copy" x="371" y="438">select logical expert IDs</text>
+            <text class="node-file" x="371" y="471">topk.py</text>
+          </g>
+        </a>
+
+        <a href="../../sglang/python/sglang/srt/eplb/expert_location_dispatch.py">
+          <g class="node eplb">
+            <rect x="640" y="365" width="250" height="120"/>
+            <text class="node-title" x="656" y="392">7. Logical → physical</text>
+            <text class="node-copy" x="656" y="419">static / dynamic / LP</text>
+            <text class="node-copy" x="656" y="438">choose one physical replica</text>
+            <text class="node-file" x="656" y="471">expert_location_dispatch.py</text>
+          </g>
+        </a>
+
+        <a href="../../sglang/python/sglang/srt/layers/moe/token_dispatcher/__init__.py">
+          <g class="node eplb">
+            <rect x="925" y="365" width="250" height="120"/>
+            <text class="node-title" x="941" y="392">8. Token dispatch + hook</text>
+            <text class="node-copy" x="941" y="419">consume the physical expert ID</text>
+            <text class="node-copy" x="941" y="438">backend may report received counts</text>
+            <text class="node-file" x="941" y="471">token_dispatcher/*</text>
+          </g>
+        </a>
+
+        <a href="../../sglang/python/sglang/srt/eplb/lplb_solver.py">
+          <g class="node context">
+            <rect x="1210" y="365" width="250" height="120"/>
+            <text class="node-title" x="1226" y="392">Optional LP replica solve</text>
+            <text class="node-copy" x="1226" y="419">logical demand + EP all-reduce</text>
+            <text class="node-copy" x="1226" y="438">solve replica probabilities</text>
+            <text class="node-file" x="1226" y="471">lplb_solver.py</text>
+          </g>
+        </a>
+
+        <!-- Recording and rebalance -->
+        <a href="../../sglang/python/sglang/srt/eplb/expert_distribution.py">
+          <g class="node eplb">
+            <rect x="70" y="625" width="250" height="120"/>
+            <text class="node-title" x="86" y="652">9. Record physical counts</text>
+            <text class="node-copy" x="86" y="679">TopK hook or dispatcher hook</text>
+            <text class="node-copy" x="86" y="698">per layer × physical expert</text>
+            <text class="node-file" x="86" y="731">expert_distribution.py</text>
+          </g>
+        </a>
+
+        <a href="../../sglang/python/sglang/srt/eplb/expert_distribution.py">
+          <g class="node eplb">
+            <rect x="355" y="625" width="250" height="120"/>
+            <text class="node-title" x="371" y="652">10. Normalize + aggregate</text>
+            <text class="node-copy" x="371" y="679">physical counts → logical counts</text>
+            <text class="node-copy" x="371" y="698">EP all-reduce + balancedness</text>
+            <text class="node-file" x="371" y="731">expert_distribution.py</text>
+          </g>
+        </a>
+
+        <a href="../../sglang/python/sglang/srt/eplb/eplb_manager.py">
+          <g class="node eplb">
+            <rect x="640" y="625" width="250" height="120"/>
+            <text class="node-title" x="656" y="652">11. Trigger / skip</text>
+            <text class="node-copy" x="656" y="679">every N forward passes</text>
+            <text class="node-copy" x="656" y="698">skip if already balanced</text>
+            <text class="node-file" x="656" y="731">eplb_manager.py</text>
+          </g>
+        </a>
+
+        <a href="../../sglang/python/sglang/srt/eplb/eplb_algorithms/__init__.py">
+          <g class="node eplb">
+            <rect x="925" y="625" width="250" height="120"/>
+            <text class="node-title" x="941" y="652">12. Compute new layout</text>
+            <text class="node-copy" x="941" y="679">replicate hot logical experts</text>
+            <text class="node-copy" x="941" y="698">pack physical slots to GPU/node</text>
+            <text class="node-file" x="941" y="731">eplb_algorithms/*</text>
+          </g>
+        </a>
+
+        <!-- Apply -->
+        <a href="../../sglang/python/sglang/srt/eplb/expert_location_updater.py">
+          <g class="node eplb">
+            <rect x="640" y="850" width="250" height="120"/>
+            <text class="node-title" x="656" y="877">13. Apply new layout</text>
+            <text class="node-copy" x="656" y="904">unchanged / local copy / P2P</text>
+            <text class="node-copy" x="656" y="923">same-node → cross-node</text>
+            <text class="node-file" x="656" y="956">expert_location_updater.py</text>
+          </g>
+        </a>
+
+        <a href="../../sglang/python/sglang/srt/eplb/expert_location.py">
+          <g class="node eplb">
+            <rect x="925" y="850" width="250" height="120"/>
+            <text class="node-title" x="941" y="877">14. Metadata updated</text>
+            <text class="node-copy" x="941" y="904">maps updated after normal P2P path</text>
+            <text class="node-copy" x="941" y="923">next forward reads it when complete</text>
+            <text class="node-file" x="941" y="956">expert_location.py</text>
+          </g>
+        </a>
+
+        <a href="../../sglang/python/sglang/srt/eplb/eplb_manager.py">
+          <g class="node eplb">
+            <rect x="1210" y="850" width="250" height="120"/>
+            <text class="node-title" x="1226" y="877">Missing-weight recovery</text>
+            <text class="node-copy" x="1226" y="904">failed source rank</text>
+            <text class="node-copy" x="1226" y="923">DRAM/disk reload, then resume</text>
+            <text class="node-file" x="1226" y="956">eplb_manager.py</text>
+          </g>
+        </a>
+
+        <!-- Edges: startup -->
+        <path class="edge" d="M320 165 L355 165"/>
+        <path class="edge" d="M605 165 L640 165"/>
+        <path class="edge" d="M890 165 L925 165"/>
+        <path class="edge" d="M1050 225 L1050 285 L195 285 L195 365"/>
+        <text class="edge-label" x="625" y="278">model ready</text>
+
+        <!-- Edges: forward -->
+        <path class="edge" d="M320 425 L355 425"/>
+        <path class="edge" d="M605 425 L640 425"/>
+        <path class="edge" d="M890 425 L925 425"/>
+        <path class="edge" d="M765 225 L765 365"/>
+        <text class="edge-label" x="785" y="300">maps</text>
+
+        <!-- Optional LP branch -->
+        <path class="edge dashed" d="M480 485 L480 515 L1335 515 L1335 485"/>
+        <text class="edge-label" x="910" y="507">LP path: global demand</text>
+        <path class="edge dashed" d="M1210 425 L1185 425 L1185 340 L765 340 L765 365"/>
+        <text class="edge-label" x="980" y="333">replica probabilities</text>
+
+        <!-- Recording hooks -->
+        <path class="edge" d="M480 485 L480 545 L195 545 L195 625"/>
+        <text class="edge-label" x="335" y="538">TopK hook</text>
+        <path class="edge" d="M1050 485 L1050 545 L195 545 L195 625"/>
+        <text class="edge-label" x="835" y="538">dispatcher hook</text>
+
+        <!-- Rebalance -->
+        <path class="edge" d="M320 685 L355 685"/>
+        <path class="edge" d="M605 685 L640 685"/>
+        <path class="edge" d="M890 685 L925 685"/>
+        <path class="edge" d="M1050 745 L1050 805 L765 805 L765 850"/>
+        <path class="edge" d="M890 910 L925 910"/>
+        <path class="edge" d="M1175 910 L1210 910"/>
+
+        <!-- Feedback -->
+        <path class="edge dashed" d="M1050 970 L1050 1000 L18 1000 L18 425 L70 425"/>
+        <path class="edge dashed" d="M1335 970 L1335 1010 L18 1010 L18 425 L70 425"/>
+        <path class="edge dashed" d="M765 745 L765 795 L18 795 L18 425 L70 425"/>
+        <text class="edge-label" x="390" y="788">skip when balanced</text>
+
+        <!-- Target overlay: complete, non-overlapping regions only. -->
+        <g class="ownership-overlay" aria-label="MLB Adapter 与 MLB Core 目标边界">
+          <!-- Adapter owns framework normalization, collective and typed request construction. -->
+          <rect class="owner-frame adapter" x="340" y="608" width="280" height="154" rx="13"/>
+          <rect class="owner-label-bg adapter" x="350" y="596" width="258" height="25" rx="5"/>
+          <text class="owner-label" x="361" y="613">ADAPTER · STATS / REQUEST</text>
+
+          <!-- One unified MLB L1 runtime owns generic cadence, skip policy and planner. -->
+          <rect class="owner-frame core" x="625" y="608" width="565" height="154" rx="13"/>
+          <rect class="owner-label-bg core" x="770" y="596" width="278" height="25" rx="5"/>
+          <text class="owner-label" x="781" y="613">MLB CORE · ONE L1 RUNTIME</text>
+
+          <!-- Adapter translates the candidate plan, but does not invoke the updater. -->
+          <rect class="owner-frame adapter" x="690" y="772" width="430" height="48" rx="12"/>
+          <text class="owner-label" x="905" y="792" text-anchor="middle">ADAPTER · PLACEMENTPLAN → SGLANG MAPS</text>
+          <text class="owner-note" x="905" y="809" text-anchor="middle">只转换 candidate；节点 13 仍由 SGLang 主动执行</text>
+
+          <!-- Target call order explains the framework event/core-policy split. -->
+          <rect class="target-callout" x="1290" y="70" width="190" height="172" rx="10"/>
+          <text class="target-callout-title" x="1306" y="94">TARGET CALL ORDER</text>
+          <text class="target-callout-copy" x="1306" y="119">SGLang: forward_end</text>
+          <text class="target-callout-copy" x="1306" y="142">↓ Adapter: 统计 / Request</text>
+          <text class="target-callout-copy" x="1306" y="165">↓ Core: cadence / skip</text>
+          <text class="target-callout-copy" x="1306" y="188">↓ Core: placement plan</text>
+          <text class="target-callout-copy" x="1306" y="211">↓ Adapter: native maps</text>
+          <text class="target-callout-copy" x="1306" y="232">→ SGLang: Updater</text>
+        </g>
+      </svg>
+    </section>
+
+    <div class="legend" aria-label="图例">
+      <span class="legend-item"><span class="sample-line"></span>当前生命周期 / 数据流</span>
+      <span class="legend-item"><span class="sample-line dashed"></span>可选 LP、skip 或下一周期反馈</span>
+      <span class="legend-item"><span class="sample-box blue"></span>SGLang EPLB 专属动作</span>
+      <span class="legend-item"><span class="sample-box gray"></span>普通 MoE / 独立 LPLB 上下文</span>
+      <span class="legend-item target-only"><span class="sample-box adapter"></span>黄色：SGLang Adapter</span>
+      <span class="legend-item target-only"><span class="sample-box core"></span>红色：MLB Core / L1 Runtime</span>
+      <span class="hint original-only">点击节点可打开对应的 SGLang 源文件</span>
+      <span class="hint target-only">没有黄色或红色外框的节点继续属于 SGLang</span>
+    </div>
+
+    <div class="boundary-explanation" aria-label="目标边界说明">
+      <div class="boundary-card sglang">
+        <strong>SGLang · 产生事实</strong>
+        <span>TopK/dispatcher 原始计数、forward_end、真实模型权重、P2P、恢复和执行 metadata。</span>
+      </div>
+      <div class="boundary-card adapter">
+        <strong>Adapter · 翻译框架数据</strong>
+        <span>physical→logical、使用 SGLang EP group 汇总、构造 PlacementRequest、转换 candidate maps。</span>
+      </div>
+      <div class="boundary-card core">
+        <strong>MLB Core · 做通用决定</strong>
+        <span>统一 L1 runtime 的窗口、cadence、balancedness skip，以及框架无关 EPLB planner。</span>
+      </div>
+      <div class="boundary-card sglang">
+        <strong>SGLang · 让方案生效</strong>
+        <span>EPLBManager 校验并排期；ExpertLocationUpdater 搬权重；metadata 是唯一执行真值。</span>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    (() => {
+      let zoom = 1;
+      const root = document.documentElement;
+      const reset = document.getElementById("zoom-reset");
+      const tabs = [...document.querySelectorAll("[role='tab']")];
+
+      function applyZoom(next) {
+        zoom = Math.min(1.6, Math.max(0.75, next));
+        root.style.setProperty("--zoom", zoom);
+        reset.textContent = `${Math.round(zoom * 100)}%`;
+      }
+
+      function activateTab(tab) {
+        document.body.dataset.view = tab.id === "tab-target" ? "target" : "original";
+        tabs.forEach((item) => {
+          const active = item === tab;
+          item.setAttribute("aria-selected", String(active));
+          item.tabIndex = active ? 0 : -1;
+        });
+      }
+
+      document.getElementById("zoom-in").addEventListener("click", () => applyZoom(zoom + .1));
+      document.getElementById("zoom-out").addEventListener("click", () => applyZoom(zoom - .1));
+      reset.addEventListener("click", () => applyZoom(1));
+
+      tabs.forEach((tab, index) => {
+        tab.addEventListener("click", () => activateTab(tab));
+        tab.addEventListener("keydown", (event) => {
+          if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+          event.preventDefault();
+          const offset = event.key === "ArrowRight" ? 1 : -1;
+          const next = tabs[(index + offset + tabs.length) % tabs.length];
+          activateTab(next);
+          next.focus();
+        });
+      });
+    })();
+  </script>
+</body>
+</html>

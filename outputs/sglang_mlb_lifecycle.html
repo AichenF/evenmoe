@@ -1,0 +1,1433 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SGLANG MLB life cycle</title>
+  <style>
+    :root {
+      --bg: #080c12;
+      --surface: #0e141d;
+      --surface-2: #121b26;
+      --surface-3: #172230;
+      --text: #edf4fb;
+      --muted: #9eb0c2;
+      --faint: #74879a;
+      --line: #334353;
+      --line-strong: #52677b;
+      --sg: #56a9ff;
+      --sg-fill: #10243a;
+      --adapter: #efb64f;
+      --adapter-fill: #2c2212;
+      --mlb: #ff6f83;
+      --mlb-fill: #31151d;
+      --l1: #b58cff;
+      --l1-fill: #251a38;
+      --l2: #4ed6bf;
+      --l2-fill: #112d2a;
+      --good: #58d68d;
+      --good-fill: #10291d;
+      --bad: #ff7583;
+      --bad-fill: #30151c;
+      --zoom: 1;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      scroll-behavior: smooth;
+      background: var(--bg);
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 10% -10%, rgba(45, 112, 177, .16), transparent 30%),
+        radial-gradient(circle at 90% 20%, rgba(113, 58, 96, .11), transparent 28%),
+        linear-gradient(rgba(255,255,255,.018) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.018) 1px, transparent 1px),
+        var(--bg);
+      background-size: auto, auto, 30px 30px, 30px 30px, auto;
+      font-family: "Avenir Next", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+
+    a { color: inherit; }
+
+    .page {
+      width: min(1780px, calc(100% - 36px));
+      margin: 0 auto;
+      padding: 34px 0 54px;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: end;
+      gap: 28px;
+      padding: 0 2px 24px;
+    }
+
+    .eyebrow {
+      margin-bottom: 8px;
+      color: var(--sg);
+      font: 800 11px/1.2 "SFMono-Regular", Consolas, monospace;
+      letter-spacing: .15em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      max-width: 1100px;
+      margin: 0;
+      font-size: clamp(30px, 3.4vw, 52px);
+      line-height: 1.05;
+      letter-spacing: -.04em;
+    }
+
+    .hero-copy {
+      max-width: 1080px;
+      margin: 13px 0 0;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.7;
+    }
+
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding-bottom: 2px;
+    }
+
+    button, .jump {
+      height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      color: var(--text);
+      background: rgba(18, 27, 38, .92);
+      font: 700 12px "SFMono-Regular", Consolas, monospace;
+      cursor: pointer;
+      transition: border-color .15s ease, color .15s ease, background .15s ease;
+    }
+
+    button {
+      min-width: 36px;
+      padding: 0 11px;
+    }
+
+    button:hover, .jump:hover {
+      border-color: var(--sg);
+      color: var(--sg);
+      background: var(--sg-fill);
+    }
+
+    .jumpbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 18px;
+    }
+
+    .jump {
+      display: inline-flex;
+      align-items: center;
+      padding: 0 13px;
+      text-decoration: none;
+    }
+
+    .jump.current { border-color: rgba(255, 117, 131, .45); }
+    .jump.target { border-color: rgba(88, 214, 141, .45); }
+
+    .jump.current[aria-selected="true"] {
+      border-color: var(--bad);
+      color: #ffb3bb;
+      background: var(--bad-fill);
+    }
+
+    .jump.target[aria-selected="true"] {
+      border-color: var(--good);
+      color: #aaf0c6;
+      background: var(--good-fill);
+    }
+
+    .reading-key {
+      display: grid;
+      grid-template-columns: 165px repeat(4, minmax(150px, 1fr));
+      overflow: hidden;
+      margin-bottom: 26px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(14, 20, 29, .9);
+    }
+
+    .key-title, .key-step {
+      min-height: 60px;
+      padding: 13px 16px;
+      border-right: 1px solid var(--line);
+    }
+
+    .key-step:last-child { border-right: 0; }
+
+    .key-title {
+      display: flex;
+      align-items: center;
+      color: var(--faint);
+      font: 800 10px/1.45 "SFMono-Regular", Consolas, monospace;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+    }
+
+    .key-step strong {
+      display: block;
+      margin-bottom: 3px;
+      font-size: 13px;
+    }
+
+    .key-step span {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .figure {
+      scroll-margin-top: 16px;
+      margin-bottom: 34px;
+    }
+
+    .figure[hidden] {
+      display: none;
+    }
+
+    .figure-head {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: end;
+      gap: 20px;
+      padding: 0 3px 12px;
+    }
+
+    .figure-kicker {
+      margin-bottom: 6px;
+      font: 800 11px "SFMono-Regular", Consolas, monospace;
+      letter-spacing: .13em;
+    }
+
+    .figure.current .figure-kicker { color: var(--bad); }
+    .figure.target .figure-kicker { color: var(--good); }
+
+    h2 {
+      margin: 0;
+      font-size: 25px;
+      line-height: 1.2;
+      letter-spacing: -.02em;
+    }
+
+    .figure-summary {
+      max-width: 980px;
+      margin: 7px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.65;
+    }
+
+    .figure-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 34px;
+      padding: 8px 12px;
+      border: 1px solid;
+      border-radius: 999px;
+      font: 800 11px "SFMono-Regular", Consolas, monospace;
+      white-space: nowrap;
+    }
+
+    .figure.current .figure-badge {
+      border-color: rgba(255,117,131,.5);
+      color: #ff9ca6;
+      background: rgba(48,21,28,.8);
+    }
+
+    .figure.target .figure-badge {
+      border-color: rgba(88,214,141,.5);
+      color: #85e6ad;
+      background: rgba(16,41,29,.8);
+    }
+
+    .diagram-shell {
+      position: relative;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(10, 15, 22, .96);
+      box-shadow: 0 18px 45px rgba(0, 0, 0, .22);
+      scrollbar-color: var(--line-strong) var(--surface);
+      cursor: pointer;
+    }
+
+    .diagram-shell::after {
+      position: absolute;
+      z-index: 8;
+      top: 10px;
+      right: 12px;
+      padding: 7px 10px;
+      border: 1px solid var(--line-strong);
+      border-radius: 999px;
+      color: #d5e1eb;
+      background: rgba(8, 13, 19, .94);
+      box-shadow: 0 5px 16px rgba(0,0,0,.28);
+      font: 800 10px "SFMono-Regular", Consolas, monospace;
+      pointer-events: none;
+    }
+
+    .figure.current .diagram-shell::after {
+      content: "点击图面切换到 Target →";
+      border-color: rgba(88, 214, 141, .6);
+      color: #aaf0c6;
+    }
+
+    .figure.target .diagram-shell::after {
+      content: "← 点击图面切换到 Current";
+      border-color: rgba(255, 117, 131, .6);
+      color: #ffb3bb;
+    }
+
+    .canvas-wrap {
+      position: relative;
+      width: calc(1640px * var(--zoom));
+      height: calc(1120px * var(--zoom));
+      min-width: calc(1320px * var(--zoom));
+    }
+
+    .canvas {
+      position: absolute;
+      inset: 0 auto auto 0;
+      width: 1640px;
+      height: 1120px;
+      transform: scale(var(--zoom));
+      transform-origin: top left;
+      background:
+        linear-gradient(90deg, rgba(255,255,255,.012), rgba(255,255,255,0) 26%),
+        #0b1118;
+    }
+
+    .phase-band {
+      position: absolute;
+      left: 28px;
+      width: 1584px;
+      border: 1px solid #243240;
+      border-radius: 12px;
+      background: rgba(16, 23, 32, .78);
+    }
+
+    .phase-band.startup { top: 46px; height: 190px; }
+    .phase-band.forward { top: 266px; height: 278px; }
+    .phase-band.rebalance { top: 574px; height: 286px; }
+    .phase-band.publish { top: 890px; height: 178px; }
+
+    .phase-label {
+      position: absolute;
+      left: 49px;
+      width: 146px;
+      color: var(--faint);
+    }
+
+    .phase-label.startup { top: 70px; }
+    .phase-label.forward { top: 290px; }
+    .phase-label.rebalance { top: 598px; }
+    .phase-label.publish { top: 914px; }
+
+    .phase-no {
+      display: block;
+      margin-bottom: 7px;
+      color: #d8e3ed;
+      font: 900 22px "SFMono-Regular", Consolas, monospace;
+    }
+
+    .phase-name {
+      display: block;
+      font: 800 11px/1.4 "SFMono-Regular", Consolas, monospace;
+      letter-spacing: .08em;
+    }
+
+    .phase-cn {
+      display: block;
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.4;
+    }
+
+    .time-rail {
+      position: absolute;
+      left: 204px;
+      top: 68px;
+      width: 2px;
+      height: 970px;
+      background: linear-gradient(var(--sg), #405466 85%, transparent);
+    }
+
+    .time-rail::after {
+      content: "";
+      position: absolute;
+      left: -4px;
+      bottom: -1px;
+      width: 10px;
+      height: 10px;
+      border-right: 2px solid #5d7488;
+      border-bottom: 2px solid #5d7488;
+      transform: rotate(45deg);
+    }
+
+    .card {
+      position: absolute;
+      z-index: 2;
+      overflow: hidden;
+      padding: 12px 14px 11px;
+      border: 1.5px solid var(--line-strong);
+      border-radius: 9px;
+      background: var(--surface-2);
+      box-shadow: 0 7px 18px rgba(0,0,0,.18);
+      text-decoration: none;
+    }
+
+    .card:hover {
+      filter: brightness(1.12);
+    }
+
+    .card.sglang {
+      border-color: var(--sg);
+      background: var(--sg-fill);
+    }
+
+    .card.adapter {
+      border-color: var(--adapter);
+      background: var(--adapter-fill);
+    }
+
+    .card.orchestrator {
+      border-color: var(--mlb);
+      background: var(--mlb-fill);
+    }
+
+    .card.l1 {
+      border-color: var(--l1);
+      background: var(--l1-fill);
+    }
+
+    .card.l2 {
+      border-color: var(--l2);
+      background: var(--l2-fill);
+    }
+
+    .card.problem {
+      border-color: var(--bad);
+      background: var(--bad-fill);
+    }
+
+    .card.success {
+      border-color: var(--good);
+      background: var(--good-fill);
+    }
+
+    .step {
+      display: block;
+      margin-bottom: 5px;
+      color: var(--faint);
+      font: 800 9px "SFMono-Regular", Consolas, monospace;
+      letter-spacing: .1em;
+    }
+
+    .card.sglang .step { color: #8bc5ff; }
+    .card.adapter .step { color: #f4cb79; }
+    .card.orchestrator .step { color: #ff9cab; }
+    .card.l1 .step { color: #ceb3ff; }
+    .card.l2 .step { color: #83e8d6; }
+    .card.problem .step { color: #ff9ca6; }
+    .card.success .step { color: #8ce9b3; }
+
+    .card-title {
+      display: block;
+      color: var(--text);
+      font-size: 14px;
+      font-weight: 800;
+      line-height: 1.28;
+    }
+
+    .card-copy {
+      display: block;
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .card-code {
+      display: block;
+      margin-top: 7px;
+      color: #b8c7d6;
+      font: 10px/1.35 "SFMono-Regular", Consolas, monospace;
+      overflow-wrap: anywhere;
+      white-space: normal;
+    }
+
+    .mini-stack {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 7px;
+      margin-top: 8px;
+    }
+
+    .mini {
+      min-height: 47px;
+      padding: 7px 8px;
+      border: 1px solid rgba(255,255,255,.15);
+      border-radius: 6px;
+      background: rgba(4,8,12,.24);
+      color: #dbe6ef;
+      font: 700 9px/1.35 "SFMono-Regular", Consolas, monospace;
+    }
+
+    .mini em {
+      display: block;
+      margin-top: 3px;
+      color: var(--faint);
+      font-style: normal;
+      font-weight: 500;
+    }
+
+    .mini.bad { border-color: rgba(255,117,131,.5); }
+    .mini.good { border-color: rgba(88,214,141,.5); }
+
+    .pill-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      margin-top: 8px;
+    }
+
+    .pill {
+      padding: 4px 7px;
+      border: 1px solid rgba(255,255,255,.16);
+      border-radius: 999px;
+      color: #cbd8e4;
+      background: rgba(5,9,13,.2);
+      font: 700 9px "SFMono-Regular", Consolas, monospace;
+    }
+
+    .split-card {
+      display: grid;
+      grid-template-columns: 1fr 26px 1fr;
+      align-items: stretch;
+      gap: 5px;
+      margin-top: 8px;
+    }
+
+    .split-card .half {
+      padding: 7px;
+      border: 1px solid rgba(255,255,255,.14);
+      border-radius: 6px;
+      color: #dce7f0;
+      font: 700 9px/1.4 "SFMono-Regular", Consolas, monospace;
+    }
+
+    .split-card .arrow-word {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--faint);
+      font-size: 16px;
+    }
+
+    .connectors {
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+      width: 1640px;
+      height: 1120px;
+      pointer-events: none;
+    }
+
+    .connectors .flow-label {
+      display: none;
+    }
+
+    .connector-labels {
+      position: absolute;
+      inset: 0;
+      z-index: 5;
+      width: 1640px;
+      height: 1120px;
+      overflow: visible;
+      pointer-events: none;
+    }
+
+    .flow-caption rect {
+      fill: rgba(7, 12, 18, .96);
+      stroke: #52677b;
+      stroke-width: 1;
+    }
+
+    .flow-caption text {
+      fill: #d1dce6;
+      font: 800 10px "SFMono-Regular", Consolas, monospace;
+      text-anchor: middle;
+      dominant-baseline: middle;
+    }
+
+    .flow-caption.bad rect {
+      fill: rgba(53, 17, 24, .97);
+      stroke: var(--bad);
+    }
+
+    .flow-caption.bad text { fill: #ffb2ba; }
+
+    .flow-caption.good rect {
+      fill: rgba(10, 43, 27, .97);
+      stroke: var(--good);
+    }
+
+    .flow-caption.good text { fill: #a8f0c5; }
+
+    .flow {
+      fill: none;
+      stroke: #667b8e;
+      stroke-width: 2;
+      marker-end: url(#arrow);
+    }
+
+    .flow.dashed {
+      stroke-dasharray: 7 6;
+    }
+
+    .flow.bad {
+      stroke: var(--bad);
+      marker-end: url(#arrow-bad);
+    }
+
+    .flow.good {
+      stroke: var(--good);
+      marker-end: url(#arrow-good);
+    }
+
+    .flow-label {
+      fill: #93a6b8;
+      font: 700 10px "SFMono-Regular", Consolas, monospace;
+      text-anchor: middle;
+    }
+
+    .flow-label.bad { fill: #ff9ca6; }
+    .flow-label.good { fill: #8ce9b3; }
+
+    .note {
+      position: absolute;
+      z-index: 3;
+      padding: 8px 10px;
+      border: 1px solid;
+      border-radius: 7px;
+      font-size: 10px;
+      font-weight: 700;
+      line-height: 1.45;
+    }
+
+    .note.bad {
+      border-color: rgba(255,117,131,.55);
+      color: #ffc2c8;
+      background: rgba(67,20,29,.96);
+    }
+
+    .note.good {
+      border-color: rgba(88,214,141,.55);
+      color: #b8f4cf;
+      background: rgba(14,52,31,.96);
+    }
+
+    .note.neutral {
+      border-color: rgba(158,176,194,.35);
+      color: #c8d4df;
+      background: rgba(19,29,40,.96);
+    }
+
+    .summary-strip {
+      position: absolute;
+      left: 226px;
+      top: 1083px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      width: 1365px;
+      min-height: 25px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .summary-strip strong {
+      font: 900 12px "SFMono-Regular", Consolas, monospace;
+    }
+
+    .current .summary-strip strong { color: var(--bad); }
+    .target .summary-strip strong { color: var(--good); }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 20px;
+      padding: 13px 4px 0;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .swatch {
+      width: 16px;
+      height: 11px;
+      border: 1.5px solid;
+      border-radius: 3px;
+      background: var(--surface-2);
+    }
+
+    .swatch.sg { border-color: var(--sg); background: var(--sg-fill); }
+    .swatch.adapter { border-color: var(--adapter); background: var(--adapter-fill); }
+    .swatch.mlb { border-color: var(--mlb); background: var(--mlb-fill); }
+    .swatch.l1 { border-color: var(--l1); background: var(--l1-fill); }
+    .swatch.l2 { border-color: var(--l2); background: var(--l2-fill); }
+
+    .comparison {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin-top: 16px;
+    }
+
+    .comparison-card {
+      min-height: 94px;
+      padding: 15px 17px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: rgba(14,20,29,.9);
+    }
+
+    .comparison-card strong {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 12px;
+    }
+
+    .comparison-card span {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.55;
+    }
+
+    .comparison-card code {
+      color: #d9e4ee;
+      font: 10px "SFMono-Regular", Consolas, monospace;
+    }
+
+    @media (max-width: 900px) {
+      .page { width: calc(100% - 18px); padding-top: 20px; }
+      .hero, .figure-head { grid-template-columns: 1fr; align-items: start; }
+      .reading-key { grid-template-columns: 1fr 1fr; }
+      .key-title { grid-column: 1 / -1; }
+      .key-step:nth-child(odd) { border-right: 0; }
+      .comparison { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="hero">
+      <div>
+        <div class="eyebrow">MLB × SGLang · lifecycle integration review</div>
+        <h1>同一条 SGLang 推理时间线，MLB 应该出现在哪里？</h1>
+        <p class="hero-copy">
+          Current 与 Target 使用完全相同的阶段和步骤。页面一次只显示一个状态：
+          点击图面即可原位切换。Current 中 EPLB、Waterfill、LP-CF 各自形成 runtime；
+          Target 中每个 ModelRunner 显式持有一个 <code>MoELoadBalancer</code>，
+          由统一 SGLang Adapter 和 Orchestrator 连接 L1/L2。
+        </p>
+      </div>
+      <div class="controls" aria-label="图表缩放">
+        <button type="button" id="zoom-out" title="缩小">−</button>
+        <button type="button" id="zoom-reset" title="恢复原始大小">100%</button>
+        <button type="button" id="zoom-in" title="放大">+</button>
+      </div>
+    </header>
+
+    <nav class="jumpbar" aria-label="图表状态切换" role="tablist">
+      <button class="jump current" type="button" role="tab" aria-selected="true"
+              aria-controls="current" data-view="current">01 · Current / 当前</button>
+      <button class="jump target" type="button" role="tab" aria-selected="false"
+              aria-controls="target" data-view="target">02 · Target / 目标</button>
+    </nav>
+
+    <section class="reading-key" aria-label="统一生命周期阶段">
+      <div class="key-title">SAME TIMELINE<br>原位点击切换</div>
+      <div class="key-step">
+        <strong>01 · Startup</strong>
+        <span>配置、实例初始化、初始 placement</span>
+      </div>
+      <div class="key-step">
+        <strong>02 · Every forward</strong>
+        <span>logical TopK、L2 routing、dispatch、记录</span>
+      </div>
+      <div class="key-step">
+        <strong>03 · Periodic L1</strong>
+        <span>interval、统计汇总、EPLB placement plan</span>
+      </div>
+      <div class="key-step">
+        <strong>04 · Apply & publish</strong>
+        <span>权重搬运、metadata commit、下一轮生效</span>
+      </div>
+    </section>
+
+    <section class="figure current" id="current">
+      <header class="figure-head">
+        <div>
+          <div class="figure-kicker">FIGURE 01 · AS-IS</div>
+          <h2>当前：MLB 以“框架 × 算法”runtime 碎片接入 SGLang</h2>
+          <p class="figure-summary">
+            SGLang 的大时序仍然成立，但 MLB 在三个不相连的入口出现：
+            进程级 <code>SGLangEPLBRuntime</code>、每层 <code>WaterfillRuntime</code>、
+            每层 <code>LPCFRuntime</code>。它们各自持有算法或状态，绕过统一顶层实例。
+          </p>
+        </div>
+        <div class="figure-badge">M frameworks × N policies</div>
+      </header>
+
+      <div class="diagram-shell">
+        <div class="canvas-wrap">
+          <div class="canvas">
+            <div class="phase-band startup"></div>
+            <div class="phase-band forward"></div>
+            <div class="phase-band rebalance"></div>
+            <div class="phase-band publish"></div>
+            <div class="time-rail"></div>
+
+            <div class="phase-label startup">
+              <span class="phase-no">01</span>
+              <span class="phase-name">STARTUP</span>
+              <span class="phase-cn">模型启动 / 冷放置</span>
+            </div>
+            <div class="phase-label forward">
+              <span class="phase-no">02</span>
+              <span class="phase-name">EVERY FORWARD</span>
+              <span class="phase-cn">每层 MoE 路由</span>
+            </div>
+            <div class="phase-label rebalance">
+              <span class="phase-no">03</span>
+              <span class="phase-name">PERIODIC L1</span>
+              <span class="phase-cn">统计窗口 / 重放置</span>
+            </div>
+            <div class="phase-label publish">
+              <span class="phase-no">04</span>
+              <span class="phase-name">APPLY + PUBLISH</span>
+              <span class="phase-cn">搬权重 / 下一轮生效</span>
+            </div>
+
+            <svg class="connectors" viewBox="0 0 1640 1120" aria-hidden="true">
+              <defs>
+                <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+                  <path d="M0,0 L8,4 L0,8 Z" fill="#667b8e"/>
+                </marker>
+                <marker id="arrow-bad" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+                  <path d="M0,0 L8,4 L0,8 Z" fill="#ff7583"/>
+                </marker>
+                <marker id="arrow-good" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+                  <path d="M0,0 L8,4 L0,8 Z" fill="#58d68d"/>
+                </marker>
+              </defs>
+
+              <path class="flow" d="M430 144 L458 144"/>
+              <path class="flow bad" d="M753 144 L781 144"/>
+              <path class="flow" d="M1268 144 L1296 144"/>
+              <path class="flow" d="M1418 204 L1418 247 L344 247 L344 328"/>
+
+              <path class="flow" d="M459 388 L487 388"/>
+              <path class="flow bad" d="M863 388 L891 388"/>
+              <path class="flow" d="M1239 388 L1267 388"/>
+              <path class="flow dashed" d="M580 456 L580 518 L344 518 L344 650"/>
+              <path class="flow dashed" d="M1391 456 L1391 530 L344 530 L344 650"/>
+
+              <path class="flow" d="M459 710 L487 710"/>
+              <path class="flow bad" d="M863 710 L891 710"/>
+              <path class="flow" d="M1239 710 L1267 710"/>
+              <path class="flow" d="M1391 778 L1391 875 L344 875 L344 934"/>
+
+              <path class="flow" d="M609 989 L637 989"/>
+              <path class="flow bad" d="M1007 989 L1035 989"/>
+              <path class="flow dashed" d="M1427 989 L1558 989 L1558 270 L1507 270"/>
+
+              <text class="flow-label bad" x="767" y="132">三个入口</text>
+              <text class="flow-label" x="895" y="239">model ready</text>
+              <text class="flow-label bad" x="877" y="376">分支调用</text>
+              <text class="flow-label" x="835" y="510">TopK / dispatcher hooks</text>
+              <text class="flow-label bad" x="877" y="698">global lookup</text>
+              <text class="flow-label" x="870" y="867">candidate layout</text>
+              <text class="flow-label bad" x="1021" y="977">可见性竞态</text>
+              <text class="flow-label" x="1559" y="615" transform="rotate(-90 1559 615)">next forward</text>
+            </svg>
+
+            <a class="card sglang" href="../../sglang/python/sglang/srt/server_args.py"
+               style="left:226px;top:75px;width:204px;height:150px">
+              <span class="step">STEP 01 · SGLANG</span>
+              <span class="card-title">ServerArgs / flags</span>
+              <span class="card-copy">EPLB / Waterfill / LP-CF 配置。</span>
+              <span class="card-code">server_args.py</span>
+            </a>
+
+            <a class="card sglang" href="../../sglang/python/sglang/srt/model_executor/model_runner.py"
+               style="left:458px;top:75px;width:295px;height:140px">
+              <span class="step">STEP 02 · SGLANG LIFECYCLE</span>
+              <span class="card-title">ModelRunner.initialize()</span>
+              <span class="card-copy">初始化 recorder / manager；准备各算法对象。</span>
+              <span class="card-code">model_runner.py::_prepare_moe_topk</span>
+            </a>
+
+            <div class="card problem" style="left:781px;top:72px;width:487px;height:145px">
+              <span class="step">STEP 02 · CURRENT MLB OBJECTS</span>
+              <span class="card-title">MLB 被拆成多套顶层 runtime</span>
+              <div class="mini-stack">
+                <div class="mini bad">SGLangEPLBRuntime<em>进程级 default registry</em></div>
+                <div class="mini bad">WaterfillRuntime × layer<em>自己持有 Waterfill router</em></div>
+                <div class="mini bad">LPCFRuntime × layer<em>自己持有 LP-CF router</em></div>
+              </div>
+            </div>
+
+            <a class="card sglang" href="../../sglang/python/sglang/srt/eplb/expert_location.py"
+               style="left:1296px;top:75px;width:242px;height:140px">
+              <span class="step">STEP 03 · SGLANG</span>
+              <span class="card-title">Initial placement ready</span>
+              <span class="card-copy">权重加载；SGLang metadata 保持执行权威。</span>
+              <span class="card-code">ExpertLocationMetadata</span>
+            </a>
+
+            <a class="card sglang" href="../../sglang/python/sglang/srt/layers/moe/topk.py"
+               style="left:226px;top:328px;width:233px;height:140px">
+              <span class="step">STEP 04 · SGLANG</span>
+              <span class="card-title">Gate + logical TopK</span>
+              <span class="card-copy">每个 MoE 层选出 logical expert ids 和 weights。</span>
+              <span class="card-code">TopK.forward()</span>
+            </a>
+
+            <div class="card problem" style="left:487px;top:308px;width:376px;height:180px">
+              <span class="step">STEP 05 · CURRENT MLB L2</span>
+              <span class="card-title">按算法选择并直接调用 runtime</span>
+              <div class="split-card">
+                <div class="half">WaterfillRuntime<br>collect → AR → route → write</div>
+                <div class="arrow-word">或</div>
+                <div class="half">LPCFRuntime<br>collect → AR → route → write</div>
+              </div>
+              <span class="card-copy">一次调用立即 materialize，无法表达 LPLB → Waterfill 有序组合。</span>
+            </div>
+
+            <div class="card adapter" style="left:891px;top:308px;width:348px;height:180px">
+              <span class="step">STEP 05 · DUPLICATED ADAPTER WORK</span>
+              <span class="card-title">框架转换跟着算法重复</span>
+              <div class="pill-row">
+                <span class="pill">count routed load</span>
+                <span class="pill">EP all-reduce</span>
+                <span class="pill">build request</span>
+                <span class="pill">DeepEP ids</span>
+                <span class="pill">materialize output</span>
+              </div>
+              <span class="card-copy">Adapter 知道算法名；每加一个 policy 又复制一套。</span>
+            </div>
+
+            <a class="card sglang" href="../../sglang/python/sglang/srt/layers/moe/token_dispatcher/deepep.py"
+               style="left:1267px;top:328px;width:248px;height:140px">
+              <span class="step">STEP 06 · SGLANG</span>
+              <span class="card-title">DeepEP dispatch + MoE</span>
+              <span class="card-copy">消费 physical / interleaved ids，执行专家计算。</span>
+              <span class="card-code">token_dispatcher/deepep.py</span>
+            </a>
+
+            <a class="card sglang" href="../../sglang/python/sglang/srt/eplb/expert_distribution.py"
+               style="left:226px;top:650px;width:233px;height:140px">
+              <span class="step">STEP 07 · SGLANG</span>
+              <span class="card-title">Record expert load</span>
+              <span class="card-copy">TopK / dispatcher hook 记录 physical expert counts。</span>
+              <span class="card-code">expert_distribution.py</span>
+            </a>
+
+            <a class="card sglang" href="../../sglang/python/sglang/srt/eplb/eplb_manager.py"
+               style="left:487px;top:650px;width:376px;height:140px">
+              <span class="step">STEP 08 · SGLANG TRIGGER</span>
+              <span class="card-title">forward_end / interval due</span>
+              <span class="card-copy">SGLang 掌握请求和 iteration 生命周期，决定何时 rebalance。</span>
+              <span class="card-code">EPLBManager.rebalance()</span>
+            </a>
+
+            <div class="card problem" style="left:891px;top:630px;width:348px;height:180px">
+              <span class="step">STEP 09 · CURRENT MLB L1</span>
+              <span class="card-title">去 MLB 全局表里找 EPLB runtime</span>
+              <span class="card-copy">stats bridge / manager 通过 default registry 重新找对象；first caller wins，多模型共享冲突。</span>
+              <span class="card-code">get_default_runtime() / drain_stats()</span>
+            </div>
+
+            <div class="card l1" style="left:1267px;top:630px;width:248px;height:180px">
+              <span class="step">STEP 10 · MLB L1 POLICY</span>
+              <span class="card-title">Compute placement</span>
+              <span class="card-copy">EPLB 算法、负载历史、policy、latest placement 都挂在专用 runtime。</span>
+              <span class="card-code">SGLangEPLBRuntime.compute_placement</span>
+            </div>
+
+            <a class="card sglang" href="../../sglang/python/sglang/srt/eplb/expert_location_updater.py"
+               style="left:226px;top:934px;width:383px;height:125px">
+              <span class="step">STEP 11 · SGLANG</span>
+              <span class="card-title">Apply expert weights</span>
+              <span class="card-copy">local copy / P2P / DRAM 或 disk recovery。</span>
+              <span class="card-code">ExpertLocationUpdater</span>
+            </a>
+
+            <div class="card problem" style="left:637px;top:920px;width:370px;height:145px">
+              <span class="step">STEP 12 · TWO SOURCES OF VISIBILITY</span>
+              <span class="card-title">MLB provider 与 SGLang metadata 不原子</span>
+              <span class="card-copy">新 placement 可能在权重搬运成功前被 L2 读到；MLB 状态和执行侧权威存在竞态。</span>
+              <span class="card-code">publish before apply completes?</span>
+            </div>
+
+            <a class="card sglang" href="../../sglang/python/sglang/srt/eplb/expert_location.py"
+               style="left:1035px;top:934px;width:392px;height:125px">
+              <span class="step">STEP 13 · NEXT FORWARD</span>
+              <span class="card-title">SGLang metadata 更新后继续执行</span>
+              <span class="card-copy">下一次 forward 读取新的 placement；但 L1/L2 并非同一实例状态。</span>
+              <span class="card-code">ExpertLocationMetadata</span>
+            </a>
+
+            <svg class="connector-labels" viewBox="0 0 1640 1120" aria-hidden="true">
+              <g class="flow-caption bad" transform="translate(767 58)">
+                <rect x="-39" y="-10" width="78" height="20" rx="5"/>
+                <text x="0" y="1">三个入口</text>
+              </g>
+              <g class="flow-caption" transform="translate(1288 250)">
+                <rect x="-46" y="-10" width="92" height="20" rx="5"/>
+                <text x="0" y="1">model ready</text>
+              </g>
+              <g class="flow-caption bad" transform="translate(877 294)">
+                <rect x="-39" y="-10" width="78" height="20" rx="5"/>
+                <text x="0" y="1">分支调用</text>
+              </g>
+              <g class="flow-caption" transform="translate(835 511)">
+                <rect x="-90" y="-10" width="180" height="20" rx="5"/>
+                <text x="0" y="1">TopK / dispatcher hooks</text>
+              </g>
+              <g class="flow-caption bad" transform="translate(877 617)">
+                <rect x="-55" y="-10" width="110" height="20" rx="5"/>
+                <text x="0" y="1">global lookup</text>
+              </g>
+              <g class="flow-caption" transform="translate(870 878)">
+                <rect x="-58" y="-10" width="116" height="20" rx="5"/>
+                <text x="0" y="1">candidate layout</text>
+              </g>
+              <g class="flow-caption bad" transform="translate(1021 909)">
+                <rect x="-51" y="-10" width="102" height="20" rx="5"/>
+                <text x="0" y="1">可见性竞态</text>
+              </g>
+              <g class="flow-caption" transform="translate(1572 615) rotate(-90)">
+                <rect x="-48" y="-10" width="96" height="20" rx="5"/>
+                <text x="0" y="1">next forward</text>
+              </g>
+            </svg>
+
+            <div class="note bad" style="left:818px;top:222px;width:316px">
+              问题 ① 没有真正的顶层 <code>MoELoadBalancer</code>
+            </div>
+            <div class="note bad" style="left:930px;top:489px;width:303px">
+              问题 ② 两个 policy 可能各做一次通信和写回
+            </div>
+            <div class="note bad" style="left:960px;top:820px;width:288px">
+              问题 ③ 生命周期所有权藏进 MLB 全局变量
+            </div>
+
+            <div class="summary-strip">
+              <strong>结果：M×N</strong>
+              <span>算法 runtime 按框架复制；状态分裂、启动顺序敏感、组合路径缺失、通信无法共享。</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="legend">
+        <span class="legend-item"><span class="swatch sg"></span>SGLang 生命周期 / 执行</span>
+        <span class="legend-item"><span class="swatch adapter"></span>SGLang Adapter 工作</span>
+        <span class="legend-item"><span class="swatch l1"></span>MLB L1 policy</span>
+        <span class="legend-item"><span class="swatch mlb"></span>当前架构问题</span>
+      </div>
+    </section>
+
+    <section class="figure target" id="target" hidden>
+      <header class="figure-head">
+        <div>
+          <div class="figure-kicker">FIGURE 02 · TO-BE</div>
+          <h2>目标：一个 MLB 实例贯穿同一生命周期，Adapter 与算法正交</h2>
+          <p class="figure-summary">
+            SGLang 仍然决定何时 init、forward、rebalance 和搬权重；MLB 只在这些既有
+            hook 上被调用。每个模型一个统一实例，Orchestrator 合并 policy 需求，
+            Adapter 只收集通用 observation 并一次性 materialize。
+          </p>
+        </div>
+        <div class="figure-badge">M policies + N adapters</div>
+      </header>
+
+      <div class="diagram-shell">
+        <div class="canvas-wrap">
+          <div class="canvas">
+            <div class="phase-band startup"></div>
+            <div class="phase-band forward"></div>
+            <div class="phase-band rebalance"></div>
+            <div class="phase-band publish"></div>
+            <div class="time-rail"></div>
+
+            <div class="phase-label startup">
+              <span class="phase-no">01</span>
+              <span class="phase-name">STARTUP</span>
+              <span class="phase-cn">模型启动 / 冷放置</span>
+            </div>
+            <div class="phase-label forward">
+              <span class="phase-no">02</span>
+              <span class="phase-name">EVERY FORWARD</span>
+              <span class="phase-cn">每层 MoE 路由</span>
+            </div>
+            <div class="phase-label rebalance">
+              <span class="phase-no">03</span>
+              <span class="phase-name">PERIODIC L1</span>
+              <span class="phase-cn">统计窗口 / 重放置</span>
+            </div>
+            <div class="phase-label publish">
+              <span class="phase-no">04</span>
+              <span class="phase-name">APPLY + PUBLISH</span>
+              <span class="phase-cn">搬权重 / 下一轮生效</span>
+            </div>
+
+            <svg class="connectors" viewBox="0 0 1640 1120" aria-hidden="true">
+              <defs>
+                <marker id="target-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+                  <path d="M0,0 L8,4 L0,8 Z" fill="#667b8e"/>
+                </marker>
+                <marker id="target-arrow-good" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+                  <path d="M0,0 L8,4 L0,8 Z" fill="#58d68d"/>
+                </marker>
+              </defs>
+
+              <path class="flow" style="marker-end:url(#target-arrow)" d="M430 144 L458 144"/>
+              <path class="flow good" style="marker-end:url(#target-arrow-good)" d="M753 144 L781 144"/>
+              <path class="flow good" style="marker-end:url(#target-arrow-good)" d="M1268 144 L1296 144"/>
+              <path class="flow" style="marker-end:url(#target-arrow)" d="M1418 204 L1418 247 L344 247 L344 328"/>
+
+              <path class="flow" style="marker-end:url(#target-arrow)" d="M459 388 L487 388"/>
+              <path class="flow good" style="marker-end:url(#target-arrow-good)" d="M863 388 L891 388"/>
+              <path class="flow" style="marker-end:url(#target-arrow)" d="M1239 388 L1267 388"/>
+              <path class="flow dashed" style="marker-end:url(#target-arrow)" d="M580 456 L580 518 L344 518 L344 650"/>
+              <path class="flow dashed" style="marker-end:url(#target-arrow)" d="M1391 456 L1391 530 L344 530 L344 650"/>
+
+              <path class="flow" style="marker-end:url(#target-arrow)" d="M459 710 L487 710"/>
+              <path class="flow good" style="marker-end:url(#target-arrow-good)" d="M863 710 L891 710"/>
+              <path class="flow good" style="marker-end:url(#target-arrow-good)" d="M1239 710 L1267 710"/>
+              <path class="flow" style="marker-end:url(#target-arrow)" d="M1391 778 L1391 875 L344 875 L344 934"/>
+
+              <path class="flow" style="marker-end:url(#target-arrow)" d="M609 989 L637 989"/>
+              <path class="flow good" style="marker-end:url(#target-arrow-good)" d="M1007 989 L1035 989"/>
+              <path class="flow dashed" style="marker-end:url(#target-arrow)" d="M1427 989 L1558 989 L1558 270 L1507 270"/>
+
+              <path class="flow good dashed" style="marker-end:url(#target-arrow-good)" d="M1058 468 L1058 553 L1160 553 L1160 625"/>
+
+              <text class="flow-label good" x="767" y="132">one instance</text>
+              <text class="flow-label" x="895" y="239">model ready</text>
+              <text class="flow-label good" x="877" y="376">single entry</text>
+              <text class="flow-label" x="835" y="510">observe load</text>
+              <text class="flow-label good" x="877" y="698">typed observation</text>
+              <text class="flow-label good" x="1255" y="545">shared state</text>
+              <text class="flow-label" x="870" y="867">candidate only</text>
+              <text class="flow-label good" x="1021" y="977">commit after success</text>
+              <text class="flow-label" x="1559" y="615" transform="rotate(-90 1559 615)">next forward</text>
+            </svg>
+
+            <a class="card sglang" href="../../sglang/python/sglang/srt/server_args.py"
+               style="left:226px;top:75px;width:204px;height:150px">
+              <span class="step">STEP 01 · SGLANG</span>
+              <span class="card-title">ServerArgs → MLBConfig</span>
+              <span class="card-copy">SGLang 解析 flags；Adapter 转统一配置。</span>
+              <span class="card-code">enabled_l1 / ordered_l2_pipeline</span>
+            </a>
+
+            <a class="card sglang" href="../../sglang/python/sglang/srt/model_executor/model_runner.py"
+               style="left:458px;top:75px;width:295px;height:140px">
+              <span class="step">STEP 02 · SGLANG OWNER</span>
+              <span class="card-title">ModelRunner.initialize()</span>
+              <span class="card-copy">每个 model / engine 显式持有一个 MLB 实例。</span>
+              <span class="card-code">self.moe_load_balancer = ...</span>
+            </a>
+
+            <div class="card orchestrator" style="left:781px;top:72px;width:487px;height:145px">
+              <span class="step">STEP 02 · ONE MoELoadBalancer INSTANCE</span>
+              <span class="card-title">同一引用注入 EPLBManager 与所有 TopK 层</span>
+              <div class="mini-stack">
+                <div class="mini good">State Store<em>placement / load / layer state</em></div>
+                <div class="mini good">L1 EPLB policy<em>low-frequency placement</em></div>
+                <div class="mini good">Ordered L2 pipeline<em>LPLB / LP-CF → Waterfill</em></div>
+              </div>
+            </div>
+
+            <a class="card sglang" href="../../sglang/python/sglang/srt/eplb/expert_location.py"
+               style="left:1296px;top:75px;width:242px;height:140px">
+              <span class="step">STEP 03 · SGLANG</span>
+              <span class="card-title">Initial placement ready</span>
+              <span class="card-copy">权重与 Adapter snapshot 同版本提交。</span>
+              <span class="card-code">committed PlacementSnapshot</span>
+            </a>
+
+            <a class="card sglang" href="../../sglang/python/sglang/srt/layers/moe/topk.py"
+               style="left:226px;top:328px;width:233px;height:140px">
+              <span class="step">STEP 04 · SGLANG</span>
+              <span class="card-title">Gate + logical TopK</span>
+              <span class="card-copy">TopK 只增加一个薄调用，不拼接具体算法。</span>
+              <span class="card-code">mlb.route_topk(layer_id, ...)</span>
+            </a>
+
+            <div class="card orchestrator" style="left:487px;top:308px;width:376px;height:180px">
+              <span class="step">STEP 05 · MLB ORCHESTRATOR</span>
+              <span class="card-title">合并需求，执行有序 L2 pipeline</span>
+              <div class="split-card">
+                <div class="half">LPLB / LP-CF<br>重选 routed replica</div>
+                <div class="arrow-word">→</div>
+                <div class="half">Waterfill<br>消费 post-LPLB rank load</div>
+              </div>
+              <span class="card-copy">policy 只读写 canonical RoutingState，不 import SGLang 类型。</span>
+            </div>
+
+            <div class="card adapter" style="left:891px;top:308px;width:348px;height:180px">
+              <span class="step">STEP 05 · ONE SGLANG ADAPTER</span>
+              <span class="card-title">collect once → materialize once</span>
+              <div class="pill-row">
+                <span class="pill">logical TopK</span>
+                <span class="pill">placement</span>
+                <span class="pill">rank load</span>
+                <span class="pill">one EP collective</span>
+                <span class="pill">DeepEP output</span>
+              </div>
+              <span class="card-copy">Adapter 只认识 observation 类型，不按 Waterfill/LPLB 分支。</span>
+            </div>
+
+            <a class="card sglang" href="../../sglang/python/sglang/srt/layers/moe/token_dispatcher/deepep.py"
+               style="left:1267px;top:328px;width:248px;height:140px">
+              <span class="step">STEP 06 · SGLANG</span>
+              <span class="card-title">DeepEP dispatch + MoE</span>
+              <span class="card-copy">只消费 Adapter 一次性写回的最终 TopK output。</span>
+              <span class="card-code">token_dispatcher/deepep.py</span>
+            </a>
+
+            <a class="card sglang" href="../../sglang/python/sglang/srt/eplb/expert_distribution.py"
+               style="left:226px;top:650px;width:233px;height:140px">
+              <span class="step">STEP 07 · SGLANG</span>
+              <span class="card-title">Record expert load</span>
+              <span class="card-copy">执行侧产生事实数据；框架对象不进入 core。</span>
+              <span class="card-code">native counters / hooks</span>
+            </a>
+
+            <a class="card sglang" href="../../sglang/python/sglang/srt/eplb/eplb_manager.py"
+               style="left:487px;top:650px;width:376px;height:140px">
+              <span class="step">STEP 08 · SGLANG TRIGGER</span>
+              <span class="card-title">forward_end / interval due</span>
+              <span class="card-copy">SGLang 决定“什么时候”；调用同一个实例的 L1 入口。</span>
+              <span class="card-code">mlb.rebalance(native_context)</span>
+            </a>
+
+            <div class="card adapter" style="left:891px;top:630px;width:348px;height:180px">
+              <span class="step">STEP 09 · SGLANG ADAPTER</span>
+              <span class="card-title">收集并规范化一次</span>
+              <span class="card-copy">drain native counters → EP all-reduce → typed PlacementRequest；通信组仍由 SGLang 控制。</span>
+              <span class="card-code">collect_placement_observation()</span>
+            </div>
+
+            <div class="card l1" style="left:1267px;top:630px;width:248px;height:180px">
+              <span class="step">STEP 10 · MLB L1 POLICY</span>
+              <span class="card-title">EPLB candidate plan</span>
+              <span class="card-copy">Orchestrator 用内部 history/state 调 L1，输出未发布的 PlacementPlan。</span>
+              <span class="card-code">request → policy → candidate</span>
+            </div>
+
+            <a class="card sglang" href="../../sglang/python/sglang/srt/eplb/expert_location_updater.py"
+               style="left:226px;top:934px;width:383px;height:125px">
+              <span class="step">STEP 11 · SGLANG</span>
+              <span class="card-title">Adapter 转 native maps；SGLang 搬权重</span>
+              <span class="card-copy">真实模型、权重、P2P 和失败恢复始终留在 SGLang。</span>
+              <span class="card-code">apply_placement_plan()</span>
+            </a>
+
+            <div class="card success" style="left:637px;top:920px;width:370px;height:145px">
+              <span class="step">STEP 12 · ATOMIC COMMIT</span>
+              <span class="card-title">apply 成功后才 publish</span>
+              <span class="card-copy">Adapter 确认 SGLang metadata 生效；Orchestrator 再提交相同版本的 PlacementSnapshot。</span>
+              <span class="card-code">candidate → apply → commit(version+1)</span>
+            </div>
+
+            <a class="card sglang" href="../../sglang/python/sglang/srt/eplb/expert_location.py"
+               style="left:1035px;top:934px;width:392px;height:125px">
+              <span class="step">STEP 13 · NEXT FORWARD</span>
+              <span class="card-title">同一 MLB 实例消费最新 committed state</span>
+              <span class="card-copy">L2 自动按 layer_id 读取 L1 的最新 snapshot；SGLang 无需手工接线。</span>
+              <span class="card-code">one owner · one version · one path</span>
+            </a>
+
+            <svg class="connector-labels" viewBox="0 0 1640 1120" aria-hidden="true">
+              <g class="flow-caption good" transform="translate(767 58)">
+                <rect x="-52" y="-10" width="104" height="20" rx="5"/>
+                <text x="0" y="1">one instance</text>
+              </g>
+              <g class="flow-caption" transform="translate(1288 250)">
+                <rect x="-46" y="-10" width="92" height="20" rx="5"/>
+                <text x="0" y="1">model ready</text>
+              </g>
+              <g class="flow-caption good" transform="translate(877 294)">
+                <rect x="-48" y="-10" width="96" height="20" rx="5"/>
+                <text x="0" y="1">single entry</text>
+              </g>
+              <g class="flow-caption" transform="translate(835 511)">
+                <rect x="-48" y="-10" width="96" height="20" rx="5"/>
+                <text x="0" y="1">observe load</text>
+              </g>
+              <g class="flow-caption good" transform="translate(877 617)">
+                <rect x="-70" y="-10" width="140" height="20" rx="5"/>
+                <text x="0" y="1">typed observation</text>
+              </g>
+              <g class="flow-caption good" transform="translate(1255 555)">
+                <rect x="-52" y="-10" width="104" height="20" rx="5"/>
+                <text x="0" y="1">shared state</text>
+              </g>
+              <g class="flow-caption" transform="translate(870 878)">
+                <rect x="-57" y="-10" width="114" height="20" rx="5"/>
+                <text x="0" y="1">candidate only</text>
+              </g>
+              <g class="flow-caption good" transform="translate(1021 909)">
+                <rect x="-79" y="-10" width="158" height="20" rx="5"/>
+                <text x="0" y="1">commit after success</text>
+              </g>
+              <g class="flow-caption" transform="translate(1572 615) rotate(-90)">
+                <rect x="-48" y="-10" width="96" height="20" rx="5"/>
+                <text x="0" y="1">next forward</text>
+              </g>
+            </svg>
+
+            <div class="note good" style="left:818px;top:222px;width:316px">
+              原则 ① 每个模型一个实例，不是进程全局单例
+            </div>
+            <div class="note good" style="left:930px;top:489px;width:303px">
+              原则 ② LPLB → Waterfill，共享一次通信和一次写回
+            </div>
+            <div class="note good" style="left:960px;top:820px;width:288px">
+              原则 ③ SGLang 管时序；Orchestrator 管策略组合
+            </div>
+
+            <div class="summary-strip">
+              <strong>结果：M+N</strong>
+              <span>M 个框架无关 policy + N 套框架 Adapter + 1 个统一 Orchestrator；L1/L2 通过实例内部状态自然连接。</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="legend">
+        <span class="legend-item"><span class="swatch sg"></span>SGLang：生命周期 / 通信 / 权重</span>
+        <span class="legend-item"><span class="swatch adapter"></span>Adapter：框架转换与采集</span>
+        <span class="legend-item"><span class="swatch mlb"></span>MoELoadBalancer Orchestrator</span>
+        <span class="legend-item"><span class="swatch l1"></span>L1 EPLB policy</span>
+        <span class="legend-item"><span class="swatch l2"></span>L2 ordered policy pipeline</span>
+      </div>
+
+      <div class="comparison" aria-label="目标设计关键约束">
+        <div class="comparison-card">
+          <strong>实例所有权</strong>
+          <span><code>ModelRunner</code> 创建、持有、注入、销毁 MLB；删除 process-wide default runtime registry。</span>
+        </div>
+        <div class="comparison-card">
+          <strong>调用方向</strong>
+          <span>SGLang 调统一入口；Orchestrator 调 Adapter 收集输入，再调 policies，最后让 Adapter 写回。</span>
+        </div>
+        <div class="comparison-card">
+          <strong>状态一致性</strong>
+          <span>L1 plan 是 candidate；只有 SGLang 权重和 metadata 成功应用后，才 commit 给后续 L2。</span>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    (() => {
+      let zoom = 1;
+      const root = document.documentElement;
+      const reset = document.getElementById("zoom-reset");
+
+      function applyZoom(next) {
+        zoom = Math.min(1.45, Math.max(.78, next));
+        root.style.setProperty("--zoom", zoom);
+        reset.textContent = `${Math.round(zoom * 100)}%`;
+      }
+
+      document.getElementById("zoom-in").addEventListener("click", () => applyZoom(zoom + .1));
+      document.getElementById("zoom-out").addEventListener("click", () => applyZoom(zoom - .1));
+      reset.addEventListener("click", () => applyZoom(1));
+
+      const figures = {
+        current: document.getElementById("current"),
+        target: document.getElementById("target"),
+      };
+      const viewTabs = [...document.querySelectorAll("[data-view]")];
+      let activeView = "current";
+
+      function showView(view) {
+        if (!figures[view]) return;
+        activeView = view;
+        Object.entries(figures).forEach(([name, figure]) => {
+          figure.hidden = name !== view;
+        });
+        viewTabs.forEach((tab) => {
+          const selected = tab.dataset.view === view;
+          tab.setAttribute("aria-selected", String(selected));
+          tab.tabIndex = selected ? 0 : -1;
+        });
+      }
+
+      function toggleView() {
+        showView(activeView === "current" ? "target" : "current");
+      }
+
+      viewTabs.forEach((tab, index) => {
+        tab.addEventListener("click", () => showView(tab.dataset.view));
+        tab.addEventListener("keydown", (event) => {
+          if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+          event.preventDefault();
+          const offset = event.key === "ArrowRight" ? 1 : -1;
+          const next = viewTabs[(index + offset + viewTabs.length) % viewTabs.length];
+          showView(next.dataset.view);
+          next.focus();
+        });
+      });
+
+      Object.values(figures).forEach((figure) => {
+        const shell = figure.querySelector(".diagram-shell");
+        shell.setAttribute("role", "button");
+        shell.setAttribute("tabindex", "0");
+        shell.setAttribute("aria-label", "点击切换 Current 与 Target 图");
+        shell.addEventListener("click", (event) => {
+          if (event.target.closest("a, button")) return;
+          if (window.getSelection()?.toString()) return;
+          toggleView();
+        });
+        shell.addEventListener("keydown", (event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          toggleView();
+        });
+      });
+
+      showView("current");
+    })();
+  </script>
+</body>
+</html>
