@@ -502,7 +502,9 @@
       SGLang Adapter；紫色是 EPLB Policy。冷启动仍保留 SGLang 的
       <code>init_by_eplb()</code> 入口，
       但布局计算改为 Adapter → EPLB Policy；步骤 9+10 复用 SGLang 自己的 recording pipeline，
-      Adapter 只读取最终统计。每 N 次 forward 的时钟仍由 SGLang EPLBManager 掌握；
+      <strong>dump、汇总和 reset 都由 SGLang 执行</strong>，Adapter 不执行 dump，
+      只把 SGLang 已经生成的 dump result 翻译成 <code>PlacementStats</code>。
+      每 N 次 forward 的时钟仍由 SGLang EPLBManager 掌握；
       到周期后由同一个 EPLB Policy 依次执行 threshold/skip 判断和 placement 算法。
       这是 Review 提议的后续 L1 重构，不是当前 Stage 3 POC 合约。
     </p>
@@ -837,8 +839,8 @@
 
           <!-- Adapter converts SGLang's completed dump into a framework-neutral view. -->
           <rect class="owner-frame adapter" x="340" y="772" width="280" height="48" rx="12"/>
-          <text class="owner-label" x="480" y="792" text-anchor="middle">ADAPTER · DUMP → PlacementStats</text>
-          <text class="owner-note" x="480" y="809" text-anchor="middle">只做字段/类型翻译，不再保存第二份窗口</text>
+          <text class="owner-label" x="480" y="792" text-anchor="middle">ADAPTER · DUMP RESULT → PlacementStats</text>
+          <text class="owner-note" x="480" y="809" text-anchor="middle">不执行 dump；只翻译 SGLang 已生成的结果</text>
 
           <!-- Adapter translates the candidate plan, but does not invoke the updater. -->
           <rect class="owner-frame adapter" x="690" y="772" width="430" height="48" rx="12"/>
@@ -846,7 +848,7 @@
           <text class="owner-note" x="905" y="809" text-anchor="middle">只转换 candidate；节点 13 仍由 SGLang 主动执行</text>
 
           <!-- Both cold-start and periodic paths use the same Adapter and EPLB Policy. -->
-          <rect class="target-callout" x="1288" y="55" width="200" height="232" rx="10"/>
+          <rect class="target-callout" x="1288" y="55" width="200" height="250" rx="10"/>
           <text class="target-callout-title" x="1304" y="78">TARGET CALL PATHS</text>
           <text class="target-callout-copy" x="1304" y="101">COLD START</text>
           <text class="target-callout-copy" x="1304" y="122">Glue: init_by_eplb()</text>
@@ -854,9 +856,10 @@
           <text class="target-callout-copy" x="1304" y="164">→ EPLB Policy: initial plan</text>
           <text class="target-callout-copy" x="1304" y="185">→ SGLang: metadata</text>
           <text class="target-callout-copy" x="1304" y="212">PERIODIC</text>
-          <text class="target-callout-copy" x="1304" y="233">SGLang every-N trigger</text>
-          <text class="target-callout-copy" x="1304" y="254">→ Adapter → EPLB Policy</text>
-          <text class="target-callout-copy" x="1304" y="275">→ SGLang: Updater</text>
+          <text class="target-callout-copy" x="1304" y="233">SGLang cadence → dump</text>
+          <text class="target-callout-copy" x="1304" y="254">→ Adapter: translate result</text>
+          <text class="target-callout-copy" x="1304" y="275">→ Policy: threshold / plan</text>
+          <text class="target-callout-copy" x="1304" y="296">→ SGLang: Updater</text>
         </g>
       </svg>
     </section>
@@ -912,8 +915,8 @@
         <span>步骤 2 的 Glue 调用 <code>init_by_eplb()</code>。步骤 3 的“创建并保存 metadata”仍属于 SGLang；只把其中“普通输入算出 candidate maps”的嵌套调用替换为 Adapter 构造 <code>PlacementRequest</code> → EPLB Policy 生成 plan → Adapter 返回 maps。步骤 12 复用同一个 Policy。</span>
       </div>
       <div class="boundary-card sglang">
-        <strong>Recording · 步骤 9+10 都留在 SGLang</strong>
-        <span>TopK/dispatcher 产生 physical count；SGLang 原生 recorder 保存窗口，并按官方当前语义使用默认 distributed group 完成 physical→logical、all-reduce 和 utilization 汇总。Adapter 只把最终 dump 翻译为 PlacementStats，不再维护第二份 buffer。</span>
+        <strong>SGLang dump；Adapter 只翻译结果</strong>
+        <span>TopK/dispatcher 产生 physical count；SGLang 原生 recorder 保存窗口，并按官方当前语义使用默认 distributed group 完成 physical→logical、all-reduce、utilization 汇总和 reset。黄色 Adapter 不发起 dump，只接收已经生成的 payload，把 <code>logical_count</code> 和 <code>average_utilization_rate_over_window</code> 翻译成 <code>PlacementStats</code>；它不生成 <code>PlacementSnapshot</code>，也不维护第二份统计窗口。</span>
       </div>
       <div class="boundary-card policy">
         <strong>EPLB Policy · 判断并生成布局</strong>
