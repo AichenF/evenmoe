@@ -17,6 +17,8 @@
       --line-strong: #52677b;
       --sg: #56a9ff;
       --sg-fill: #10243a;
+      --glue: #43d6c2;
+      --glue-fill: #102f2b;
       --adapter: #efb64f;
       --adapter-fill: #2c2212;
       --mlb: #ff6f83;
@@ -400,6 +402,11 @@
       background: var(--sg-fill);
     }
 
+    .card.glue {
+      border-color: var(--glue);
+      background: var(--glue-fill);
+    }
+
     .card.adapter {
       border-color: var(--adapter);
       background: var(--adapter-fill);
@@ -439,6 +446,7 @@
     }
 
     .card.sglang .step { color: #8bc5ff; }
+    .card.glue .step { color: #85eadc; }
     .card.adapter .step { color: #f4cb79; }
     .card.orchestrator .step { color: #ff9cab; }
     .card.l1 .step { color: #ceb3ff; }
@@ -498,6 +506,22 @@
 
     .mini.bad { border-color: rgba(255,117,131,.5); }
     .mini.good { border-color: rgba(88,214,141,.5); }
+    .mini.adapter-role {
+      border-color: rgba(239,182,79,.7);
+      background: rgba(92,65,15,.3);
+    }
+    .mini.glue-role {
+      border-color: rgba(67,214,194,.7);
+      background: rgba(20,78,72,.3);
+    }
+    .mini.orchestrator-role {
+      border-color: rgba(255,111,131,.7);
+      background: rgba(91,28,40,.28);
+    }
+    .mini.policy-role {
+      border-color: rgba(181,140,255,.7);
+      background: rgba(67,42,103,.28);
+    }
 
     .pill-row {
       display: flex;
@@ -692,6 +716,7 @@
     }
 
     .swatch.sg { border-color: var(--sg); background: var(--sg-fill); }
+    .swatch.glue { border-color: var(--glue); background: var(--glue-fill); }
     .swatch.adapter { border-color: var(--adapter); background: var(--adapter-fill); }
     .swatch.mlb { border-color: var(--mlb); background: var(--mlb-fill); }
     .swatch.l1 { border-color: var(--l1); background: var(--l1-fill); }
@@ -699,7 +724,7 @@
 
     .comparison {
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
+      grid-template-columns: repeat(4, 1fr);
       gap: 10px;
       margin-top: 16px;
     }
@@ -747,9 +772,10 @@
         <h1>同一条 SGLang 推理时间线，MLB 应该出现在哪里？</h1>
         <p class="hero-copy">
           “当前”和“目标”使用完全相同的阶段和步骤，点击图面即可原位切换。
-          当前实现中 EPLB、Waterfill、LP-CF 各自创建运行对象；目标设计中由一个顶层
-          <code>MoELoadBalancer</code> 统一安排 L1/L2，实际权重布局始终以
-          SGLang 保存的布局信息为准。
+          “当前”区分 SGLang main 已有的 EPLB / LPLB / Waterfill 与 MLB 仓库中的 POC runtime；
+          “目标”是尚未实现的建议设计：SGLang 只持有一个 <code>SGLangMoELoadBalancer</code>
+          Adapter/Façade，由它调用框架无关的 <code>MoELoadBalancer</code> Orchestrator。
+          无论采用哪种设计，实际权重布局都以 SGLang 保存的信息为准。
         </p>
       </div>
       <div class="controls" aria-label="图表缩放">
@@ -790,11 +816,12 @@
       <header class="figure-head">
         <div>
           <div class="figure-kicker">图一 · 当前实现</div>
-          <h2>当前：EPLB、Waterfill、LP-CF 各自创建运行对象</h2>
+          <h2>当前：SGLang main 已固定执行 LPLB → Waterfill；MLB POC 仍有多个 runtime</h2>
           <p class="figure-summary">
-            SGLang 的大时序仍然成立，但 MLB 在三个不相连的入口出现：
-            进程级 <code>SGLangEPLBRuntime</code>、每层 <code>WaterfillRuntime</code>、
-            每层 <code>LPCFRuntime</code>。它们各自保存算法和状态，没有统一的顶层对象负责协调。
+            已核对 SGLang <code>origin/main@f01a0c7f</code>：TopK 中先执行每层
+            <code>LPLBSolver</code>，再执行每个 TopK 上的 <code>WaterfillBalancer</code>。
+            MLB 仓库当前则另有 <code>SGLangEPLBRuntime</code>、<code>LPCFRuntime</code> 和
+            <code>WaterfillRuntime</code>；SGLang main 尚未导入这些 MLB POC 对象。
           </p>
         </div>
         <div class="figure-badge">M 种框架 × N 种策略</div>
@@ -863,7 +890,7 @@
               <path class="flow bad" d="M1007 989 L1035 989"/>
               <path class="flow dashed" d="M1427 989 L1558 989 L1558 270 L1507 270"/>
 
-              <text class="flow-label" x="835" y="510">两处都记录负载</text>
+              <text class="flow-label" x="835" y="510">TopK 或 dispatcher hook</text>
               <text class="flow-label" x="877" y="698">最近 N 轮负载</text>
               <text class="flow-label" x="870" y="867">候选布局</text>
               <text class="flow-label" x="1559" y="615" transform="rotate(-90 1559 615)">下一轮使用新布局</text>
@@ -873,71 +900,71 @@
                style="left:226px;top:75px;width:204px;height:150px">
               <span class="step">步骤 01 · SGLANG</span>
               <span class="card-title">读取启动配置</span>
-              <span class="card-copy">EPLB / Waterfill / LP-CF 配置。</span>
+              <span class="card-copy">EPLB、<code>ep_dispatch_algorithm=lp</code> 和 Waterfill 配置。</span>
               <span class="card-code">server_args.py</span>
             </a>
 
-            <a class="card sglang" href="../../sglang/python/sglang/srt/model_executor/model_runner.py"
+            <a class="card glue" href="../../sglang/python/sglang/srt/model_executor/model_runner.py"
                style="left:458px;top:75px;width:295px;height:140px">
-              <span class="step">步骤 02 · SGLANG 初始化</span>
-              <span class="card-title">初始化 ModelRunner</span>
-              <span class="card-copy">初始化统计记录器和管理器；准备各算法对象。</span>
-              <span class="card-code">model_runner.py::_prepare_moe_topk</span>
+              <span class="step">步骤 02 · SGLANG GLUE（初始化接线）</span>
+              <span class="card-title">初始化 SGLang 的 EPLB 基础设施</span>
+              <span class="card-copy">main 依次准备 metadata、recorder、LPLB solvers 和 EPLBManager；加载模型后 prepare Waterfill。</span>
+              <span class="card-code">ModelRunner.initialize()</span>
             </a>
 
             <div class="card problem" style="left:781px;top:72px;width:487px;height:145px">
-              <span class="step">步骤 02 · 当前的 MLB 对象</span>
-              <span class="card-title">MLB 被拆成多套独立运行对象</span>
+              <span class="step">步骤 03 · 当前 MLB POC 的 EPLB 冷启动实现</span>
+              <span class="card-title">算法专用 Runtime 计算并立即保存 plan</span>
               <div class="mini-stack">
-                <div class="mini bad">SGLangEPLBRuntime<em>L1 统计、布局计算、结果提供</em></div>
-                <div class="mini bad">WaterfillRuntime × layer<em>每层各有适配和路由对象</em></div>
-                <div class="mini bad">LPCFRuntime × layer<em>每层各有适配和路由对象</em></div>
+                <div class="mini bad">SGLang init_by_eplb()<em>预期的 SGLang Glue 调用点</em></div>
+                <div class="mini bad">SGLangEPLBRuntime<em>Recorder + EPLB Planner</em></div>
+                <div class="mini bad">Provider.update_with(plan)<em>候选 plan 立即对 L2 可见</em></div>
               </div>
             </div>
 
-            <a class="card sglang" href="../../sglang/python/sglang/srt/eplb/expert_location.py"
+            <a class="card sglang" href="../../sglang/python/sglang/srt/layers/moe/fused_moe_triton/layer.py"
                style="left:1296px;top:75px;width:242px;height:140px">
-              <span class="step">步骤 03 · SGLANG</span>
-              <span class="card-title">初始布局准备完成</span>
-              <span class="card-copy">权重加载完成；实际布局以 SGLang 保存的信息为准。</span>
-              <span class="card-code">ExpertLocationMetadata</span>
+              <span class="step">步骤 04 · SGLANG</span>
+              <span class="card-title">按初始 metadata 加载权重</span>
+              <span class="card-copy">把 checkpoint 中的逻辑专家加载到本 rank 的物理槽位。</span>
+              <span class="card-code">metadata → local physical slots</span>
             </a>
 
             <a class="card sglang" href="../../sglang/python/sglang/srt/layers/moe/topk.py"
                style="left:226px;top:328px;width:233px;height:140px">
-              <span class="step">步骤 04 · SGLANG</span>
+              <span class="step">步骤 05 · SGLANG</span>
               <span class="card-title">选择逻辑专家 TopK</span>
               <span class="card-copy">每个 MoE 层选出逻辑专家编号和对应权重。</span>
               <span class="card-code">TopK.forward()</span>
             </a>
 
             <div class="card problem" style="left:487px;top:308px;width:376px;height:180px">
-              <span class="step">步骤 05 · 当前的 MLB L2</span>
-              <span class="card-title">按算法选择并直接调用各自对象</span>
+              <span class="step">步骤 06A · 当前 SGLANG MAIN 的 L2</span>
+              <span class="card-title">TopK 固定顺序执行两个独立实现</span>
               <div class="split-card">
-                <div class="half">WaterfillRuntime<br>采集 → 汇总 → 调整 → 写回</div>
-                <div class="arrow-word">或</div>
-                <div class="half">LPCFRuntime<br>采集 → 汇总 → 调整 → 写回</div>
+                <div class="half">LPLBSolver × layer<br>count → AR → replica map</div>
+                <div class="arrow-word">→</div>
+                <div class="half">WaterfillBalancer × TopK<br>count → optional AR → shared slot</div>
               </div>
-              <span class="card-copy">每个算法都立即写回结果，无法先做 LPLB、再做 Waterfill。</span>
+              <span class="card-copy">main 已支持这个顺序，但组合逻辑硬编码在 TopK，不是统一 MLB Pipeline。</span>
             </div>
 
             <div class="card adapter" style="left:891px;top:308px;width:348px;height:180px">
-              <span class="step">步骤 05 · 重复的框架适配工作</span>
-              <span class="card-title">每个算法都重复做相同转换</span>
+              <span class="step">步骤 06B · 当前 MLB POC 的 L2 对象</span>
+              <span class="card-title">每种算法各有 SGLang Runtime</span>
               <div class="pill-row">
-                <span class="pill">统计专家负载</span>
-                <span class="pill">多卡汇总</span>
-                <span class="pill">组装输入</span>
-                <span class="pill">生成 DeepEP 编号</span>
-                <span class="pill">生成最终输出</span>
+                <span class="pill">LPCFRuntime × layer</span>
+                <span class="pill">WaterfillRuntime × layer</span>
+                <span class="pill">各自组装 Request</span>
+                <span class="pill">各自处理通信</span>
+                <span class="pill">各自写回 TopK</span>
               </div>
-              <span class="card-copy">适配层依赖具体算法；每增加一种策略就要再复制一套。</span>
+              <span class="card-copy">没有统一入口；增加策略仍要增加 framework-specific runtime。</span>
             </div>
 
             <a class="card sglang" href="../../sglang/python/sglang/srt/layers/moe/token_dispatcher/deepep.py"
                style="left:1267px;top:328px;width:248px;height:140px">
-              <span class="step">步骤 06 · SGLANG</span>
+              <span class="step">步骤 07 · SGLANG</span>
               <span class="card-title">DeepEP 分发并执行 MoE</span>
               <span class="card-copy">使用最终的物理专家编号，执行专家计算。</span>
               <span class="card-code">token_dispatcher/deepep.py</span>
@@ -945,61 +972,61 @@
 
             <a class="card sglang" href="../../sglang/python/sglang/srt/eplb/expert_distribution.py"
                style="left:226px;top:650px;width:233px;height:140px">
-              <span class="step">步骤 07 · SGLANG</span>
-              <span class="card-title">记录专家负载</span>
-              <span class="card-copy">在 TopK 和分发位置记录各物理专家的负载。</span>
+              <span class="step">步骤 08 · SGLANG</span>
+              <span class="card-title">每层只更新临时计数</span>
+              <span class="card-copy">TopK 或 dispatcher hook 写本次 forward 对应 layer 的 physical count。</span>
               <span class="card-code">expert_distribution.py</span>
             </a>
 
             <a class="card sglang" href="../../sglang/python/sglang/srt/eplb/eplb_manager.py"
                style="left:487px;top:650px;width:376px;height:140px">
-              <span class="step">步骤 08 · SGLANG 触发</span>
-              <span class="card-title">本轮结束 / 到达重布局周期</span>
-              <span class="card-copy">SGLang 掌握推理时序，决定什么时候重新计算布局。</span>
-              <span class="card-code">EPLBManager.rebalance()</span>
+              <span class="step">步骤 09 · SGLANG 触发</span>
+              <span class="card-title">整次 forward 结束后 append；cadence +1</span>
+              <span class="card-copy">所有本 rank 层完成后才 append 一条完整记录；只有每 N 次进入 rebalance。</span>
+              <span class="card-code">with_forward_pass() → on_forward_pass_end()</span>
             </a>
 
             <div class="card l1" style="left:891px;top:630px;width:348px;height:180px">
-              <span class="step">步骤 09 · MLB L1 统计</span>
-              <span class="card-title">读取最近一段负载统计</span>
-              <span class="card-copy">EPLBRecorder 取出最近 N 轮前向推理汇总的逻辑专家负载，用来计算新布局。</span>
-              <span class="card-code">runtime.drain_stats()</span>
+              <span class="step">步骤 10 · MLB L1 统计</span>
+              <span class="card-title">Runtime drain Recorder，并做 skip 判断</span>
+              <span class="card-copy">当前 MLB POC 的 EPLBRecorder 汇总窗口；SGLang 仍负责触发和跨 rank 通信。</span>
+              <span class="card-code">runtime.drain_for_rebalance(...)</span>
             </div>
 
             <div class="card l1" style="left:1267px;top:630px;width:248px;height:180px">
-              <span class="step">步骤 10 · MLB L1 策略</span>
-              <span class="card-title">计算候选布局</span>
-              <span class="card-copy">EPLB 根据逻辑专家负载和机器拓扑，计算候选布局。</span>
+              <span class="step">步骤 11 · MLB L1 策略</span>
+              <span class="card-title">计算并立即 publish 候选布局</span>
+              <span class="card-copy">Planner 生成 plan；Runtime 在 SGLang apply 前调用 Provider.update_with(plan)。</span>
               <span class="card-code">SGLangEPLBRuntime.compute_placement</span>
             </div>
 
             <a class="card sglang" href="../../sglang/python/sglang/srt/eplb/expert_location_updater.py"
-               style="left:226px;top:934px;width:383px;height:125px">
-              <span class="step">步骤 11 · SGLANG</span>
-              <span class="card-title">搬移专家权重</span>
-              <span class="card-copy">通过本地复制、P2P、内存或磁盘恢复来搬移权重。</span>
-              <span class="card-code">ExpertLocationUpdater</span>
+              style="left:226px;top:934px;width:383px;height:125px">
+              <span class="step">步骤 12 · SGLANG</span>
+              <span class="card-title">按 candidate 搬移专家权重</span>
+              <span class="card-copy">先执行 unchanged / local copy / P2P；此时 candidate 还未全部生效。</span>
+              <span class="card-code">ExpertLocationUpdater.update(...)</span>
             </a>
 
             <div class="card problem" style="left:637px;top:920px;width:370px;height:145px">
-              <span class="step">步骤 12 · 过早公布候选布局</span>
+              <span class="step">步骤 13 · 过早公布候选布局</span>
               <span class="card-title">MLB 提前公布候选布局</span>
               <span class="card-copy">MLB 已公布新布局，但 SGLang 还没有完成权重搬移和布局信息更新。</span>
               <span class="card-code">provider.update_with(plan) before apply</span>
             </div>
 
             <a class="card sglang" href="../../sglang/python/sglang/srt/eplb/expert_location.py"
-               style="left:1035px;top:934px;width:392px;height:125px">
-              <span class="step">步骤 13 · 下一轮推理</span>
-              <span class="card-title">SGLang 完成权重与布局信息更新</span>
-              <span class="card-copy">真实布局到这里才生效；此前 MLB 公布的布局已经领先于实际权重。</span>
-              <span class="card-code">ExpertLocationMetadata.update(...)</span>
+              style="left:1035px;top:934px;width:392px;height:125px">
+              <span class="step">步骤 14 · 下一轮推理</span>
+              <span class="card-title">SGLang 更新 metadata，再完成必要恢复</span>
+              <span class="card-copy">metadata.update 后若有缺失权重，再从 DRAM/磁盘恢复；完成后才安全继续。</span>
+              <span class="card-code">update_expert_location_with_recovery(...)</span>
             </a>
 
             <svg class="connector-labels" viewBox="0 0 1640 1120" aria-hidden="true">
               <g class="flow-caption" transform="translate(835 511)">
-                <rect x="-55" y="-10" width="110" height="20" rx="5"/>
-                <text x="0" y="1">两处都记录负载</text>
+                <rect x="-76" y="-10" width="152" height="20" rx="5"/>
+                <text x="0" y="1">TopK 或 dispatcher hook</text>
               </g>
               <g class="flow-caption" transform="translate(877 617)">
                 <rect x="-50" y="-10" width="100" height="20" rx="5"/>
@@ -1027,7 +1054,7 @@
 
             <div class="summary-strip">
               <strong>结果：M×N</strong>
-              <span>同一算法的运行对象随框架重复；L1/L2 无法组合、通信无法共享，而且候选布局公布得太早。</span>
+              <span>SGLang main 的组合顺序写死在 TopK；MLB POC 仍按算法增加 runtime，dynamic 路径可能重复通信，而且 L1 candidate publish 早于 SGLang apply。</span>
             </div>
           </div>
         </div>
@@ -1035,6 +1062,7 @@
 
       <div class="legend">
         <span class="legend-item"><span class="swatch sg"></span>SGLang 生命周期 / 执行</span>
+        <span class="legend-item"><span class="swatch glue"></span>SGLang Glue：初始化接线</span>
         <span class="legend-item"><span class="swatch adapter"></span>SGLang 适配工作</span>
         <span class="legend-item"><span class="swatch l1"></span>MLB L1 策略</span>
         <span class="legend-item"><span class="swatch mlb"></span>当前架构问题</span>
@@ -1045,11 +1073,12 @@
       <header class="figure-head">
         <div>
           <div class="figure-kicker">图二 · 目标设计</div>
-          <h2>目标：一个顶层 MLB 实例编排 L1 / L2，SGLang 保持执行权威</h2>
+          <h2>目标建议：SGLang 只持有一个 Adapter 实例；Adapter 内部调用统一 Orchestrator</h2>
           <p class="figure-summary">
             SGLang 仍然决定何时初始化、前向推理、重新计算布局和搬权重；MLB 只在这些固定位置
-            被调用。顶层 MLB 负责协调各策略，SGLang 适配层只采集一次通用信息并只写回一次结果；
-            当前有效布局始终读取 SGLang 保存的布局信息。
+            被调用。建议新增一个由 ModelRunner 唯一持有的 <code>SGLangMoELoadBalancer</code>；
+            它作为统一 Adapter/Façade 持有框架无关的 <code>MoELoadBalancer</code> Orchestrator。
+            冷启动和周期重布局复用同一个 EPLB Policy；L2 始终从 SGLang 已生效的 metadata 读取 placement。
           </p>
         </div>
         <div class="figure-badge">M 种策略 + N 种框架接入</div>
@@ -1100,11 +1129,12 @@
               <path class="flow good" style="marker-end:url(#target-arrow-good)" d="M1268 144 L1296 144"/>
               <path class="flow" style="marker-end:url(#target-arrow)" d="M1418 204 L1418 247 L344 247 L344 328"/>
 
-              <path class="flow" style="marker-end:url(#target-arrow)" d="M459 388 L487 388"/>
-              <path class="flow good" style="marker-end:url(#target-arrow-good)" d="M863 388 L891 388"/>
-              <path class="flow" style="marker-end:url(#target-arrow)" d="M1239 388 L1267 388"/>
+              <path class="flow" style="marker-end:url(#target-arrow)" d="M441 388 L465 388"/>
+              <path class="flow good" style="marker-end:url(#target-arrow-good)" d="M720 388 L744 388"/>
+              <path class="flow good" style="marker-end:url(#target-arrow-good)" d="M1119 388 L1143 388"/>
+              <path class="flow" style="marker-end:url(#target-arrow)" d="M1323 388 L1347 388"/>
               <path class="flow dashed" style="marker-end:url(#target-arrow)" d="M580 456 L580 518 L344 518 L344 650"/>
-              <path class="flow dashed" style="marker-end:url(#target-arrow)" d="M1391 456 L1391 530 L344 530 L344 650"/>
+              <path class="flow dashed" style="marker-end:url(#target-arrow)" d="M1442 456 L1442 530 L344 530 L344 650"/>
 
               <path class="flow" style="marker-end:url(#target-arrow)" d="M459 710 L487 710"/>
               <path class="flow good" style="marker-end:url(#target-arrow-good)" d="M863 710 L891 710"/>
@@ -1115,153 +1145,147 @@
               <path class="flow good" style="marker-end:url(#target-arrow-good)" d="M1007 989 L1035 989"/>
               <path class="flow dashed" style="marker-end:url(#target-arrow)" d="M1427 989 L1558 989 L1558 270 L1507 270"/>
 
-              <path class="flow good dashed" style="marker-end:url(#target-arrow-good)" d="M1058 468 L1058 553 L1160 553 L1160 625"/>
-
-              <text class="flow-label good" x="1255" y="545">共享同一份负载数据</text>
               <text class="flow-label" x="870" y="867">只生成候选布局</text>
-              <text class="flow-label good" x="1021" y="977">布局信息已更新</text>
               <text class="flow-label" x="1559" y="615" transform="rotate(-90 1559 615)">下一轮使用新布局</text>
             </svg>
 
             <a class="card sglang" href="../../sglang/python/sglang/srt/server_args.py"
                style="left:226px;top:75px;width:204px;height:150px">
               <span class="step">步骤 01 · SGLANG</span>
-              <span class="card-title">读取并转换启动配置</span>
-              <span class="card-copy">SGLang 读取启动参数；适配层转成 MLB 的统一配置。</span>
-              <span class="card-code">enabled_l1 / ordered_l2_pipeline</span>
+              <span class="card-title">读取启动配置</span>
+              <span class="card-copy">读取 EPLB 和 L2 策略等启动参数。</span>
+              <span class="card-code">ServerArgs</span>
             </a>
 
-            <a class="card sglang" href="../../sglang/python/sglang/srt/model_executor/model_runner.py"
+            <a class="card glue" href="../../sglang/python/sglang/srt/model_executor/model_runner.py"
                style="left:458px;top:75px;width:295px;height:140px">
-              <span class="step">步骤 02 · SGLANG 持有实例</span>
-              <span class="card-title">初始化 ModelRunner</span>
-              <span class="card-copy">每个模型执行引擎明确持有一个 MLB 实例。</span>
-              <span class="card-code">self.moe_load_balancer = ...</span>
+              <span class="step">步骤 02 · SGLANG GLUE（建议接线）</span>
+              <span class="card-title">ModelRunner 创建并唯一持有 MLB</span>
+              <span class="card-copy">在 cold-placement 前创建一次；不向每个 TopK 注入逐层 runtime。</span>
+              <span class="card-code">建议字段：self.moe_load_balancer</span>
             </a>
 
-            <div class="card orchestrator" style="left:781px;top:72px;width:487px;height:145px">
-              <span class="step">步骤 02 · 统一的 MLB 实例</span>
-              <span class="card-title">EPLBManager 和所有 TopK 层共用同一个实例</span>
+            <div class="card sglang" style="left:781px;top:72px;width:487px;height:145px">
+              <span class="step">步骤 03 · SGLANG（EPLB 冷启动）</span>
+              <span class="card-title">创建并保存初始 placement metadata</span>
               <div class="mini-stack">
-                <div class="mini good">MLB 内部状态<em>负载历史 / 每层策略状态</em></div>
-                <div class="mini good">L1 EPLB 策略<em>低频率地重新计算布局</em></div>
-                <div class="mini good">有顺序的 L2 策略<em>LPLB / LP-CF → Waterfill</em></div>
+                <div class="mini glue-role">init_by_eplb()<em>SGLang Glue 发起调用</em></div>
+                <div class="mini adapter-role">MLB Adapter<em>普通输入 → PlacementRequest</em></div>
+                <div class="mini policy-role">EPLB Policy<em>initial plan → SGLang maps</em></div>
               </div>
             </div>
 
-            <a class="card sglang" href="../../sglang/python/sglang/srt/eplb/expert_location.py"
+            <a class="card sglang" href="../../sglang/python/sglang/srt/layers/moe/fused_moe_triton/layer.py"
                style="left:1296px;top:75px;width:242px;height:140px">
-              <span class="step">步骤 03 · SGLANG</span>
-              <span class="card-title">初始布局准备完成</span>
-              <span class="card-copy">初始权重与 SGLang 保存的布局信息已经就绪。</span>
-              <span class="card-code">ExpertLocationMetadata</span>
+              <span class="step">步骤 04 · SGLANG</span>
+              <span class="card-title">按初始 metadata 加载权重</span>
+              <span class="card-copy">权重进入对应物理槽位；SGLang metadata 是实际 placement 的权威。</span>
+              <span class="card-code">metadata → local physical slots</span>
             </a>
 
             <a class="card sglang" href="../../sglang/python/sglang/srt/layers/moe/topk.py"
-               style="left:226px;top:328px;width:233px;height:140px">
-              <span class="step">步骤 04 · SGLANG</span>
-              <span class="card-title">选择逻辑专家 TopK</span>
-              <span class="card-copy">TopK 只调用统一入口，不直接拼接任何具体算法。</span>
-              <span class="card-code">mlb.route_topk(layer_id, ...)</span>
+              style="left:226px;top:328px;width:215px;height:140px">
+              <span class="step">步骤 05 · SGLANG</span>
+              <span class="card-title">逻辑 TopK 后调用公共 MLB</span>
+              <span class="card-copy">TopK 临时读取 ForwardContext 中的同一实例和本轮上下文，不保存引用。</span>
+              <span class="card-code">建议字段：ForwardContext.mlb</span>
             </a>
 
-            <div class="card orchestrator" style="left:487px;top:308px;width:376px;height:180px">
-              <span class="step">步骤 05 · MLB 策略协调</span>
-              <span class="card-title">合并需求，按顺序执行 L2 策略</span>
+            <div class="card adapter" style="left:465px;top:308px;width:255px;height:180px">
+              <span class="step">步骤 06A · 统一 ADAPTER</span>
+              <span class="card-title">每层只组装一次统一请求</span>
+              <div class="pill-row">
+                <span class="pill">ForwardBatch</span>
+                <span class="pill">logical TopK</span>
+                <span class="pill">actual placement</span>
+                <span class="pill">共享 EP 汇总</span>
+              </div>
+              <span class="card-copy">使用 SGLang 提供的 EP group；生成一个框架无关 RoutingRequest。</span>
+              <span class="card-code">SGLang data → RoutingRequest</span>
+            </div>
+
+            <div class="card orchestrator" style="left:744px;top:308px;width:375px;height:180px">
+              <span class="step">步骤 06B · FRAMEWORK-NEUTRAL ORCHESTRATOR</span>
+              <span class="card-title">按配置执行统一 L2 Policy Pipeline</span>
               <div class="split-card">
                 <div class="half">LPLB / LP-CF<br>重新选择专家副本</div>
                 <div class="arrow-word">→</div>
-                <div class="half">Waterfill<br>使用调整后的各卡负载</div>
+                <div class="half">Waterfill<br>复用调整后的 rank load</div>
               </div>
-              <span class="card-copy">策略只读写统一的路由状态，不依赖 SGLang 内部类型。</span>
+              <span class="card-copy">Orchestrator 不 import SGLang，只返回 RoutingDecision。</span>
             </div>
 
-            <div class="card adapter" style="left:891px;top:308px;width:348px;height:180px">
-              <span class="step">步骤 05 · 统一的 SGLANG 适配层</span>
-              <span class="card-title">只采集一次，只生成一次最终结果</span>
-              <div class="pill-row">
-                <span class="pill">逻辑专家 TopK</span>
-                <span class="pill">当前布局</span>
-                <span class="pill">各卡负载</span>
-                <span class="pill">一次多卡汇总</span>
-                <span class="pill">DeepEP 最终输出</span>
-              </div>
-              <span class="card-copy">适配层只处理统一数据格式，不按 Waterfill/LPLB 分支。</span>
+            <div class="card adapter" style="left:1143px;top:328px;width:180px;height:140px">
+              <span class="step">步骤 06C · 同一 ADAPTER</span>
+              <span class="card-title">只写回一次</span>
+              <span class="card-copy">把最终 decision 转成 SGLang/DeepEP 输出。</span>
+              <span class="card-code">RoutingDecision → StandardTopKOutput</span>
             </div>
 
             <a class="card sglang" href="../../sglang/python/sglang/srt/layers/moe/token_dispatcher/deepep.py"
-               style="left:1267px;top:328px;width:248px;height:140px">
-              <span class="step">步骤 06 · SGLANG</span>
+               style="left:1347px;top:328px;width:190px;height:140px">
+              <span class="step">步骤 07 · SGLANG</span>
               <span class="card-title">DeepEP 分发并执行 MoE</span>
-              <span class="card-copy">只使用适配层一次性写回的最终 TopK 结果。</span>
+              <span class="card-copy">使用 Adapter 一次性写回的最终 TopK。</span>
               <span class="card-code">token_dispatcher/deepep.py</span>
             </a>
 
             <a class="card sglang" href="../../sglang/python/sglang/srt/eplb/expert_distribution.py"
                style="left:226px;top:650px;width:233px;height:140px">
-              <span class="step">步骤 07 · SGLANG</span>
-              <span class="card-title">记录专家负载</span>
-              <span class="card-copy">SGLang 记录实际执行数据，不把框架对象传进 MLB 核心。</span>
-              <span class="card-code">native counters / hooks</span>
+              <span class="step">步骤 08 · SGLANG</span>
+              <span class="card-title">每层只更新临时计数</span>
+              <span class="card-copy">TopK 或 dispatcher hook 只写本次 forward 对应 layer 的 physical count。</span>
+              <span class="card-code">ExpertDistributionRecorder hooks</span>
             </a>
 
             <a class="card sglang" href="../../sglang/python/sglang/srt/eplb/eplb_manager.py"
                style="left:487px;top:650px;width:376px;height:140px">
-              <span class="step">步骤 08 · SGLANG 触发</span>
-              <span class="card-title">本轮结束 / 到达重布局周期</span>
-              <span class="card-copy">SGLang 决定“什么时候”；调用同一个实例的 L1 入口。</span>
-              <span class="card-code">mlb.rebalance(native_context)</span>
+              <span class="step">步骤 09 · SGLANG 触发</span>
+              <span class="card-title">整次 forward 结束才 append；每 N 次才 dump</span>
+              <span class="card-copy">SGLang 完成 collect/append、cadence、dump 和 all-reduce，再调用 MLB。</span>
+              <span class="card-code">with_forward_pass() → EPLBManager.rebalance()</span>
             </a>
 
             <div class="card adapter" style="left:891px;top:630px;width:348px;height:180px">
-              <span class="step">步骤 09 · SGLANG 适配层</span>
-              <span class="card-title">读取统计并准备 L1 输入</span>
-              <span class="card-copy">取得逻辑专家负载，再补充机器拓扑、当前参与的 GPU 等信息；通信仍由 SGLang 控制。</span>
-              <span class="card-code">collect_placement_observation()</span>
+              <span class="step">步骤 10 · SGLANG 适配层</span>
+              <span class="card-title">把 dump result 翻译成 PlacementStats</span>
+              <span class="card-copy">Adapter 不执行 dump；只把 SGLang 已汇总完成的普通 Tensor 和参数转换一次。</span>
+              <span class="card-code">dump_result → PlacementStats / PlacementRequest</span>
             </div>
 
             <div class="card l1" style="left:1267px;top:630px;width:248px;height:180px">
-              <span class="step">步骤 10 · MLB L1 策略</span>
-              <span class="card-title">生成 EPLB 候选布局</span>
-              <span class="card-copy">顶层 MLB 使用内部负载历史调用 L1，只返回尚未生效的候选布局。</span>
-              <span class="card-code">输入 → L1 策略 → 候选布局</span>
+              <span class="step">步骤 11 · 目标建议 · ORCHESTRATOR → EPLB POLICY</span>
+              <span class="card-title">先判断 threshold，再生成 candidate</span>
+              <span class="card-copy">未跳过时才运行 placement；只返回尚未生效的 PlacementPlan。</span>
+              <span class="card-code">PlacementRequest → PlacementPlan</span>
             </div>
 
             <a class="card sglang" href="../../sglang/python/sglang/srt/eplb/expert_location_updater.py"
-               style="left:226px;top:934px;width:383px;height:125px">
-              <span class="step">步骤 11 · SGLANG</span>
-              <span class="card-title">SGLang 搬移专家权重</span>
-              <span class="card-copy">适配层转换布局；P2P、内存或磁盘恢复和真实权重都留在 SGLang。</span>
+              style="left:226px;top:934px;width:383px;height:125px">
+              <span class="step">步骤 12 · SGLANG</span>
+              <span class="card-title">按 candidate 搬移专家权重</span>
+              <span class="card-copy">SGLang 执行 unchanged / local copy / P2P；Adapter 不调用 Updater。</span>
               <span class="card-code">ExpertLocationUpdater.update(...)</span>
             </a>
 
-            <div class="card success" style="left:637px;top:920px;width:370px;height:145px">
-              <span class="step">步骤 12 · SGLANG 是唯一权威</span>
-              <span class="card-title">SGLang 更新实际布局信息</span>
-              <span class="card-copy">权重搬运完成后，SGLang 更新 ExpertLocationMetadata；MLB 不再保存另一份当前布局。</span>
-              <span class="card-code">weights → metadata.update(layer_ids)</span>
+            <div class="card sglang" style="left:637px;top:920px;width:370px;height:145px">
+              <span class="step">步骤 13 · SGLANG 是唯一权威</span>
+              <span class="card-title">更新 metadata，再完成必要恢复</span>
+              <span class="card-copy">copy/P2P 后更新 ExpertLocationMetadata；若缺权重，再从 DRAM/磁盘恢复。</span>
+              <span class="card-code">metadata.update(...) → missing-weight recovery</span>
             </div>
 
-            <a class="card sglang" href="../../sglang/python/sglang/srt/eplb/expert_location.py"
-               style="left:1035px;top:934px;width:392px;height:125px">
-              <span class="step">步骤 13 · 下一轮推理</span>
-              <span class="card-title">L2 读取 SGLang 的最新布局</span>
-              <span class="card-copy">SGLang 适配层按层读取最新布局信息，交给 LPLB / LP-CF 使用。</span>
-              <span class="card-code">SGLangPlacementAdapter.snapshot(layer_id)</span>
-            </a>
+            <div class="card adapter" style="left:1035px;top:934px;width:392px;height:125px">
+              <span class="step">步骤 14 · 目标建议 · 全部成功后</span>
+              <span class="card-title">L2 才读取新的 PlacementSnapshot</span>
+              <span class="card-copy">apply/recovery 期间继续用旧快照；完成后从 SGLang 实际 metadata 读取新快照。</span>
+              <span class="card-code">建议通知：placement_applied(actual_metadata)</span>
+            </div>
 
             <svg class="connector-labels" viewBox="0 0 1640 1120" aria-hidden="true">
-              <g class="flow-caption good" transform="translate(1255 555)">
-                <rect x="-72" y="-10" width="144" height="20" rx="5"/>
-                <text x="0" y="1">共享同一份负载数据</text>
-              </g>
               <g class="flow-caption" transform="translate(870 878)">
                 <rect x="-53" y="-10" width="106" height="20" rx="5"/>
                 <text x="0" y="1">只生成候选布局</text>
-              </g>
-              <g class="flow-caption good" transform="translate(1021 909)">
-                <rect x="-52" y="-10" width="104" height="20" rx="5"/>
-                <text x="0" y="1">布局信息已更新</text>
               </g>
               <g class="flow-caption" transform="translate(1572 615) rotate(-90)">
                 <rect x="-60" y="-10" width="120" height="20" rx="5"/>
@@ -1270,18 +1294,18 @@
             </svg>
 
             <div class="note good" style="left:818px;top:222px;width:316px">
-              原则 ① 一个顶层 MLB 协调 L1/L2；内部保留每层策略状态
+              原则 ① 冷启动只做 EPLB placement；不执行 L2 或 EP 通信
             </div>
             <div class="note good" style="left:930px;top:489px;width:303px">
-              原则 ② LPLB → Waterfill，共享一次通信和一次写回
+              原则 ② SGLang 只持有一个实例；LPLB → Waterfill 只写回一次
             </div>
             <div class="note good" style="left:960px;top:820px;width:288px">
-              原则 ③ SGLang 管执行时序；顶层 MLB 管策略组合
+              原则 ③ SGLang 管 cadence/dump/apply；MLB 管翻译与策略
             </div>
 
             <div class="summary-strip">
               <strong>结果：M+N</strong>
-              <span>M 个框架无关策略 + N 套框架适配层 + 1 个顶层协调对象；实际布局始终以 SGLang 保存的信息为准。</span>
+              <span>M 个框架无关策略 + N 个统一框架 Adapter；每个 Adapter 内部复用同一个 Orchestrator 设计，实际布局以框架为准。</span>
             </div>
           </div>
         </div>
@@ -1289,24 +1313,29 @@
 
       <div class="legend">
         <span class="legend-item"><span class="swatch sg"></span>SGLang：生命周期 / 通信 / 权重</span>
-        <span class="legend-item"><span class="swatch adapter"></span>适配层：框架转换与采集</span>
-        <span class="legend-item"><span class="swatch mlb"></span>顶层 MoELoadBalancer</span>
+        <span class="legend-item"><span class="swatch glue"></span>SGLang Glue：初始化接线</span>
+        <span class="legend-item"><span class="swatch adapter"></span>SGLangMoELoadBalancer：统一 Adapter/Façade</span>
+        <span class="legend-item"><span class="swatch mlb"></span>MoELoadBalancer：框架无关 Orchestrator</span>
         <span class="legend-item"><span class="swatch l1"></span>L1 EPLB 策略</span>
         <span class="legend-item"><span class="swatch l2"></span>按顺序执行的 L2 策略</span>
       </div>
 
       <div class="comparison" aria-label="目标设计关键约束">
         <div class="comparison-card">
-          <strong>顶层结构</strong>
-          <span>一个 <code>MoELoadBalancer</code> 统一协调 L1/L2；各算法仍可保留模型级和每层状态。</span>
+          <strong>ModelRunner 只持有一个 MLB</strong>
+          <span>建议给 <code>ForwardContext</code> 增加可选 MLB 字段；每次 forward 放入同一实例，TopK 临时读取，不保存引用，也不创建逐层 runtime。</span>
         </div>
         <div class="comparison-card">
-          <strong>调用方向</strong>
-          <span>SGLang 调用统一入口；顶层 MLB 让适配层收集输入，再调用各策略，最后只写回一次。</span>
+          <strong>Adapter 在外，Orchestrator 在内</strong>
+          <span>统一 Adapter 持有 Orchestrator，负责 SGLang 类型翻译和 L2 materialize；通信组、backend hook 和权重 apply 仍由 SGLang 控制。</span>
         </div>
         <div class="comparison-card">
-          <strong>状态一致性</strong>
-          <span>MLB L1 只返回候选布局；SGLang 搬权重并更新布局信息，L2 随后直接读取最新布局。</span>
+          <strong>三个建议概念入口（尚未实现）</strong>
+          <span><code>route_topk(...)</code> 服务每层 L2；<code>plan_placement(dump_result)</code> 服务 L1；<code>placement_applied(actual_metadata)</code> 只在 SGLang apply/recovery 成功后刷新快照。</span>
+        </div>
+        <div class="comparison-card">
+          <strong>算法通过 Pipeline 组合</strong>
+          <span>Orchestrator 依次执行 LPLB / LP-CF → Waterfill；Adapter 统一准备输入并尽量共享一次 EP 汇总，不再为每个算法创建 framework runtime。</span>
         </div>
       </div>
     </section>
@@ -1338,6 +1367,7 @@
       function showView(view) {
         if (!figures[view]) return;
         activeView = view;
+        window.history.replaceState(null, "", `#${view}`);
         Object.entries(figures).forEach(([name, figure]) => {
           figure.hidden = name !== view;
         });
@@ -1381,7 +1411,7 @@
         });
       });
 
-      showView("current");
+      showView(window.location.hash === "#target" ? "target" : "current");
     })();
   </script>
 </body>
