@@ -645,7 +645,7 @@
 
     .note {
       position: absolute;
-      z-index: 3;
+      z-index: 6;
       padding: 8px 10px;
       border: 1px solid;
       border-radius: 7px;
@@ -670,6 +670,71 @@
       border-color: rgba(158,176,194,.35);
       color: #c8d4df;
       background: rgba(19,29,40,.96);
+    }
+
+    .ownership-frame {
+      --owner-color: var(--sg);
+      position: absolute;
+      z-index: 4;
+      border: 3px solid var(--owner-color);
+      border-radius: 13px;
+      background: transparent;
+      box-shadow: 0 0 0 1px rgba(4, 8, 12, .7);
+      pointer-events: none;
+    }
+
+    .ownership-frame > span {
+      position: absolute;
+      left: 18px;
+      top: -14px;
+      max-width: calc(100% - 36px);
+      padding: 5px 10px;
+      border: 1px solid var(--owner-color);
+      border-radius: 5px;
+      color: #f3f8fc;
+      background: #101820;
+      font: 800 9px/1.25 "SFMono-Regular", Consolas, monospace;
+      letter-spacing: .06em;
+      white-space: nowrap;
+    }
+
+    .ownership-frame.glue-owner { --owner-color: var(--glue); }
+    .ownership-frame.adapter-owner { --owner-color: var(--adapter); }
+    .ownership-frame.policy-owner { --owner-color: var(--l1); }
+    .ownership-frame.sglang-owner { --owner-color: var(--sg); }
+
+    .ownership-strip {
+      --owner-color: var(--adapter);
+      position: absolute;
+      z-index: 4;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 4px 9px;
+      border: 2px solid var(--owner-color);
+      border-radius: 9px;
+      color: #f5f8fb;
+      background: rgba(31, 26, 15, .97);
+      text-align: center;
+      pointer-events: none;
+    }
+
+    .ownership-strip strong {
+      font: 800 9px/1.25 "SFMono-Regular", Consolas, monospace;
+      letter-spacing: .04em;
+    }
+
+    .ownership-strip small {
+      margin-top: 2px;
+      color: #d6dee6;
+      font-size: 9px;
+      line-height: 1.25;
+    }
+
+    .ownership-strip.policy-strip {
+      --owner-color: var(--l1);
+      background: rgba(50, 34, 73, .98);
     }
 
     .summary-strip {
@@ -1181,7 +1246,7 @@
               <span class="step">步骤 03 · PLACEMENT METADATA</span>
               <span class="card-title">Placement metadata</span>
               <div class="mini-stack">
-                <div class="mini glue-role">SGLang metadata<em>physical → logical</em></div>
+                <div class="mini glue-role">init_by_eplb()<em>SGLang Glue；创建 metadata</em></div>
                 <div class="mini adapter-role">MLB Adapter<em>普通输入 → PlacementRequest</em></div>
                 <div class="mini policy-role">EPLB Policy<em>logical → replicas / rank choice</em></div>
               </div>
@@ -1254,8 +1319,8 @@
                style="left:782px;top:650px;width:250px;height:140px">
               <span class="step">步骤 11 · DUMP + ALL-REDUCE</span>
               <span class="card-title">Dump + ALL-REDUCE</span>
-              <span class="card-copy">only every N complete forwards<br>SUM all ranks → same global counts</span>
-              <span class="card-code">eplb_manager.py</span>
+              <span class="card-copy">cadence advances after a complete forward<br>every N: dump → logical → SUM → reset</span>
+              <span class="card-code">SGLang owns cadence / dump / reset</span>
             </a>
 
             <div class="card l1" style="left:1060px;top:650px;width:250px;height:140px">
@@ -1290,7 +1355,7 @@
             <div class="card adapter" style="left:1180px;top:934px;width:358px;height:125px">
               <span class="step">步骤 15 · WEIGHT MIGRATION DONE</span>
               <span class="card-title">Weight migration done</span>
-              <span class="card-copy">build the matching new snapshot<br>then switch L2 to this placement</span>
+              <span class="card-copy">keep old snapshot through apply / recovery<br>then build and switch the matching snapshot</span>
               <span class="card-code">Adapter · actual metadata → new L2 snapshot</span>
             </div>
 
@@ -1305,14 +1370,47 @@
               </g>
             </svg>
 
-            <div class="note good" style="left:818px;top:222px;width:316px">
-              Step 2：SGLang Glue 调用 init_by_eplb；ModelRunner 只持有一个 MLB Adapter
-            </div>
             <div class="note good" style="left:760px;top:489px;width:430px">
               Step 7 保持 Logical → physical；未编号 L2 分支由统一 Adapter 调用 LPLB / LP-CF → Waterfill
             </div>
-            <div class="note good" style="left:830px;top:820px;width:360px">
-              Step 12 只生成 candidate；Step 13–恢复节点仍由 SGLang 执行
+
+            <div class="ownership-frame glue-owner"
+                 style="left:448px;top:65px;width:315px;height:160px">
+              <span>SGLANG GLUE · CALL INIT_BY_EPLB</span>
+            </div>
+            <div class="ownership-frame glue-owner"
+                 style="left:771px;top:62px;width:507px;height:165px">
+              <span>SGLANG · CREATE METADATA</span>
+            </div>
+            <div class="ownership-frame sglang-owner"
+                 style="left:216px;top:638px;width:548px;height:164px">
+              <span>SGLANG · PER-LAYER COUNT → FORWARD-END APPEND</span>
+            </div>
+            <div class="ownership-frame sglang-owner"
+                 style="left:772px;top:638px;width:270px;height:164px">
+              <span>SGLANG · DUMP + ALL-REDUCE</span>
+            </div>
+            <div class="ownership-strip policy-strip"
+                 style="left:794px;top:754px;width:226px;height:32px">
+              <strong>EPLB POLICY · THRESHOLD</strong>
+            </div>
+            <div class="ownership-frame policy-owner"
+                 style="left:1050px;top:638px;width:270px;height:164px">
+              <span>MLB POLICY · EPLB PLANNER</span>
+            </div>
+            <div class="ownership-strip"
+                 style="left:772px;top:808px;width:270px;height:44px">
+              <strong>ADAPTER · DUMP RESULT → PlacementStats</strong>
+              <small>完整 forward 到周期后才出现；Adapter 只翻译</small>
+            </div>
+            <div class="ownership-strip"
+                 style="left:1050px;top:808px;width:270px;height:44px">
+              <strong>ADAPTER · PLAN → SGLANG MAPS</strong>
+              <small>只转换 candidate；Step 13 仍由 SGLang 执行</small>
+            </div>
+            <div class="ownership-frame adapter-owner"
+                 style="left:1170px;top:924px;width:378px;height:145px">
+              <span>ADAPTER · NEW SNAPSHOT → L2</span>
             </div>
 
             <div class="summary-strip">
@@ -1334,20 +1432,20 @@
 
       <div class="comparison" aria-label="目标设计关键约束">
         <div class="comparison-card">
-          <strong>ModelRunner 只持有一个 MLB</strong>
-          <span>建议给 <code>ForwardContext</code> 增加可选 MLB 字段；每次 forward 放入同一实例，TopK 临时读取，不保存引用，也不创建逐层 runtime。</span>
+          <strong>冷启动 · Step 3 是 Step 2 的展开</strong>
+          <span>Step 2 的 SGLang Glue 调用 <code>init_by_eplb()</code>。Step 3 的 metadata 仍由 SGLang 创建；其中“普通输入算 maps”改为统一 Adapter 构造 <code>PlacementRequest</code> → EPLB Policy 生成 plan → Adapter 返回 maps。Step 12 复用同一个 Policy；ModelRunner 全局只持有一个 MLB Adapter。</span>
         </div>
         <div class="comparison-card">
-          <strong>Adapter 在外，Orchestrator 在内</strong>
-          <span>统一 Adapter 持有 Orchestrator，负责 SGLang 类型翻译和 L2 materialize；通信组、backend hook 和权重 apply 仍由 SGLang 控制。</span>
+          <strong>一次 forward 是整个 ModelRunner 调用</strong>
+          <span><code>with_forward_pass()</code> 包住完整模型 forward。每个 MoE layer 的 hook 只更新临时 Tensor 的对应 <code>layer_idx</code>；所有层结束后，Step 10 才 append 一条完整的 <code>[layer, physical expert]</code> 记录。cadence 随后前进一步，并非每层 append 或判断 rebalance。</span>
         </div>
         <div class="comparison-card">
-          <strong>三个建议概念入口（尚未实现）</strong>
-          <span><code>route_topk(...)</code> 服务每层 L2；<code>plan_placement(dump_result)</code> 服务 L1；<code>placement_applied(actual_metadata)</code> 只在 SGLang apply/recovery 成功后刷新快照。</span>
+          <strong>EPLB Policy · threshold 后生成布局</strong>
+          <span>SGLang EPLBManager 维护 every-N cadence；到周期后执行 dump、physical→logical、<code>ALL-REDUCE(SUM)</code> 和 reset。Adapter 只把最终 payload 翻译成 <code>PlacementStats</code>。同一个 EPLB Policy 先判断 utilization threshold；未跳过才立即运行 placement 算法。</span>
         </div>
         <div class="comparison-card">
-          <strong>算法通过 Pipeline 组合</strong>
-          <span>Orchestrator 依次执行 LPLB / LP-CF → Waterfill；Adapter 统一准备输入并尽量共享一次 EP 汇总，不再为每个算法创建 framework runtime。</span>
+          <strong>L1 生成 plan 后不能马上切换 L2</strong>
+          <span>Step 12 只得到 candidate <code>PlacementPlan</code>。Step 13、Step 14 和 missing-weight recovery 全部由 SGLang 完成；期间 L2 继续使用旧 <code>PlacementSnapshot</code>。全部成功后，Adapter 才从真实 metadata 构造新 snapshot，并让统一 Orchestrator 的 LPLB / LP-CF → Waterfill 使用它。</span>
         </div>
       </div>
     </section>
