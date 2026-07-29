@@ -1152,8 +1152,9 @@
             SGLang 仍然决定何时初始化、前向推理、重新计算布局和搬权重；MLB 只在这些固定位置
             被调用。建议新增一个由 ModelRunner 唯一持有的 <code>SGLangMoELoadBalancer</code>；
             它作为统一 Adapter/Façade 持有框架无关的 <code>MoELoadBalancer</code> Orchestrator。
-            EPLB 的 Step 1–15、Optional LP 分支和 Missing-weight recovery 直接复用 reviewed restored
-            流程；L2 只作为 Step 7 周围的未编号分支出现。L2 始终从 SGLang 已生效的 metadata 读取 placement。
+            EPLB 的 Step 1–6、8–15 和 Missing-weight recovery 直接复用 reviewed restored 流程；
+            Step 7 的生命周期位置保持不变，但执行者改为“前置 Adapter → MLB Orchestrator → 后置 Adapter”。
+            L2 始终从 SGLang 已生效的 metadata 读取 placement。
           </p>
         </div>
         <div class="figure-badge">M 种策略 + N 种框架接入</div>
@@ -1205,10 +1206,12 @@
               <path class="flow" style="marker-end:url(#target-arrow)" d="M1418 204 L1418 247 L336 247 L336 318"/>
 
               <path class="flow" style="marker-end:url(#target-arrow)" d="M446 398 L474 398"/>
-              <path class="flow" style="marker-end:url(#target-arrow)" d="M694 398 L722 398"/>
-              <path class="flow good" style="marker-end:url(#target-arrow-good)" d="M942 398 L970 398"/>
-              <path class="flow dashed" style="marker-end:url(#target-arrow)" d="M584 478 L584 518 L1328 518 L1328 478"/>
-              <path class="flow dashed" style="marker-end:url(#target-arrow)" d="M1218 398 L1198 398 L1198 292 L832 292 L832 318"/>
+              <path class="flow good" style="marker-end:url(#target-arrow-good)" d="M694 398 L706 398 L706 299 L722 299"/>
+              <path class="flow good" style="marker-end:url(#target-arrow-good)" d="M832 316 L832 318"/>
+              <path class="flow good" style="marker-end:url(#target-arrow-good)" d="M832 478 L832 480"/>
+              <path class="flow good" style="marker-end:url(#target-arrow-good)" d="M942 497 L956 497 L956 398 L970 398"/>
+              <path class="flow dashed" style="marker-end:url(#target-arrow)" d="M942 299 L1328 299 L1328 318"/>
+              <path class="flow dashed" style="marker-end:url(#target-arrow)" d="M1218 398 L1198 398 L1198 340 L942 340"/>
               <path class="flow dashed" style="marker-end:url(#target-arrow)" d="M584 478 L584 545 L351 545 L351 650"/>
               <path class="flow dashed" style="marker-end:url(#target-arrow)" d="M1080 478 L1080 560 L351 560 L351 650"/>
 
@@ -1276,13 +1279,13 @@
               <span class="card-code">topk.py</span>
             </a>
 
-            <a class="card sglang" href="../../sglang/python/sglang/srt/eplb/expert_location_dispatch.py"
-               style="left:722px;top:318px;width:220px;height:160px">
-              <span class="step">步骤 07 · SGLANG EPLB</span>
+            <div class="card orchestrator"
+                 style="left:722px;top:318px;width:220px;height:160px">
+              <span class="step">步骤 07 · MLB ORCHESTRATOR</span>
               <span class="card-title">Logical → physical</span>
-              <span class="card-copy">static / dynamic / LP<br>choose one physical replica</span>
-              <span class="card-code">expert_location_dispatch.py</span>
-            </a>
+              <span class="card-copy">LPLB / LP-CF → Waterfill<br>use current PlacementSnapshot</span>
+              <span class="card-code">RoutingRequest → RoutingDecision</span>
+            </div>
 
             <a class="card sglang" href="../../sglang/python/sglang/srt/layers/moe/token_dispatcher/deepep.py"
                style="left:970px;top:318px;width:220px;height:160px">
@@ -1370,8 +1373,13 @@
               </g>
             </svg>
 
-            <div class="note good" style="left:760px;top:489px;width:430px">
-              Step 7 保持 Logical → physical；未编号 L2 分支由统一 Adapter 调用 LPLB / LP-CF → Waterfill
+            <div class="ownership-strip"
+                 style="left:722px;top:282px;width:220px;height:34px">
+              <strong>前置 ADAPTER · TOPK → RoutingRequest</strong>
+            </div>
+            <div class="ownership-strip"
+                 style="left:722px;top:480px;width:220px;height:34px">
+              <strong>后置 ADAPTER · RoutingDecision → PHYSICAL IDs</strong>
             </div>
 
             <div class="ownership-frame glue-owner"
