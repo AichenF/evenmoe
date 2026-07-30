@@ -5,6 +5,7 @@ from typing import Protocol, runtime_checkable
 from moe_load_balancer.core.types import RoutingDecision, RoutingLoadHistory, RoutingRequest
 
 
+# todo: deprecated RoutingLoadHistoryProvider protocol, history should be passed directly to TokenRouter
 @runtime_checkable
 class RoutingLoadHistoryProvider(Protocol):
     """Framework-neutral provider for long-lived L2 load state.

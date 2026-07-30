@@ -4,7 +4,7 @@ from typing import Protocol, runtime_checkable
 
 from moe_load_balancer.core.types import PlacementPlan, PlacementRequest, PlacementSnapshot, PlacementStats
 
-
+# todo: deprecated PlacementProvider protocol since placement should be provided after l1 real rebalance instead of l1 planning
 @runtime_checkable
 class PlacementProvider(Protocol):
     """Read-only placement source used by L2 routing.
@@ -51,6 +51,7 @@ class PlacementPlanner(Protocol):
         ...
 
 
+# todo: deprecated StatsCollector protocol since data should be collected inside framework
 @runtime_checkable
 class StatsCollector(Protocol):
     """Framework-neutral L1 statistics-collection contract.
