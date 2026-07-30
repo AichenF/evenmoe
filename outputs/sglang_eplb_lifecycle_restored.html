@@ -491,7 +491,8 @@
     </p>
     <p class="mode-note current-only">
       绿色表示 SGLang 仓库里的 Glue 调用位置；黄色表示 MLB SGLang Adapter；
-      紫色表示 EPLB Policy 功能（包括当前仍混在 Runtime 里的 skip 决策）；
+      紫色表示 EPLB placement Policy；当前 Runtime 中混入的 threshold/skip
+      用红色标为需要移回 SGLang 的设计问题；
       灰色表示当前 MLB 中只保存数据、不做决策的状态组件。
       所在节点表示组件预期介入生命周期的位置；
       本图不评价尚在开发中的 SGLang 接入分支。
@@ -506,9 +507,9 @@
       负责的全部模型层。步骤 9 的每层 hook 只写同一个临时 Tensor 中对应
       <code>layer_idx</code> 的一行；退出整个 forward 时，步骤 10 才 append 一次，
       随后步骤 11 才让 cadence 前进一步。只有到达 every-N 时才执行 dump、汇总和 reset。
-      <strong>dump、汇总和 reset 都由 SGLang 执行</strong>，Adapter 不执行 dump，
-      只把 SGLang 已经生成的 dump result 翻译成 <code>PlacementStats</code>。
-      到周期后由同一个 EPLB Policy 依次执行 threshold/skip 判断和 placement 算法。
+      <strong>dump、汇总、threshold/skip 和 reset 都由 SGLang 执行</strong>。
+      未通过 threshold 就直接结束；只有通过后，Adapter 才把 SGLang 已经生成的 dump result
+      翻译成 <code>PlacementStats</code>，再由 EPLB Policy 计算 candidate placement。
       L1 算出新的 plan 后，不能马上让 L2 切换到这个布局；SGLang 必须先按该 plan 完成权重迁移、
       metadata 更新以及必要的 missing-weight recovery。在此之前 L2 继续使用旧的
       <code>PlacementSnapshot</code>；迁移成功后，Adapter 才把与真实权重一致的新
@@ -660,10 +661,11 @@
           <g class="node eplb">
             <rect x="640" y="625" width="250" height="132"/>
             <text class="node-title" x="656" y="652">11. Dump + ALL-REDUCE</text>
-            <text class="node-copy" x="656" y="679">only every N complete forwards</text>
-            <text class="node-copy" x="656" y="698">SUM all ranks → same global counts</text>
-            <text class="node-file" x="656" y="720">eplb_manager.py (trigger)</text>
-            <text class="node-file" x="656" y="734">expert_distribution.py (dump/AR)</text>
+            <text class="node-copy" x="656" y="676">only every N complete forwards</text>
+            <text class="node-copy" x="656" y="694">SUM all ranks → same global counts</text>
+            <text class="node-copy" x="656" y="712">SGLang threshold → skip / plan</text>
+            <text class="node-file" x="656" y="735">eplb_manager.py (trigger/gate)</text>
+            <text class="node-file" x="656" y="749">expert_distribution.py (dump/AR)</text>
           </g>
         </a>
 
@@ -776,14 +778,14 @@
           <rect class="owner-label-bg support" x="365" y="611" width="230" height="25" rx="5"/>
           <text class="owner-label" x="377" y="628">MLB STATE · EPLB RECORDER</text>
 
-          <!-- Only after a whole forward ends: SGLang ticks cadence; runtime drains; skip is policy. -->
+          <!-- Current implementation wrongly keeps threshold/skip in the MLB runtime. -->
           <rect class="owner-frame sglang" x="630" y="615" width="270" height="140" rx="12"/>
           <rect class="owner-label-bg sglang" x="650" y="611" width="230" height="25" rx="5"/>
           <text class="owner-label" x="662" y="628">SGLANG · FORWARD-END CADENCE</text>
           <rect class="owner-label-bg adapter" x="650" y="758" width="126" height="25" rx="5"/>
           <text class="owner-label" x="713" y="775" text-anchor="middle">RUNTIME · DRAIN</text>
-          <rect class="owner-label-bg policy" x="782" y="758" width="98" height="25" rx="5"/>
-          <text class="owner-label" x="831" y="775" text-anchor="middle">POLICY · SKIP</text>
+          <rect class="owner-label-bg problem" x="782" y="758" width="126" height="25" rx="5"/>
+          <text class="owner-label" x="845" y="775" text-anchor="middle">WRONG · MLB GATE</text>
 
           <!-- Framework-neutral planner and classic DeepSeek algorithm are extracted. -->
           <rect class="owner-frame policy" x="915" y="615" width="270" height="140" rx="12"/>
@@ -837,20 +839,18 @@
           <rect class="owner-label-bg sglang" x="145" y="596" width="385" height="25" rx="5"/>
           <text class="owner-label" x="157" y="613">SGLANG · PER-LAYER COUNT → FORWARD-END APPEND</text>
 
-          <!-- Cadence advances once per complete forward; only every N triggers dump and policy. -->
+          <!-- Cadence, dump/all-reduce and threshold/skip all remain in SGLang. -->
           <rect class="owner-frame sglang" x="630" y="615" width="270" height="140" rx="12"/>
-          <rect class="owner-label-bg sglang" x="650" y="596" width="230" height="25" rx="5"/>
-          <text class="owner-label" x="662" y="613">SGLANG · DUMP + ALL-REDUCE</text>
-          <rect class="owner-frame policy" x="650" y="704" width="230" height="36" rx="7"/>
-          <text class="owner-label" x="765" y="727" text-anchor="middle">EPLB POLICY · THRESHOLD</text>
+          <rect class="owner-label-bg sglang" x="625" y="596" width="285" height="25" rx="5"/>
+          <text class="owner-label" x="635" y="613">SGLANG · DUMP + ALL-REDUCE + THRESHOLD</text>
           <rect class="owner-frame policy" x="915" y="615" width="270" height="140" rx="12"/>
           <rect class="owner-label-bg policy" x="935" y="596" width="230" height="25" rx="5"/>
           <text class="owner-label" x="947" y="613">MLB POLICY · EPLB PLANNER</text>
 
-          <!-- Adapter converts SGLang's completed dump into a framework-neutral view. -->
+          <!-- Adapter sees stats only after SGLang's threshold allows planning. -->
           <rect class="owner-frame adapter" x="625" y="772" width="280" height="48" rx="12"/>
-          <text class="owner-label" x="765" y="792" text-anchor="middle">ADAPTER · DUMP RESULT → PlacementStats</text>
-          <text class="owner-note" x="765" y="809" text-anchor="middle">完整 forward 到周期后才出现；Adapter 只翻译</text>
+          <text class="owner-label" x="765" y="792" text-anchor="middle">ADAPTER · PASSED STATS → PlacementStats</text>
+          <text class="owner-note" x="765" y="809" text-anchor="middle">只在 SGLang threshold 通过后进入 MLB</text>
 
           <!-- Adapter translates the candidate plan, but does not invoke the updater. -->
           <rect class="owner-frame adapter" x="915" y="772" width="280" height="48" rx="12"/>
@@ -880,8 +880,8 @@
           <text class="target-callout-copy" x="1304" y="185">→ SGLang: metadata</text>
           <text class="target-callout-copy" x="1304" y="212">PERIODIC</text>
           <text class="target-callout-copy" x="1304" y="233">SGLang cadence → dump</text>
-          <text class="target-callout-copy" x="1304" y="254">→ Adapter: translate result</text>
-          <text class="target-callout-copy" x="1304" y="275">→ Policy: threshold / plan</text>
+          <text class="target-callout-copy" x="1304" y="254">→ SGLang: threshold / skip</text>
+          <text class="target-callout-copy" x="1304" y="275">→ Adapter → Policy: plan</text>
           <text class="target-callout-copy" x="1304" y="296">→ SGLang: Updater</text>
         </g>
       </svg>
@@ -895,14 +895,14 @@
       <span class="legend-item current-only"><span class="sample-box glue"></span>绿色：SGLang 仓库里的 Glue 调用点</span>
       <span class="legend-item current-only"><span class="sample-box adapter"></span>黄色：MLB 仓库里的 SGLang Adapter</span>
       <span class="legend-item current-only"><span class="sample-box support"></span>灰色：当前 MLB Recorder 等状态组件</span>
-      <span class="legend-item current-only"><span class="sample-box policy"></span>紫色：Policy 功能（Planner / 当前 Runtime 内的 skip）</span>
+      <span class="legend-item current-only"><span class="sample-box policy"></span>紫色：EPLB placement Policy</span>
       <span class="legend-item current-only"><span class="sample-box problem"></span>红色虚线：MLB 当前实现自身的设计问题</span>
       <span class="legend-item target-only"><span class="sample-box glue"></span>绿色：SGLang Glue</span>
       <span class="legend-item target-only"><span class="sample-box adapter"></span>黄色：MLB SGLang Adapter</span>
-      <span class="legend-item target-only"><span class="sample-box policy"></span>紫色：EPLB Policy（threshold + placement）</span>
+      <span class="legend-item target-only"><span class="sample-box policy"></span>紫色：EPLB Policy（只计算 placement）</span>
       <span class="hint original-only">点击节点可打开对应的 SGLang 源文件</span>
       <span class="hint current-only">不评价尚未完成的 SGLang 接入分支</span>
-      <span class="hint target-only">步骤 11 的时钟属于 SGLang；到周期后由 EPLB Policy 判断 threshold 并生成布局</span>
+      <span class="hint target-only">步骤 11 的时钟、dump/all-reduce 和 threshold 都属于 SGLang；MLB 只计算布局</span>
     </div>
 
     <div class="current-explanation" aria-label="当前 MLB EPLB 实现说明">
@@ -924,7 +924,7 @@
       </div>
       <div class="boundary-card problem">
         <strong>第 11 步当前也被拆开</strong>
-        <span>“每 N 次 forward”由 SGLang EPLBManager 触发，这一点与目标一致；当前触发后进入算法专用 <code>SGLangEPLBRuntime</code>，其中混合了 drain 和 threshold/skip。目标边界只保留 Adapter 和 EPLB Policy：Adapter 读取统计，Policy 依次做 threshold 判断和 placement。</span>
+        <span>“每 N 次 forward”由 SGLang EPLBManager 触发，这一点与目标一致；当前触发后进入算法专用 <code>SGLangEPLBRuntime</code>，其中混合了 drain 和 threshold/skip。目标要求把 threshold/skip 完整留在 SGLang：未通过就直接结束；通过后 Adapter 才翻译统计，MLB EPLB Policy 只计算 placement。</span>
       </div>
       <div class="boundary-card problem">
         <strong>Provider 发布时机存在问题</strong>
@@ -939,11 +939,11 @@
       </div>
       <div class="boundary-card sglang">
         <strong>一次 forward 是整个 ModelRunner 调用，不是一个 layer</strong>
-        <span><code>with_forward_pass()</code> 包住完整的 <code>ModelRunner._forward_raw()</code>。模型在其内部遍历本 rank 负责的 layer；每个 MoE layer 的 TopK/dispatcher hook 只更新同一个临时 physical-count Tensor 中自己的 <code>layer_idx</code> 行。循环全部结束、<code>_forward_raw()</code> 返回后，recorder 才 collect，并向窗口 append 一次 <code>[layer, physical expert]</code>。因此，对 <code>num_hidden_layers=61</code> 且没有 Pipeline Parallel 的 DeepSeek，一次模型 forward 跑完 61 层后才 append 一条 61 行记录；不是每层 append。开启 PP 时，每个 rank 只跑自己的 layer 区间，但仍是该 rank 整次 forward 结束后 append 一次。随后 cadence 才前进一步；到 every-N 才 dump、physical→logical、all-reduce、汇总 utilization 并 reset。黄色 Adapter 只把最终 payload 翻译成 <code>PlacementStats</code>。</span>
+        <span><code>with_forward_pass()</code> 包住完整的 <code>ModelRunner._forward_raw()</code>。模型在其内部遍历本 rank 负责的 layer；每个 MoE layer 的 TopK/dispatcher hook 只更新同一个临时 physical-count Tensor 中自己的 <code>layer_idx</code> 行。循环全部结束、<code>_forward_raw()</code> 返回后，recorder 才 collect，并向窗口 append 一次 <code>[layer, physical expert]</code>。因此，对 <code>num_hidden_layers=61</code> 且没有 Pipeline Parallel 的 DeepSeek，一次模型 forward 跑完 61 层后才 append 一条 61 行记录；不是每层 append。开启 PP 时，每个 rank 只跑自己的 layer 区间，但仍是该 rank 整次 forward 结束后 append 一次。随后 cadence 才前进一步；到 every-N 时，SGLang 执行 dump、physical→logical、all-reduce、汇总 utilization、threshold/skip 和 reset。未跳过时，黄色 Adapter 才把最终 payload 翻译成 <code>PlacementStats</code>。</span>
       </div>
-      <div class="boundary-card policy">
-        <strong>EPLB Policy · 判断并生成布局</strong>
-        <span>SGLang EPLBManager 自己维护 every-N cadence。到周期后，SGLang recorder 才执行 dump；<code>ALL-REDUCE(SUM)</code> 使用官方当前的 default distributed group，让各 rank 得到同一份全局 logical count，然后 reset。Adapter 将结果翻译为 <code>PlacementStats</code>。同一个 EPLB Policy 先判断 utilization threshold：高于阈值就结束，不高于阈值则在同一调用链中立即运行 placement 算法。</span>
+      <div class="boundary-card sglang">
+        <strong>SGLang 判断 threshold；MLB Policy 只计算布局</strong>
+        <span>SGLang EPLBManager 自己维护 every-N cadence。到周期后，SGLang recorder 执行 dump；<code>ALL-REDUCE(SUM)</code> 使用官方当前的 default distributed group，让各 rank 得到同一份全局 logical count。随后仍由 SGLang 根据 utilization threshold 决定是否跳过：跳过时根本不调用 MLB；未跳过时，黄色 Adapter 才把结果翻译为 <code>PlacementStats</code> / <code>PlacementRequest</code>，紫色 EPLB Policy 只负责生成 candidate <code>PlacementPlan</code>。</span>
       </div>
       <div class="boundary-card sglang">
         <strong>L1 算完新布局后，不能马上让 L2 切换</strong>
