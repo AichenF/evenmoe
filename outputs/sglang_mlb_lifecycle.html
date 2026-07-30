@@ -323,7 +323,7 @@
     }
 
     .phase-band.startup { top: 46px; height: 190px; }
-    .phase-band.forward { top: 266px; height: 278px; }
+    .phase-band.forward { top: 266px; height: 300px; }
     .phase-band.rebalance { top: 574px; height: 286px; }
     .phase-band.publish { top: 890px; height: 178px; }
 
@@ -887,7 +887,8 @@
             <code>LPLBSolver</code>，再执行每个 TopK 上的 <code>WaterfillBalancer</code>。
             MLB 仓库当前则另有 <code>SGLangEPLBRuntime</code>、<code>LPCFRuntime</code> 和
             <code>WaterfillRuntime</code>；SGLang main 尚未导入这些 MLB POC 对象。
-            EPLB 主节点直接复用 reviewed restored 图；L2 只作为 Step 7 周围的未编号分支出现。
+            EPLB 主节点直接复用 reviewed restored 图；L2 在 Step 7 的主路径上直接替换
+            <code>topk_output</code>，不是旁支。
           </p>
         </div>
         <div class="figure-badge">M 种框架 × N 种策略</div>
@@ -944,10 +945,10 @@
               <path class="flow" d="M446 398 L474 398"/>
               <path class="flow" d="M694 398 L722 398"/>
               <path class="flow" d="M942 398 L970 398"/>
-              <path class="flow dashed bad" d="M584 478 L584 518 L1328 518 L1328 478"/>
-              <path class="flow dashed bad" d="M1218 398 L1198 398 L1198 292 L832 292 L832 318"/>
-              <path class="flow dashed" d="M584 478 L584 545 L351 545 L351 650"/>
-              <path class="flow dashed" d="M1080 478 L1080 560 L351 560 L351 650"/>
+              <path class="flow dashed bad" d="M1218 418 L1198 418 L1198 292 L832 292 L832 318"/>
+              <path class="flow dashed bad" d="M1268 518 L1268 556 L832 556 L832 518"/>
+              <path class="flow dashed" d="M584 518 L584 585 L351 585 L351 650"/>
+              <path class="flow dashed" d="M1080 478 L1080 600 L351 600 L351 650"/>
 
               <path class="flow" d="M476 710 L504 710"/>
               <path class="flow" d="M754 710 L782 710"/>
@@ -959,7 +960,7 @@
               <path class="flow" d="M1152 996 L1180 996"/>
               <path class="flow dashed" d="M1538 996 L1558 996 L1558 270 L1507 270"/>
 
-              <text class="flow-label" x="835" y="510">TopK 或 dispatcher hook</text>
+              <text class="flow-label bad" x="1000" y="548">候选 plan 提前对 L2 可见</text>
               <text class="flow-label" x="877" y="698">最近 N 轮负载</text>
               <text class="flow-label" x="870" y="867">候选布局</text>
               <text class="flow-label" x="1559" y="615" transform="rotate(-90 1559 615)">下一轮使用新布局</text>
@@ -987,7 +988,7 @@
               <div class="mini-stack">
                 <div class="mini glue-role">SGLang metadata<em>physical → logical</em></div>
                 <div class="mini bad">SGLangEPLBRuntime<em>普通输入 → candidate maps</em></div>
-                <div class="mini bad">Provider.update_with(plan)<em>候选 plan 提前对 L2 可见</em></div>
+                <div class="mini bad">EPLBPlacementProvider.update_with(plan)<em>runtime.py:244-248 紧邻 plan()</em></div>
               </div>
             </div>
 
@@ -1016,11 +1017,11 @@
             </a>
 
             <a class="card sglang" href="../../sglang/python/sglang/srt/eplb/expert_location_dispatch.py"
-               style="left:722px;top:318px;width:220px;height:160px">
-              <span class="step">步骤 07 · SGLANG EPLB</span>
-              <span class="card-title">Logical → physical</span>
-              <span class="card-copy">static / dynamic / LP<br>choose one physical replica</span>
-              <span class="card-code">expert_location_dispatch.py</span>
+               style="left:722px;top:318px;width:220px;height:200px">
+              <span class="step">步骤 07 · 主路径 · SGLANG + L2</span>
+              <span class="card-title">Logical → physical + L2</span>
+              <span class="card-copy">三个执行者挤在同一个主路径点上，L2 直接替换 topk_output，不是旁支</span>
+              <span class="card-code">① SGLang remap · expert_location_dispatch.py<br>② SGLang main 写死 · LPLBSolver → WaterfillBalancer<br>③ MLB POC · LPCFRuntime / WaterfillRuntime</span>
             </a>
 
             <a class="card sglang" href="../../sglang/python/sglang/srt/layers/moe/token_dispatcher/deepep.py"
@@ -1031,11 +1032,14 @@
               <span class="card-code">token_dispatcher/*</span>
             </a>
 
-            <div class="card problem" style="left:1218px;top:318px;width:220px;height:160px">
-              <span class="step">未编号分支 · CURRENT L2</span>
-              <span class="card-title">Optional LP replica solve</span>
-              <span class="card-copy">SGLang main 固定执行<br>LPLBSolver → WaterfillBalancer</span>
-              <span class="card-code">TopK 内的固定组合</span>
+            <div class="card problem" style="left:1218px;top:318px;width:220px;height:200px">
+              <span class="step">问题 ② · 两个 PLACEMENT PROVIDER</span>
+              <span class="card-title">同一 protocol，两种语义</span>
+              <div class="mini-stack" style="grid-template-columns:1fr">
+                <div class="mini bad">EPLBPlacementProvider<em>policies/l1/eplb/provider.py<br>发 L1 候选 plan</em></div>
+                <div class="mini bad">SGLangPlacementAdapter<em>adapters/sglang/providers.py<br>发 SGLang 真实 metadata</em></div>
+              </div>
+              <span class="card-code">L2 注入哪个靠约定，类型无法区分</span>
             </div>
 
             <a class="card sglang" href="../../sglang/python/sglang/srt/eplb/expert_distribution.py"
@@ -1119,8 +1123,8 @@
             <div class="note bad" style="left:818px;top:222px;width:316px">
               问题 ① 没有真正的顶层 <code>MoELoadBalancer</code>
             </div>
-            <div class="note bad" style="left:930px;top:489px;width:303px">
-              问题 ② EPLB 主步骤外，MLB POC 仍有 LPCFRuntime / WaterfillRuntime
+            <div class="note bad" style="left:226px;top:496px;width:330px">
+              问题 ② 不只是时序问题：两个 provider 共用 <code>PlacementProvider</code>，L2 读到候选还是真实布局无法由类型保证
             </div>
             <div class="note bad" style="left:960px;top:820px;width:288px">
               问题 ③ Step 12 后 POC 提前 publish；SGLang 还未执行 Step 13–恢复节点
@@ -1128,7 +1132,7 @@
 
             <div class="summary-strip">
               <strong>结果：M×N</strong>
-              <span>SGLang main 的组合顺序写死在 TopK；MLB POC 仍按算法增加 runtime，dynamic 路径可能重复通信，而且 L1 candidate publish 早于 SGLang apply。</span>
+              <span>SGLang main 的组合顺序写死在 TopK；MLB POC 仍按算法增加 runtime，dynamic 路径可能重复通信，而且 <code>PlacementProvider</code> 同时被候选 plan 和真实 metadata 实现，L1 candidate publish 早于 SGLang apply。</span>
             </div>
           </div>
         </div>
@@ -1137,7 +1141,6 @@
       <div class="legend">
         <span class="legend-item"><span class="swatch sg"></span>SGLang 生命周期 / 执行</span>
         <span class="legend-item"><span class="swatch glue"></span>SGLang Glue：初始化接线</span>
-        <span class="legend-item"><span class="swatch adapter"></span>SGLang 适配工作</span>
         <span class="legend-item"><span class="swatch l1"></span>MLB L1 策略</span>
         <span class="legend-item"><span class="swatch mlb"></span>当前架构问题</span>
       </div>
@@ -1211,9 +1214,9 @@
               <path class="flow good" style="marker-end:url(#target-arrow-good)" d="M832 478 L832 480"/>
               <path class="flow good" style="marker-end:url(#target-arrow-good)" d="M942 497 L956 497 L956 398 L970 398"/>
               <path class="flow dashed" style="marker-end:url(#target-arrow)" d="M942 299 L1328 299 L1328 318"/>
-              <path class="flow dashed" style="marker-end:url(#target-arrow)" d="M1218 398 L1198 398 L1198 340 L942 340"/>
-              <path class="flow dashed" style="marker-end:url(#target-arrow)" d="M584 478 L584 545 L351 545 L351 650"/>
-              <path class="flow dashed" style="marker-end:url(#target-arrow)" d="M1080 478 L1080 560 L351 560 L351 650"/>
+              <path class="flow dashed" style="marker-end:url(#target-arrow)" d="M1218 418 L1198 418 L1198 340 L942 340"/>
+              <path class="flow dashed" style="marker-end:url(#target-arrow)" d="M584 478 L584 585 L351 585 L351 650"/>
+              <path class="flow dashed" style="marker-end:url(#target-arrow)" d="M1080 478 L1080 600 L351 600 L351 650"/>
 
               <path class="flow" style="marker-end:url(#target-arrow)" d="M476 710 L504 710"/>
               <path class="flow good" style="marker-end:url(#target-arrow-good)" d="M754 710 L782 710"/>
@@ -1283,7 +1286,7 @@
                  style="left:722px;top:318px;width:220px;height:160px">
               <span class="step">步骤 07 · MLB ORCHESTRATOR</span>
               <span class="card-title">Logical → physical</span>
-              <span class="card-copy">LPLB / LP-CF → Waterfill<br>use current PlacementSnapshot</span>
+              <span class="card-copy">LP-CF / LPLB → Waterfill<br><strong>placement 只来自 SGLangPlacementAdapter</strong><br>永不读 L1 候选 plan</span>
               <span class="card-code">RoutingRequest → RoutingDecision</span>
             </div>
 
@@ -1295,11 +1298,11 @@
               <span class="card-code">token_dispatcher/*</span>
             </a>
 
-            <div class="card l2" style="left:1218px;top:318px;width:220px;height:160px">
-              <span class="step">未编号分支 · TARGET L2</span>
-              <span class="card-title">Optional LP replica solve</span>
-              <span class="card-copy">logical demand + EP all-reduce<br>LPLB / LP-CF → Waterfill</span>
-              <span class="card-code">统一 Adapter → Orchestrator</span>
+            <div class="card l2" style="left:1218px;top:318px;width:220px;height:200px">
+              <span class="step">主路径展开 · TARGET L2 链</span>
+              <span class="card-title">LP-CF → Waterfill 串接</span>
+              <span class="card-copy">Waterfill 不再自己算负载：直接复用 post-LP-CF 的 topk</span>
+              <span class="card-code">① AR global_logical_count → LP-CF<br>② count_local_routed_per_rank(post-LPCF topk)<br>③ → routed_rank_load → Waterfill(static)<br>共 1 次 EP 通信</span>
             </div>
 
             <a class="card sglang" href="../../sglang/python/sglang/srt/eplb/expert_distribution.py"
@@ -1421,6 +1424,12 @@
               <span>ADAPTER · NEW SNAPSHOT → L2</span>
             </div>
 
+            <div class="note good" style="left:226px;top:496px;width:330px">
+              需要的改动：<code>EPLBPlacementProvider</code> 停止实现
+              <code>PlacementProvider</code>（改名如 <code>LatestPlanHolder</code>），
+              让 L2 读路径上只剩 <code>SGLangPlacementAdapter</code> 一个实现
+            </div>
+
             <div class="summary-strip">
               <strong>结果：M+N</strong>
               <span>M 个框架无关策略 + N 个统一框架 Adapter；每个 Adapter 内部复用同一个 Orchestrator 设计，实际布局以框架为准。</span>
@@ -1453,7 +1462,7 @@
         </div>
         <div class="comparison-card">
           <strong>L1 生成 plan 后不能马上切换 L2</strong>
-          <span>Step 12 只得到 candidate <code>PlacementPlan</code>。Step 13、Step 14 和 missing-weight recovery 全部由 SGLang 完成；期间 L2 继续使用旧 <code>PlacementSnapshot</code>。全部成功后，Adapter 才从真实 metadata 构造新 snapshot，并让统一 Orchestrator 的 LPLB / LP-CF → Waterfill 使用它。</span>
+          <span>Step 12 只得到 candidate <code>PlacementPlan</code>。Step 13、Step 14 和 missing-weight recovery 全部由 SGLang 完成；期间 L2 继续使用旧 <code>PlacementSnapshot</code>。全部成功后，Adapter 才从真实 metadata 构造新 snapshot。为了让这条规则由类型保证而不是靠约定，候选 plan 不能再是 <code>PlacementProvider</code>：<code>EPLBPlacementProvider</code> 应降级成纯 plan holder。</span>
         </div>
       </div>
     </section>
