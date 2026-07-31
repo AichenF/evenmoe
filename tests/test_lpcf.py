@@ -199,3 +199,57 @@ def test_triton_dispatch_zero_row_falls_back_to_uniform():
     n10 = int((out_cpu == 10).sum())
     # Expect ~50/50 split; allow wide band given Bernoulli noise on n=2048.
     assert 800 < n10 < 1248
+
+
+@pytest.mark.skipif(not _HAS_CUDA, reason="needs CUDA + triton")
+def test_router_refreshes_cached_placement_after_in_place_eplb_update():
+    """An in-place framework metadata update must invalidate the int32 cache."""
+    import torch
+
+    from moe_load_balancer.core import (
+        PlacementSnapshot,
+        RoutingPolicyConfig,
+        RoutingRequest,
+    )
+    from moe_load_balancer.policies.l2.lpcf import LPCFL2Router
+
+    candidates = torch.tensor([[0, 2], [1, 3]], dtype=torch.int64, device="cuda")
+    copy_count = torch.tensor([2, 2], dtype=torch.int64, device="cuda")
+    snapshot = PlacementSnapshot(
+        layer_id=0,
+        num_logical_experts=2,
+        num_physical_experts=4,
+        ep_size=2,
+        num_local_physical_experts=2,
+        physical_to_logical_map=torch.tensor(
+            [0, 1, 0, 1], dtype=torch.int64, device="cuda"
+        ),
+        logical_to_physical_candidates=candidates,
+        logical_to_physical_count=copy_count,
+        default_physical_for_logical=torch.tensor(
+            [0, 1], dtype=torch.int64, device="cuda"
+        ),
+    )
+    request = RoutingRequest(
+        layer_id=0,
+        logical_topk_ids=torch.tensor([[0, 1]], dtype=torch.int64, device="cuda"),
+        topk_weights=torch.ones((1, 2), dtype=torch.float32, device="cuda"),
+        policies=(RoutingPolicyConfig(name="lplb"),),
+        placement=snapshot,
+        global_logical_count=torch.ones(2, dtype=torch.float32, device="cuda"),
+    )
+    router = LPCFL2Router(ep_size=2, num_physical_experts=4)
+    policy = RoutingPolicyConfig(name="lplb")
+
+    router.route_tokens(request, policy)
+    first_cached = router._placement_cache[0][1]
+    assert torch.equal(first_cached, candidates.to(torch.int32))
+
+    candidates.copy_(
+        torch.tensor([[2, 0], [3, 1]], dtype=torch.int64, device="cuda")
+    )
+    router.route_tokens(request, policy)
+    second_cached = router._placement_cache[0][1]
+
+    assert second_cached.data_ptr() != first_cached.data_ptr()
+    assert torch.equal(second_cached, candidates.to(torch.int32))

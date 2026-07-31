@@ -170,10 +170,9 @@ def _ensure_int32_contig(t: Tensor) -> Tensor:
 class LPCFL2Router(TokenRouter):
     """LP-CF L2 router: closed-form pair-split + multinomial dispatch.
 
-    Stateful: caches per-(layer, placement-version) buffers
-    (log2phy_prob, L scratch, int32 view of the placement candidates) keyed
-    by the candidates tensor's ``data_ptr``; cache misses re-derive only on
-    placement change (EPLB rebalance).
+    Stateful: caches the int32 placement views per layer.  The cache key tracks
+    tensor identity and PyTorch's in-place mutation version so an EPLB update
+    of SGLang's live metadata is visible on the next routing call.
     """
 
     phase = RoutingPhase.PHYSICAL_ROUTING
@@ -190,9 +189,7 @@ class LPCFL2Router(TokenRouter):
         self.num_physical_experts = num_physical_experts
         self._L_scratch: Optional[Tensor] = None
         self._log2phy_prob: Optional[Tensor] = None
-        self._placement_key: Optional[tuple] = None
-        self._log2phy_i32: Optional[Tensor] = None
-        self._log_counts_i32: Optional[Tensor] = None
+        self._placement_cache: dict[int, tuple[tuple, Tensor, Tensor]] = {}
         self._dispatch_out_buf: Optional[Tensor] = None
         self._dispatch_random_buf: Optional[Tensor] = None
 
@@ -231,14 +228,34 @@ class LPCFL2Router(TokenRouter):
         if global_counts.dtype != torch.float32:
             global_counts = global_counts.to(torch.float32)
 
-        key = (candidates.data_ptr(), tuple(candidates.shape))
-        if key != self._placement_key:
-            self._log2phy_i32 = _ensure_int32_contig(candidates)
-            self._log_counts_i32 = _ensure_int32_contig(log_counts)
+        key = (
+            candidates.data_ptr(),
+            tuple(candidates.shape),
+            getattr(candidates, "_version", None),
+            log_counts.data_ptr(),
+            tuple(log_counts.shape),
+            getattr(log_counts, "_version", None),
+        )
+        cached = self._placement_cache.get(request.layer_id)
+        if cached is None or cached[0] != key:
+            log2phy_i32 = _ensure_int32_contig(candidates)
+            log_counts_i32 = _ensure_int32_contig(log_counts)
+            self._placement_cache[request.layer_id] = (
+                key,
+                log2phy_i32,
+                log_counts_i32,
+            )
+        else:
+            _, log2phy_i32, log_counts_i32 = cached
+
+        if (
+            self._log2phy_prob is None
+            or self._log2phy_prob.shape != (num_logical, max_copies)
+            or self._log2phy_prob.device != device
+        ):
             self._log2phy_prob = torch.empty(
                 (num_logical, max_copies), dtype=torch.float32, device=device,
             )
-            self._placement_key = key
 
         if self._L_scratch is None or self._L_scratch.device != device:
             self._L_scratch = torch.zeros(
@@ -253,8 +270,8 @@ class LPCFL2Router(TokenRouter):
             self._log2phy_prob.view(-1),
             self._L_scratch,
             global_counts,
-            self._log2phy_i32.view(-1),
-            self._log_counts_i32,
+            log2phy_i32.view(-1),
+            log_counts_i32,
             NUM_LOGICAL=num_logical,
             MAX_COPIES=max_copies,
             NUM_LOCAL_PHYS=num_local,
@@ -280,7 +297,7 @@ class LPCFL2Router(TokenRouter):
         grid = ((n + _DISPATCH_BLOCK_DIM - 1) // _DISPATCH_BLOCK_DIM,)
         _dispatch_probability_kernel[grid](
             out, flat_in,
-            self._log2phy_prob, self._log2phy_i32,
+            self._log2phy_prob, log2phy_i32,
             random_vals, n,
             MAX_COPIES=max_copies,
             K_BOUND=k_bound,
