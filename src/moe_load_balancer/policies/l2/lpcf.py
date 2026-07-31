@@ -135,6 +135,7 @@ def _dispatch_probability_kernel(
     log2phy_map_ptr,         # (NL, MC) int32
     random_vals_ptr,         # (N,) fp32 uniform [0, 1)
     N,
+    NUM_LOGICAL: tl.constexpr,
     MAX_COPIES: tl.constexpr,
     K_BOUND: tl.constexpr,
     BLOCK: tl.constexpr,
@@ -143,10 +144,11 @@ def _dispatch_probability_kernel(
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     in_bounds = offs < N
     logical = tl.load(in_topk_ids_ptr + offs, mask=in_bounds, other=0)
+    valid = in_bounds & (logical >= 0) & (logical < NUM_LOGICAL)
     col = tl.arange(0, K_BOUND)
     base = logical[:, None] * MAX_COPIES + col[None, :]
-    probs = tl.load(log2phy_prob_ptr + base, mask=in_bounds[:, None], other=0.0)
-    maps = tl.load(log2phy_map_ptr + base, mask=in_bounds[:, None], other=-1)
+    probs = tl.load(log2phy_prob_ptr + base, mask=valid[:, None], other=0.0)
+    maps = tl.load(log2phy_map_ptr + base, mask=valid[:, None], other=-1)
     row_sum = tl.sum(probs, axis=1)
     fallback = tl.where(maps >= 0, 1.0, 0.0)
     use_fb = row_sum <= 0.0
@@ -158,6 +160,7 @@ def _dispatch_probability_kernel(
     chosen = tl.minimum(chosen, K_BOUND - 1)
     onehot = (col[None, :] == chosen[:, None])
     out = tl.sum(tl.where(onehot, maps, 0), axis=1)
+    out = tl.where(valid, out, -1)
     tl.store(out_topk_ids_ptr + offs, out, mask=in_bounds)
 
 
@@ -299,6 +302,7 @@ class LPCFL2Router(TokenRouter):
             out, flat_in,
             self._log2phy_prob, log2phy_i32,
             random_vals, n,
+            NUM_LOGICAL=num_logical,
             MAX_COPIES=max_copies,
             K_BOUND=k_bound,
             BLOCK=_DISPATCH_BLOCK_DIM,

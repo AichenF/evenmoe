@@ -163,7 +163,7 @@ def test_triton_dispatch_picks_only_valid_slot():
     grid = ((n + _DISPATCH_BLOCK_DIM - 1) // _DISPATCH_BLOCK_DIM,)
     _dispatch_probability_kernel[grid](
         out, topk_ids, prob, log2phy_map, random_vals, n,
-        MAX_COPIES=NP, K_BOUND=k_bound, BLOCK=_DISPATCH_BLOCK_DIM,
+        NUM_LOGICAL=NL, MAX_COPIES=NP, K_BOUND=k_bound, BLOCK=_DISPATCH_BLOCK_DIM,
     )
     expected = topk_ids * 2
     assert torch.equal(out, expected)
@@ -192,13 +192,43 @@ def test_triton_dispatch_zero_row_falls_back_to_uniform():
     grid = ((n + _DISPATCH_BLOCK_DIM - 1) // _DISPATCH_BLOCK_DIM,)
     _dispatch_probability_kernel[grid](
         out, topk_ids, prob, log2phy_map, random_vals, n,
-        MAX_COPIES=NP, K_BOUND=k_bound, BLOCK=_DISPATCH_BLOCK_DIM,
+        NUM_LOGICAL=NL, MAX_COPIES=NP, K_BOUND=k_bound, BLOCK=_DISPATCH_BLOCK_DIM,
     )
     out_cpu = out.cpu().numpy()
     assert set(out_cpu.tolist()) == {10, 20}
     n10 = int((out_cpu == 10).sum())
     # Expect ~50/50 split; allow wide band given Bernoulli noise on n=2048.
     assert 800 < n10 < 1248
+
+
+@pytest.mark.skipif(not _HAS_CUDA, reason="needs CUDA + triton")
+def test_triton_dispatch_preserves_padding_and_rejects_out_of_range_ids():
+    """Padding and malformed logical IDs must never index the placement table."""
+    import torch
+    from moe_load_balancer.policies.l2.lpcf import (
+        _dispatch_probability_kernel, _DISPATCH_BLOCK_DIM, _DEFAULT_K_BOUND,
+    )
+
+    NL, NP = 4, 8
+    prob = torch.zeros((NL, NP), dtype=torch.float32, device="cuda")
+    prob[:, 0] = 1.0
+    log2phy_map = torch.full((NL, NP), -1, dtype=torch.int32, device="cuda")
+    log2phy_map[:, 0] = torch.arange(NL, dtype=torch.int32, device="cuda")
+    topk_ids = torch.tensor([-1, 0, 3, NL], dtype=torch.int32, device="cuda")
+    random_vals = torch.rand(topk_ids.numel(), dtype=torch.float32, device="cuda")
+    out = torch.empty_like(topk_ids)
+    k_bound = min(NP, _DEFAULT_K_BOUND)
+    grid = ((topk_ids.numel() + _DISPATCH_BLOCK_DIM - 1) // _DISPATCH_BLOCK_DIM,)
+
+    _dispatch_probability_kernel[grid](
+        out, topk_ids, prob, log2phy_map, random_vals, topk_ids.numel(),
+        NUM_LOGICAL=NL, MAX_COPIES=NP, K_BOUND=k_bound, BLOCK=_DISPATCH_BLOCK_DIM,
+    )
+
+    assert torch.equal(
+        out,
+        torch.tensor([-1, 0, 3, -1], dtype=torch.int32, device="cuda"),
+    )
 
 
 @pytest.mark.skipif(not _HAS_CUDA, reason="needs CUDA + triton")
