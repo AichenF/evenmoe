@@ -30,7 +30,12 @@ import triton.language as tl
 from torch import Tensor
 
 from moe_load_balancer.core.l2 import TokenRouter
-from moe_load_balancer.core.types import RoutingDecision, RoutingRequest
+from moe_load_balancer.core.types import (
+    RoutingDecision,
+    RoutingPhase,
+    RoutingPolicyConfig,
+    RoutingRequest,
+)
 
 # Local-rank preference fraction for Waterfill weighting (11/10 = 1.1x).
 _LOCAL_PREF_NUMER = 11
@@ -46,13 +51,15 @@ class WaterfillL2Router(TokenRouter):
     - ``request.routed_rank_load``: per-rank routed expert assignment count.
     - ``request.active_rank_token_count``: per-rank active token count
       (set only in dynamic mode; ``None`` signals static mode).
-    - ``request.policy.metadata["experts_per_rank"]``: DeepEP-style layout
+    - ``policy.metadata["experts_per_rank"]``: contiguous physical layout
       assumption (each rank holds N contiguously-numbered physical experts).
       This is a stable per-policy config string field, not a tensor.
 
     The router does not consume ``request.placement`` (Waterfill operates on
     already-physical IDs handed by the adapter).
     """
+
+    phase = RoutingPhase.SHARED_EXPERT
 
     def __init__(
         self,
@@ -73,40 +80,44 @@ class WaterfillL2Router(TokenRouter):
         self.local_preference = local_preference
         self.world_size = world_size
 
-    def route_tokens(self, request: RoutingRequest) -> RoutingDecision:
-        # Stage gating using the canonical core protocol path.
-        if not request.policy.should_run_for_stage(request.stage):
-            return RoutingDecision(
-                routed_physical_topk_ids=request.logical_topk_ids,
-                topk_weights=request.topk_weights,
-                shared_expert_rank=None,
-                metadata={"policy": request.policy.name, "skipped": True},
-            )
-
-        topk_ids = request.logical_topk_ids
+    def route_tokens(
+        self,
+        request: RoutingRequest,
+        policy: RoutingPolicyConfig,
+    ) -> RoutingDecision:
+        topk_ids = request.routed_physical_topk_ids
+        if topk_ids is None:
+            raise ValueError("WaterfillL2Router requires routed_physical_topk_ids.")
         if not isinstance(topk_ids, Tensor):
             raise TypeError("WaterfillL2Router requires torch.Tensor topk_ids.")
-        topk_size = topk_ids.shape[1]
-
         routed = request.routed_rank_load
         if routed is None or not isinstance(routed, Tensor):
-            raise ValueError(
-                "WaterfillL2Router requires routed_rank_load as a torch.Tensor."
-            )
+            raise ValueError("WaterfillL2Router requires routed_rank_load as a torch.Tensor.")
 
         active = request.active_rank_token_count
         if active is not None and not isinstance(active, Tensor):
             raise TypeError(
-                "WaterfillL2Router.active_rank_token_count must be a torch.Tensor "
-                "or None."
+                "WaterfillL2Router.active_rank_token_count must be a torch.Tensor or None."
             )
 
         try:
-            experts_per_rank = int(request.policy.metadata["experts_per_rank"])
+            experts_per_rank = int(policy.metadata["experts_per_rank"])
         except KeyError as exc:
             raise ValueError(
                 "WaterfillL2Router requires policy.metadata['experts_per_rank']."
             ) from exc
+
+        if topk_ids.numel() == 0:
+            return RoutingDecision(
+                routed_physical_topk_ids=topk_ids,
+                topk_weights=request.topk_weights,
+                shared_expert_rank=torch.empty(
+                    topk_ids.shape[0],
+                    dtype=torch.int64,
+                    device=topk_ids.device,
+                ),
+                metadata={"policy": policy.name, "empty": True},
+            )
 
         # Both paths are sync-free: routed_load is always pure routed counts
         # (used by the kernel to derive total_tokens internally). rank_load is
@@ -137,7 +148,7 @@ class WaterfillL2Router(TokenRouter):
             topk_weights=request.topk_weights,
             shared_expert_rank=chosen_rank,
             metadata={
-                "policy": request.policy.name,
+                "policy": policy.name,
                 "allow_all_ranks": allow_all_ranks,
             },
         )

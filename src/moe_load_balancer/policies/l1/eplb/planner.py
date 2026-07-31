@@ -15,14 +15,8 @@ import torch
 from torch import Tensor
 
 from moe_load_balancer.core.l1 import PlacementPlanner
-from moe_load_balancer.core.types import (
-    PlacementPlan,
-    PlacementPolicyConfig,
-    PlacementRequest,
-    PlacementSnapshot,
-)
+from moe_load_balancer.core.types import PlacementPlan, PlacementRequest
 from moe_load_balancer.policies.l1.eplb.algorithms import (
-    EplbAlgorithm,
     compute_algorithm,
     rebalance_experts,
 )
@@ -43,16 +37,12 @@ class DeepSeekEPLBPlanner(PlacementPlanner):
     ``num_local_physical_experts``, ``num_groups``, ``num_nodes``,
     optional ``algorithm`` and ``active_ranks``) and the
     ``logical_count`` tensor from ``request.stats``, dispatches to the
-    matching variant via the vendored algorithms package, and returns a
-    ``PlacementPlan`` whose:
+    matching variant via the vendored algorithms package.
 
-    - ``snapshots`` is a per-layer framework-neutral ``PlacementSnapshot``
-      view, suitable for L2 consumers.
-    - ``metadata`` carries the raw three EPLB output tensors
-      (``physical_to_logical_map``, ``logical_to_all_physical_map``,
-      ``expert_count``) verbatim, so framework adapters can write back to
-      native placement structures (e.g. SGLang ``ExpertLocationMetadata``)
-      without round-tripping through ``snapshots``.
+    The returned ``PlacementPlan`` carries the three raw candidate mapping
+    tensors. It is not a committed ``PlacementSnapshot`` and must not become
+    visible to L2 until the framework has moved weights and committed its
+    live placement metadata.
 
     Equivalence with sglang: a request whose ``policy.metadata`` mirrors
     sglang's ``_init_common`` scalars and whose ``stats.logical_count`` is
@@ -73,7 +63,7 @@ class DeepSeekEPLBPlanner(PlacementPlanner):
     def plan(self, request: PlacementRequest) -> PlacementPlan:
         policy = request.policy
         if policy.is_disabled:
-            return PlacementPlan(snapshots={}, metadata={"skipped": True})
+            raise ValueError("DeepSeekEPLBPlanner cannot run a disabled placement policy.")
 
         m = policy.metadata
         missing = [k for k in _REQUIRED_METADATA_SCALARS if k not in m]
@@ -85,9 +75,7 @@ class DeepSeekEPLBPlanner(PlacementPlanner):
 
         logical_count = request.stats.logical_count
         if logical_count is None:
-            raise ValueError(
-                "DeepSeekEPLBPlanner requires request.stats.logical_count."
-            )
+            raise ValueError("DeepSeekEPLBPlanner requires request.stats.logical_count.")
         if not isinstance(logical_count, Tensor):
             logical_count = torch.tensor(logical_count)
         if logical_count.dim() == 2:
@@ -114,39 +102,11 @@ class DeepSeekEPLBPlanner(PlacementPlanner):
             active_ranks=active_ranks,
         )
 
-        snapshots = _pack_snapshots(phy2log, log2allphy, expert_count)
         return PlacementPlan(
-            snapshots=snapshots,
+            physical_to_logical_map=phy2log,
+            logical_to_all_physical_map=log2allphy,
+            logical_to_physical_count=expert_count,
             metadata={
-                "physical_to_logical_map": phy2log,
-                "logical_to_all_physical_map": log2allphy,
-                "expert_count": expert_count,
                 "algorithm": algorithm.name,
             },
         )
-
-
-def _pack_snapshots(
-    phy2log: Tensor,
-    log2allphy: Tensor,
-    expert_count: Tensor,
-) -> dict[int, PlacementSnapshot]:
-    """Pack EPLB output tensors into per-layer framework-neutral snapshots.
-
-    Cheap CPU-side fan-out: each layer gets a slice view, no copy. The
-    adapter typically ignores this and uses ``PlacementPlan.metadata`` for
-    writeback, but L2 consumers (Waterfill / LPLB / Metro) read this.
-    """
-
-    num_layers, num_physical = phy2log.shape
-    _, num_logical, _ = log2allphy.shape
-    out: dict[int, PlacementSnapshot] = {}
-    for layer_id in range(num_layers):
-        out[layer_id] = PlacementSnapshot(
-            layer_id=layer_id,
-            num_logical_experts=num_logical,
-            num_physical_experts=num_physical,
-            logical_to_physical_candidates=log2allphy[layer_id],
-            logical_to_physical_count=expert_count[layer_id],
-        )
-    return out

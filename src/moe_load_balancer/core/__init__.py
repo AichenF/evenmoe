@@ -1,7 +1,8 @@
-"""Core framework-neutral contracts."""
+"""Framework-neutral contracts and the unified orchestrator."""
 
-from moe_load_balancer.core.l1 import PlacementPlanner, PlacementProvider
+from moe_load_balancer.core.l1 import PlacementPlanner
 from moe_load_balancer.core.l2 import RoutingLoadHistoryProvider, TokenRouter
+from moe_load_balancer.core.orchestrator import MoELoadBalancer
 from moe_load_balancer.core.types import (
     PlacementPlan,
     PlacementPolicyConfig,
@@ -10,6 +11,7 @@ from moe_load_balancer.core.types import (
     PlacementStats,
     RoutingDecision,
     RoutingLoadHistory,
+    RoutingPhase,
     RoutingPolicyConfig,
     RoutingRequest,
     RoutingStage,
@@ -17,16 +19,17 @@ from moe_load_balancer.core.types import (
 )
 
 __all__ = [
+    "MoELoadBalancer",
     "PlacementPlan",
     "PlacementPlanner",
     "PlacementPolicyConfig",
-    "PlacementProvider",
     "PlacementRequest",
     "PlacementSnapshot",
     "PlacementStats",
     "RoutingDecision",
     "RoutingLoadHistory",
     "RoutingLoadHistoryProvider",
+    "RoutingPhase",
     "RoutingPolicyConfig",
     "RoutingRequest",
     "RoutingStage",

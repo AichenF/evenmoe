@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from moe_load_balancer.policies.l2.lpcf import closed_form_pair_oracle
+from moe_load_balancer.policies.l2.lpcf_reference import closed_form_pair_oracle
 
 
 EP_SIZE = 4

@@ -27,16 +27,20 @@ a second multinomial-samples each (token, slot) into a physical expert.
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Optional
 
-import numpy as np
 import torch
 import triton
 import triton.language as tl
 from torch import Tensor
 
 from moe_load_balancer.core.l2 import TokenRouter
-from moe_load_balancer.core.types import RoutingDecision, RoutingRequest
+from moe_load_balancer.core.types import (
+    RoutingDecision,
+    RoutingPhase,
+    RoutingPolicyConfig,
+    RoutingRequest,
+)
 
 
 _CF_BLOCK_DIM = 128
@@ -46,69 +50,6 @@ _DISPATCH_BLOCK_DIM = 256
 # first K_i columns are valid for each logical; iterating num_physical_experts
 # wastes registers and HBM traffic. 32 covers ep_num_redundant_experts <= 31.
 _DEFAULT_K_BOUND = 32
-
-
-def closed_form_pair_oracle(
-    global_counts: np.ndarray,
-    log2phy_map: np.ndarray,
-    log_counts: np.ndarray,
-    ep_size: int,
-    num_physical_experts: int,
-    max_copies: int,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Numpy reference for the CF Triton kernel. Used by tests."""
-    num_logical = len(global_counts)
-    num_local = num_physical_experts // ep_size
-    out = np.zeros((num_logical, max_copies), dtype=np.float32)
-    L = np.zeros(ep_size, dtype=np.float32)
-    total = max(float(global_counts.sum()), 1.0)
-    inv_total = 1.0 / total
-
-    for i in range(num_logical):
-        if log_counts[i] != 1 or global_counts[i] <= 0:
-            continue
-        phys = int(log2phy_map[i, 0])
-        if phys < 0:
-            continue
-        g = float(global_counts[i])
-        L[phys // num_local] += g
-        out[i, 0] = g * inv_total
-
-    for i in range(num_logical):
-        k = int(log_counts[i])
-        g = float(global_counts[i])
-        if k < 3 or g <= 0:
-            continue
-        share = g / k
-        for kk in range(min(k, max_copies)):
-            phys = int(log2phy_map[i, kk])
-            if phys < 0:
-                continue
-            L[phys // num_local] += share
-            out[i, kk] = share * inv_total
-
-    L_snap = L.copy()
-    for i in range(num_logical):
-        if int(log_counts[i]) != 2 or float(global_counts[i]) <= 0:
-            continue
-        phys_a = int(log2phy_map[i, 0])
-        phys_b = int(log2phy_map[i, 1])
-        if phys_a < 0 or phys_b < 0:
-            continue
-        r_a = phys_a // num_local
-        r_b = phys_b // num_local
-        g_i = float(global_counts[i])
-        if r_a == r_b:
-            p = 0.5
-            L[r_a] += g_i
-        else:
-            p = max(0.0, min(1.0, (L_snap[r_b] - L_snap[r_a] + g_i) / (2.0 * g_i)))
-            L[r_a] += p * g_i
-            L[r_b] += (1.0 - p) * g_i
-        out[i, 0] = (p * g_i) * inv_total
-        out[i, 1] = ((1.0 - p) * g_i) * inv_total
-
-    return out, L
 
 
 @triton.jit
@@ -235,6 +176,8 @@ class LPCFL2Router(TokenRouter):
     placement change (EPLB rebalance).
     """
 
+    phase = RoutingPhase.PHYSICAL_ROUTING
+
     def __init__(self, ep_size: int, num_physical_experts: int) -> None:
         if ep_size <= 0 or num_physical_experts <= 0:
             raise ValueError("ep_size and num_physical_experts must be positive.")
@@ -253,7 +196,11 @@ class LPCFL2Router(TokenRouter):
         self._dispatch_out_buf: Optional[Tensor] = None
         self._dispatch_random_buf: Optional[Tensor] = None
 
-    def route_tokens(self, request: RoutingRequest) -> RoutingDecision:
+    def route_tokens(
+        self,
+        request: RoutingRequest,
+        policy: RoutingPolicyConfig,
+    ) -> RoutingDecision:
         if request.placement is None:
             raise ValueError("LPCFL2Router requires RoutingRequest.placement.")
         if request.global_logical_count is None:
@@ -271,6 +218,14 @@ class LPCFL2Router(TokenRouter):
             )
 
         topk_ids = request.logical_topk_ids
+        if not isinstance(topk_ids, Tensor):
+            raise TypeError("LPCFL2Router requires torch.Tensor logical_topk_ids.")
+        if topk_ids.numel() == 0:
+            return RoutingDecision(
+                routed_physical_topk_ids=topk_ids,
+                topk_weights=request.topk_weights,
+                metadata={"policy": policy.name, "empty": True},
+            )
         device = topk_ids.device
         global_counts = request.global_logical_count
         if global_counts.dtype != torch.float32:

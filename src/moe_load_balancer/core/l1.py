@@ -2,103 +2,11 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from moe_load_balancer.core.types import PlacementPlan, PlacementRequest, PlacementSnapshot, PlacementStats
-
-# todo: deprecated PlacementProvider protocol since placement should be provided after l1 real rebalance instead of l1 planning
-@runtime_checkable
-class PlacementProvider(Protocol):
-    """Read-only placement source used by L2 routing.
-
-    Adapters that own framework-specific placement state (e.g. SGLang's
-    ``ExpertLocationMetadata``) implement this protocol to surface a
-    framework-neutral per-layer view to L2 algorithms.
-    """
-
-    def snapshot(self, layer_id: int) -> PlacementSnapshot:
-        ...
+from moe_load_balancer.core.types import PlacementPlan, PlacementRequest
 
 
 @runtime_checkable
 class PlacementPlanner(Protocol):
-    """Framework-neutral L1 placement planning contract.
+    """Framework-neutral L1 candidate-placement policy."""
 
-    A planner computes a new expert placement plan from current statistics.
-    The current canonical implementation is
-    :class:`moe_load_balancer.policies.l1.eplb.DeepSeekEPLBPlanner`, which
-    wraps the DeepSeek EPLB algorithm; future planners (CRAFT, MoETuner,
-    replica-budget allocators) implement the same protocol.
-
-    Equivalence contract: for the same ``request.stats.logical_count`` and
-    ``request.policy.metadata`` scalars, ``plan(...)`` must return a
-    ``PlacementPlan`` whose ``metadata`` carries the same raw EPLB output
-    tensors as the upstream ``eplb_algorithms.rebalance_experts(...)``
-    return value, so framework adapters can write back to native placement
-    structures without losing information.
-
-    The plan is expressed as:
-
-    - ``plan.snapshots``: per-layer framework-neutral ``PlacementSnapshot``
-      view, consumable by L2 routing or any non-adapter caller.
-    - ``plan.metadata``: raw algorithm outputs for adapter writeback. For
-      EPLB this contains ``physical_to_logical_map``,
-      ``logical_to_all_physical_map`` and ``expert_count`` tensors.
-
-    A planner that is gated off (``policy.is_disabled``) should return an
-    empty ``PlacementPlan(snapshots={})`` with ``metadata={"skipped": True}``.
-    """
-
-    def plan(self, request: PlacementRequest) -> PlacementPlan:
-        ...
-
-
-# todo: deprecated StatsCollector protocol since data should be collected inside framework
-@runtime_checkable
-class StatsCollector(Protocol):
-    """Framework-neutral L1 statistics-collection contract.
-
-    Implementations (typically framework adapters such as
-    :class:`SGLangStatsCollector`) drive their own data collection during
-    inference. The L1 planner -- or the rebalance orchestration around it --
-    calls :meth:`collect` once per rebalance window to obtain a
-    framework-neutral :class:`PlacementStats` snapshot.
-
-    Internal collection mechanics (per-token / per-dispatch hooks,
-    rank-local accumulators, reduction across EP ranks) stay inside the
-    implementation; the protocol surfaces only the aggregated output. This
-    mirrors the L2 ``PlacementProvider`` pattern: framework-specific reads
-    happen inside the adapter, framework-neutral types cross the boundary.
-
-    Lifecycle methods (``start`` / ``stop``) follow the canonical
-    ``ExpertDistributionRecorder.start_record` / ``stop_record`` shape;
-    implementations that are always-on may treat them as no-ops.
-
-    :meth:`collect` performs snapshot-and-reset: after the call,
-    the underlying accumulator is cleared so the next window starts
-    fresh. **The operation is not atomic against concurrent appends**
-    -- implementations assume a single-threaded caller (e.g. sglang
-    invokes per-forward append and periodic collect on the same
-    scheduler event-loop thread). If you need a different concurrency
-    model, wrap with your own lock.
-    """
-
-    @property
-    def recording(self) -> bool:
-        """Whether the collector is currently accumulating data."""
-        ...
-
-    def start(self) -> None:
-        """Begin (or resume) data collection."""
-        ...
-
-    def stop(self) -> None:
-        """Pause data collection."""
-        ...
-
-    def collect(self) -> PlacementStats:
-        """Snapshot accumulated stats into a framework-neutral
-        ``PlacementStats`` and clear the underlying accumulator.
-
-        Returns an empty ``PlacementStats()`` (all fields ``None``) if
-        no data has been collected yet.
-        """
-        ...
+    def plan(self, request: PlacementRequest) -> PlacementPlan: ...

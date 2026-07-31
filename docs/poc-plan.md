@@ -1,5 +1,10 @@
 # SGLang POC Plan
 
+> **历史文档。** 本文记录重构前的 Stage 3 POC，不再定义当前 API。
+> 当前实现与职责边界以
+> [MoE Load Balancer L1/L2 重构设计决议](mlb-refactor-design-agreement.md)
+> 和 [架构说明](architecture.md) 为准。
+
 本文档是 Stage 3 SGLang POC 的入口说明。读完后应能明确:
 
 1. 独立 MoE load balancer 模块如何定义。

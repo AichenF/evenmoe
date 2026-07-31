@@ -1,18 +1,28 @@
-"""SGLang adapter package.
+"""Stateless SGLang data translations.
 
-Top-level convenience exports are limited to symbols that do **not** require
-``torch`` / ``triton`` to import. Callers that need GPU runtime helpers
-(``count_local_routed_per_rank``, ``WaterfillRuntime``) must import them from
-the explicit submodule path so dev environments without ``triton`` can still
-import this package and run the framework-neutral contract tests.
-
-- ``SGLangPlacementAdapter`` (this re-export): pure CPU, no triton.
-- ``moe_load_balancer.adapters.sglang.load_kernels``: needs torch + triton.
-- ``moe_load_balancer.adapters.sglang.waterfill``: needs torch + triton + sglang.
+SGLang Glue owns lifecycle, communication, threshold decisions, recording,
+weight movement and committed placement metadata. These adapters only
+translate between SGLang-shaped values and framework-neutral MLB types.
 """
 
-from moe_load_balancer.adapters.sglang.providers import SGLangPlacementAdapter
+from moe_load_balancer.adapters.sglang.placement import (
+    SGLangPlacementMaps,
+    to_placement_request,
+    to_placement_snapshot,
+    to_sglang_maps,
+)
+from moe_load_balancer.adapters.sglang.routing import (
+    SGLangRoutingOutput,
+    to_routing_request,
+    to_sglang_routing_output,
+)
 
 __all__ = [
-    "SGLangPlacementAdapter",
+    "SGLangPlacementMaps",
+    "SGLangRoutingOutput",
+    "to_placement_request",
+    "to_placement_snapshot",
+    "to_routing_request",
+    "to_sglang_maps",
+    "to_sglang_routing_output",
 ]
