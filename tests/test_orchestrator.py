@@ -203,6 +203,37 @@ def test_rank_load_count_ignores_padded_slots_without_dynamic_indexing():
 
 
 @pytest.mark.unit
+def test_default_rank_counter_reuses_instance_buffer():
+    calls = []
+    shared = _SharedRouter(calls)
+    mlb = MoELoadBalancer(
+        placement_planners={},
+        routing_policies={"waterfill": shared},
+    )
+    request = RoutingRequest(
+        layer_id=0,
+        logical_topk_ids=torch.tensor([[0, 1], [1, 0]]),
+        routed_physical_topk_ids=torch.tensor([[0, 2], [2, 2]]),
+        topk_weights=torch.ones((2, 2)),
+        placement=_placement(),
+        policies=(RoutingPolicyConfig(name="waterfill"),),
+    )
+
+    mlb.route_tokens(request)
+    first = shared.seen_rank_load
+    first_buffer_ptr = next(iter(mlb._rank_load_buffers.values())).data_ptr()
+    mlb.route_tokens(request)
+    second = shared.seen_rank_load
+    second_buffer_ptr = next(iter(mlb._rank_load_buffers.values())).data_ptr()
+
+    # _SharedRouter clones what it sees, so inspect the MLB-owned buffer itself.
+    assert len(mlb._rank_load_buffers) == 1
+    assert first_buffer_ptr == second_buffer_ptr
+    assert first_buffer_ptr != first.data_ptr()
+    assert torch.equal(first, second)
+
+
+@pytest.mark.unit
 def test_no_l2_policy_uses_committed_default_mapping():
     mlb = MoELoadBalancer(placement_planners={}, routing_policies={})
     request = RoutingRequest(

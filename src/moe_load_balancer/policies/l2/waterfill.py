@@ -79,6 +79,7 @@ class WaterfillL2Router(TokenRouter):
         self.source_rank = source_rank
         self.local_preference = local_preference
         self.world_size = world_size
+        self._chosen_rank_buffer: Tensor | None = None
 
     def route_tokens(
         self,
@@ -141,6 +142,7 @@ class WaterfillL2Router(TokenRouter):
             local_preference=self.local_preference,
             world_size=self.world_size,
             experts_per_rank=experts_per_rank,
+            out=self._chosen_rank_output(topk_ids),
         )
 
         return RoutingDecision(
@@ -153,6 +155,20 @@ class WaterfillL2Router(TokenRouter):
             },
         )
 
+    def _chosen_rank_output(self, topk_ids: Tensor) -> Tensor:
+        num_tokens = topk_ids.shape[0]
+        if (
+            self._chosen_rank_buffer is None
+            or self._chosen_rank_buffer.numel() < num_tokens
+            or self._chosen_rank_buffer.device != topk_ids.device
+        ):
+            self._chosen_rank_buffer = torch.empty(
+                num_tokens,
+                dtype=torch.int64,
+                device=topk_ids.device,
+            )
+        return self._chosen_rank_buffer[:num_tokens]
+
 
 def _waterfill_select(
     *,
@@ -164,6 +180,7 @@ def _waterfill_select(
     local_preference: float,
     world_size: int,
     experts_per_rank: int,
+    out: Tensor | None = None,
 ) -> Tensor:
     """Run the Waterfill rank-selection Triton kernel.
 
@@ -185,7 +202,15 @@ def _waterfill_select(
     if num_tokens == 0:
         return torch.empty(0, dtype=torch.int64, device=topk_ids.device)
 
-    chosen_rank = torch.empty(num_tokens, dtype=torch.int64, device=topk_ids.device)
+    chosen_rank = (
+        torch.empty(num_tokens, dtype=torch.int64, device=topk_ids.device)
+        if out is None
+        else out
+    )
+    if chosen_rank.shape != (num_tokens,) or chosen_rank.dtype != torch.int64:
+        raise ValueError("Waterfill output buffer has incompatible shape or dtype.")
+    if chosen_rank.device != topk_ids.device:
+        raise ValueError("Waterfill output buffer must be on the input device.")
     BLOCK_SIZE = 128
     grid = ((num_tokens + BLOCK_SIZE - 1) // BLOCK_SIZE,)
 

@@ -21,6 +21,10 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"moe_load_balancer.adapters.sglang" = ["csrc/*.cuh"]
+"moe_load_balancer.policies.l2" = ["csrc/*.cuh"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]

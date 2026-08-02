@@ -95,6 +95,8 @@ class PlacementSnapshot:
     ep_size: int
     num_local_physical_experts: int
     physical_to_logical_map: TensorLike
+    # The final dimension may be padded beyond the largest live replica count;
+    # consumers must honor logical_to_physical_count rather than its width.
     logical_to_physical_candidates: TensorLike
     logical_to_physical_count: TensorLike
     default_physical_for_logical: Optional[TensorLike] = None

@@ -23,6 +23,49 @@ class SGLangRoutingOutput:
     recorded_physical_topk_ids: TensorLike
 
 
+def count_logical_experts(
+    logical_topk_ids: TensorLike,
+    num_logical_experts: int,
+) -> TensorLike:
+    """Translate SGLang TopK IDs into a plain logical-count tensor.
+
+    SGLang DP-attention can retain ``-1`` padding on otherwise non-empty
+    ranks. CUDA handles that in one fused kernel instead of materializing a
+    validity mask, clamped IDs, and scatter contributions separately.
+    Communication remains owned by SGLang Glue.
+    """
+
+    if num_logical_experts <= 0:
+        raise ValueError("num_logical_experts must be positive.")
+
+    import torch
+
+    if not isinstance(logical_topk_ids, torch.Tensor):
+        raise TypeError("Logical expert counting requires a torch.Tensor.")
+    counts = torch.zeros(
+        num_logical_experts,
+        dtype=torch.float32,
+        device=logical_topk_ids.device,
+    )
+    if logical_topk_ids.is_cuda:
+        from moe_load_balancer.adapters.sglang._logical_count_cuda import (
+            count_logical_experts_cuda,
+        )
+
+        count_logical_experts_cuda(logical_topk_ids, counts)
+        return counts
+
+    valid = (logical_topk_ids >= 0) & (logical_topk_ids < num_logical_experts)
+    if valid.any():
+        counts.copy_(
+            torch.bincount(
+                logical_topk_ids[valid].to(torch.int64),
+                minlength=num_logical_experts,
+            ).to(torch.float32)
+        )
+    return counts
+
+
 def to_routing_request(
     *,
     layer_id: int,
@@ -105,51 +148,25 @@ def to_sglang_routing_output(
     if not isinstance(chosen_rank, torch.Tensor):
         chosen_rank = torch.as_tensor(chosen_rank, device=physical_ids.device)
 
-    old_experts_per_rank = num_routed_experts // world_size
-    new_experts_per_rank = old_experts_per_rank + 1
-    valid = physical_ids >= 0
-    interleaved_ids = torch.where(
-        valid,
-        physical_ids + physical_ids // old_experts_per_rank,
+    from moe_load_balancer.adapters.sglang.waterfill import (
+        materialize_waterfill_output,
+    )
+
+    expanded_ids, expanded_weights = materialize_waterfill_output(
         physical_ids,
+        weights,
+        chosen_rank,
+        num_routed_experts=num_routed_experts,
+        world_size=world_size,
+        routed_scaling_factor=routed_scaling_factor,
     )
-    routed_weights = torch.where(valid, weights, torch.zeros_like(weights))
-
-    has_valid = valid.any(dim=1)
-    shared_ids = chosen_rank.to(physical_ids.dtype) * new_experts_per_rank
-    shared_ids = shared_ids + old_experts_per_rank
-    shared_ids = torch.where(
-        has_valid & (chosen_rank >= 0),
-        shared_ids,
-        torch.full_like(shared_ids, -1),
-    )
-    shared_weight = 1.0 / routed_scaling_factor if routed_scaling_factor != 0 else 1.0
-    shared_weights = torch.where(
-        has_valid,
-        torch.full(
-            has_valid.shape,
-            shared_weight,
-            dtype=weights.dtype,
-            device=weights.device,
-        ),
-        torch.zeros(has_valid.shape, dtype=weights.dtype, device=weights.device),
-    )
-
-    expanded_ids = torch.cat((interleaved_ids, shared_ids[:, None]), dim=1)
-    expanded_weights = torch.cat((routed_weights, shared_weights[:, None]), dim=1)
-
-    expanded_logits = router_logits
-    if isinstance(router_logits, torch.Tensor):
-        zeros = torch.zeros(
-            (router_logits.shape[0], 1),
-            dtype=router_logits.dtype,
-            device=router_logits.device,
-        )
-        expanded_logits = torch.cat((router_logits, zeros), dim=1)
 
     return SGLangRoutingOutput(
         topk_weights=expanded_weights,
         topk_ids=expanded_ids,
-        router_logits=expanded_logits,
+        # Router logits are indexed by logical routed expert and are not part
+        # of DeepEP's physical TopK layout.  Expanding this [tokens, experts]
+        # tensor was unnecessary and copied O(tokens * num_experts) data.
+        router_logits=router_logits,
         recorded_physical_topk_ids=physical_ids,
     )

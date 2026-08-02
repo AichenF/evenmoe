@@ -5,12 +5,23 @@ import torch
 
 from moe_load_balancer import PlacementPlan, RoutingDecision, RoutingPolicyConfig
 from moe_load_balancer.adapters.sglang import (
+    count_logical_experts,
     to_placement_request,
     to_placement_snapshot,
     to_routing_request,
     to_sglang_maps,
     to_sglang_routing_output,
 )
+
+
+def test_logical_count_ignores_dp_attention_padding():
+    counts = count_logical_experts(
+        torch.tensor([[0, 2, -1], [2, 3, -1]], dtype=torch.int32),
+        4,
+    )
+
+    assert counts.dtype == torch.float32
+    assert torch.equal(counts, torch.tensor([1.0, 0.0, 2.0, 1.0]))
 
 
 class _Metadata:
@@ -109,7 +120,7 @@ def test_post_adapter_keeps_recorder_ids_separate_from_shared_expert():
     # and rank-1 shared expert is slot 5.
     assert torch.equal(output.topk_ids, torch.tensor([[0, 4, 5]]))
     assert torch.allclose(output.topk_weights, torch.tensor([[0.7, 0.3, 1.0]]))
-    assert torch.equal(output.router_logits, torch.tensor([[2.0, 1.0, 0.0]]))
+    assert torch.equal(output.router_logits, torch.tensor([[2.0, 1.0]]))
 
 
 @pytest.mark.unit
