@@ -12,6 +12,7 @@ from moe_load_balancer import (
     RoutingRequest,
     RoutingStage,
 )
+from moe_load_balancer.core.orchestrator import count_routed_per_rank
 
 
 def _placement() -> PlacementSnapshot:
@@ -187,6 +188,18 @@ def test_empty_token_input_still_runs_combined_pipeline_with_zero_rank_load():
 
     assert torch.equal(shared.seen_rank_load, torch.zeros(2, dtype=torch.int64))
     assert calls == [("shared", "waterfill")]
+
+
+@pytest.mark.unit
+def test_rank_load_count_ignores_padded_slots_without_dynamic_indexing():
+    counts = count_routed_per_rank(
+        torch.tensor([[0, 3, -1], [2, -1, 1]]),
+        _placement(),
+        RoutingPolicyConfig(name="waterfill"),
+    )
+
+    assert counts.dtype == torch.int64
+    assert torch.equal(counts, torch.tensor([2, 2]))
 
 
 @pytest.mark.unit

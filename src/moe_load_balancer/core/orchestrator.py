@@ -210,4 +210,14 @@ def count_routed_per_rank(
             ) from exc
         ranks = safe_ids // experts_per_rank
 
-    return torch.bincount(ranks[valid].reshape(-1), minlength=world_size)
+    # Boolean indexing produces a dynamically sized tensor and is not allowed
+    # while SGLang captures CUDA graphs. Keep the input shape fixed and give
+    # padded slots a zero contribution instead.
+    flat_ranks = torch.where(valid, ranks, 0).reshape(-1).to(torch.int64)
+    contributions = valid.reshape(-1).to(torch.int64)
+    counts = torch.zeros(
+        world_size,
+        dtype=torch.int64,
+        device=physical_topk_ids.device,
+    )
+    return counts.scatter_add_(0, flat_ranks, contributions)
