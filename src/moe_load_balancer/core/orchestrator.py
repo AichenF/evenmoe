@@ -34,7 +34,6 @@ class MoELoadBalancer:
             placement_planners = {"eplb": DeepSeekEPLBPlanner()}
         self._placement_planners = dict(placement_planners)
         self._routing_policies = dict(routing_policies or {})
-        self._rank_load_buffers: dict[tuple, object] = {}
         self._rank_load_counter = rank_load_counter or self._count_routed_per_rank
 
     def _count_routed_per_rank(
@@ -43,28 +42,22 @@ class MoELoadBalancer:
         placement: Optional[PlacementSnapshot],
         policy: RoutingPolicyConfig,
     ) -> object:
-        """Reuse the tiny rank-count buffer owned by this MLB instance."""
+        """Count rank load into per-call storage with stream-safe lifetime.
+
+        A single MLB instance serves every MoE layer.  Keeping one process-wide
+        scratch tensor here is unsafe under SGLang overlap scheduling: a later
+        layer/batch may zero it while an earlier Waterfill kernel still reads
+        it asynchronously.
+        """
 
         import torch
 
         if not isinstance(physical_topk_ids, torch.Tensor):
             raise TypeError("Rank-load counting requires torch.Tensor physical_topk_ids.")
-        world_size = (
-            placement.ep_size
-            if placement is not None
-            else int(policy.metadata["world_size"])
-        )
-        device = physical_topk_ids.device
-        key = (device.type, device.index, world_size)
-        counts = self._rank_load_buffers.get(key)
-        if counts is None:
-            counts = torch.empty(world_size, dtype=torch.int64, device=device)
-            self._rank_load_buffers[key] = counts
         return count_routed_per_rank(
             physical_topk_ids,
             placement,
             policy,
-            out=counts,
         )
 
     def plan_placement(self, request: PlacementRequest) -> PlacementPlan:

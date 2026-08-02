@@ -9,7 +9,7 @@ the policy does not import a serving framework or its process groups.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Protocol
+from typing import Protocol
 
 import torch
 from torch import Tensor
@@ -138,8 +138,6 @@ class LPLBL2Router(TokenRouter):
         self.num_local_physical_experts = num_physical_experts // ep_size
         self.ipm_backend = ipm_backend
         self._layer_states: dict[int, _LayerState] = {}
-        self._dispatch_output: Optional[Tensor] = None
-        self._dispatch_random: Optional[Tensor] = None
 
     def prepare_layer(self, snapshot: PlacementSnapshot) -> None:
         """Build and warm the cached LP state outside the first real request."""
@@ -391,15 +389,12 @@ class LPLBL2Router(TokenRouter):
 
         flat = topk_ids.reshape(-1).contiguous().to(torch.int32)
         n = flat.numel()
-        if (
-            self._dispatch_output is None
-            or self._dispatch_output.numel() < n
-            or self._dispatch_output.device != topk_ids.device
-        ):
-            self._dispatch_output = torch.empty(n, dtype=torch.int32, device=topk_ids.device)
-            self._dispatch_random = torch.empty(n, dtype=torch.float32, device=topk_ids.device)
-        output = self._dispatch_output[:n]
-        random_values = self._dispatch_random[:n]
+        # One LPLB router is shared by every layer.  Per-call outputs let the
+        # PyTorch allocator track their CUDA-stream lifetime; a process-wide
+        # scratch tensor can be overwritten by overlap scheduling before its
+        # asynchronous consumer finishes.
+        output = torch.empty(n, dtype=torch.int32, device=topk_ids.device)
+        random_values = torch.empty(n, dtype=torch.float32, device=topk_ids.device)
         random_values.uniform_()
         from moe_load_balancer.policies.l2._lplb_cuda import dispatch_probability_cuda
 

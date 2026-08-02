@@ -79,7 +79,6 @@ class WaterfillL2Router(TokenRouter):
         self.source_rank = source_rank
         self.local_preference = local_preference
         self.world_size = world_size
-        self._chosen_rank_buffer: Tensor | None = None
 
     def route_tokens(
         self,
@@ -142,7 +141,6 @@ class WaterfillL2Router(TokenRouter):
             local_preference=self.local_preference,
             world_size=self.world_size,
             experts_per_rank=experts_per_rank,
-            out=self._chosen_rank_output(topk_ids),
         )
 
         return RoutingDecision(
@@ -154,21 +152,6 @@ class WaterfillL2Router(TokenRouter):
                 "allow_all_ranks": allow_all_ranks,
             },
         )
-
-    def _chosen_rank_output(self, topk_ids: Tensor) -> Tensor:
-        num_tokens = topk_ids.shape[0]
-        if (
-            self._chosen_rank_buffer is None
-            or self._chosen_rank_buffer.numel() < num_tokens
-            or self._chosen_rank_buffer.device != topk_ids.device
-        ):
-            self._chosen_rank_buffer = torch.empty(
-                num_tokens,
-                dtype=torch.int64,
-                device=topk_ids.device,
-            )
-        return self._chosen_rank_buffer[:num_tokens]
-
 
 def _waterfill_select(
     *,
@@ -359,7 +342,12 @@ def _waterfill_select_kernel(
     token_seed = token_seed * tl.full([BLOCK_SIZE], 1664525, dtype=tl.uint32) + tl.full(
         [BLOCK_SIZE], 1013904223, dtype=tl.uint32
     )
-    u = tl.where(total_w > 0, token_seed % total_w.to(tl.uint32), 0).to(tl.int32)
+    # tl.where does not provide lazy scalar evaluation.  Protect the modulo
+    # itself so a zero-slack batch cannot execute an integer remainder by zero.
+    safe_total_w = tl.maximum(total_w, 1)
+    u = tl.where(total_w > 0, token_seed % safe_total_w.to(tl.uint32), 0).to(
+        tl.int32
+    )
 
     chosen = src_rank_i32
     cum = tl.zeros([BLOCK_SIZE], dtype=tl.int32)

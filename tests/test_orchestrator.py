@@ -203,7 +203,7 @@ def test_rank_load_count_ignores_padded_slots_without_dynamic_indexing():
 
 
 @pytest.mark.unit
-def test_default_rank_counter_reuses_instance_buffer():
+def test_default_rank_counter_does_not_keep_process_wide_async_scratch():
     calls = []
     shared = _SharedRouter(calls)
     mlb = MoELoadBalancer(
@@ -221,15 +221,10 @@ def test_default_rank_counter_reuses_instance_buffer():
 
     mlb.route_tokens(request)
     first = shared.seen_rank_load
-    first_buffer_ptr = next(iter(mlb._rank_load_buffers.values())).data_ptr()
     mlb.route_tokens(request)
     second = shared.seen_rank_load
-    second_buffer_ptr = next(iter(mlb._rank_load_buffers.values())).data_ptr()
 
-    # _SharedRouter clones what it sees, so inspect the MLB-owned buffer itself.
-    assert len(mlb._rank_load_buffers) == 1
-    assert first_buffer_ptr == second_buffer_ptr
-    assert first_buffer_ptr != first.data_ptr()
+    assert not hasattr(mlb, "_rank_load_buffers")
     assert torch.equal(first, second)
 
 
