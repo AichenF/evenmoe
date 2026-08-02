@@ -8,7 +8,7 @@ the policy does not import a serving framework or its process groups.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 import torch
@@ -138,6 +138,7 @@ class LPLBL2Router(TokenRouter):
         self.num_local_physical_experts = num_physical_experts // ep_size
         self.ipm_backend = ipm_backend
         self._layer_states: dict[int, _LayerState] = {}
+        self._execution_states: dict[tuple[int, tuple], _LayerState] = {}
 
     def prepare_layer(self, snapshot: PlacementSnapshot) -> None:
         """Build and warm the cached LP state outside the first real request."""
@@ -164,7 +165,7 @@ class LPLBL2Router(TokenRouter):
                 metadata={"policy": "lplb", "empty": True},
             )
 
-        state = self._get_state(request.placement)
+        state = self._get_execution_state(request.placement, topk_ids)
         global_counts = request.global_logical_count.to(
             device=topk_ids.device, dtype=torch.float32
         )
@@ -181,6 +182,55 @@ class LPLBL2Router(TokenRouter):
             routed_physical_topk_ids=physical,
             topk_weights=request.topk_weights,
             metadata={"policy": "lplb"},
+        )
+
+    def _get_execution_state(
+        self,
+        snapshot: PlacementSnapshot,
+        topk_ids: Tensor,
+    ) -> _LayerState:
+        """Return scratch buffers private to one CUDA graph or eager stream.
+
+        SGLang captures several batch-size graphs and may replay them with
+        overlap.  If all graphs capture the same per-layer A/b/x/probability
+        buffers, one replay can overwrite another replay's LP inputs or
+        dispatch probabilities.  Placement-derived tensors remain shared,
+        while mutable execution buffers are isolated by captured input
+        address (one address per graph) or by eager CUDA stream.
+        """
+
+        base = self._get_state(snapshot)
+        if not topk_ids.is_cuda:
+            return base
+
+        if torch.cuda.is_current_stream_capturing():
+            execution_key = ("graph", topk_ids.data_ptr())
+        else:
+            execution_key = (
+                "stream",
+                torch.cuda.current_stream(topk_ids.device).cuda_stream,
+            )
+        cache_key = (snapshot.layer_id, execution_key)
+        cached = self._execution_states.get(cache_key)
+        if cached is not None and cached.placement_key == base.placement_key:
+            return cached
+
+        state = self._clone_execution_state(base)
+        self._execution_states[cache_key] = state
+        return state
+
+    @staticmethod
+    def _clone_execution_state(base: _LayerState) -> _LayerState:
+        return replace(
+            base,
+            # Clone once while each CUDA graph is captured. At graph replay
+            # this is a tiny device copy, while the storage remains private to
+            # that graph's memory pool and cannot race with another graph.
+            a_full=base.a_full.clone(),
+            b=torch.empty_like(base.b),
+            t1=torch.empty_like(base.t1),
+            x=torch.empty_like(base.x),
+            probability=torch.empty_like(base.probability),
         )
 
     def _get_state(self, snapshot: PlacementSnapshot) -> _LayerState:

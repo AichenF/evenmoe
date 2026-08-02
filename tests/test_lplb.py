@@ -163,6 +163,27 @@ def test_padded_candidate_table_is_compacted_once_per_placement():
     assert len(backend.warmups) == 1
 
 
+def test_execution_state_shares_placement_but_owns_mutable_scratch():
+    router = LPLBL2Router(
+        ep_size=2,
+        num_physical_experts=6,
+        ipm_backend=_DeterministicBackend(),
+    )
+    snapshot = _snapshot()
+    base = router._get_state(snapshot)
+    execution = router._get_execution_state(
+        snapshot, torch.tensor([[2, 3]], dtype=torch.int64)
+    )
+
+    # CPU execution is serialized and intentionally keeps the reference path.
+    assert execution is base
+
+    cloned = router._clone_execution_state(base)
+    assert cloned.candidates is base.candidates
+    assert cloned.probability.data_ptr() != base.probability.data_ptr()
+    assert cloned.a_full.data_ptr() != base.a_full.data_ptr()
+
+
 def test_orchestrator_prepare_routing_layer_is_generic():
     from moe_load_balancer import MoELoadBalancer
 
