@@ -197,11 +197,18 @@ def _dispatch_probability_kernel(
     logical = tl.load(logical_ids_ptr + offsets, mask=in_bounds, other=0)
     valid = in_bounds & (logical >= 0) & (logical < NUM_LOGICAL)
     columns = tl.arange(0, K_BOUND)
+    column_mask = columns < MAX_COPIES
     table_offsets = logical[:, None] * MAX_COPIES + columns[None, :]
     probabilities = tl.load(
-        probability_ptr + table_offsets, mask=valid[:, None], other=0.0
+        probability_ptr + table_offsets,
+        mask=valid[:, None] & column_mask[None, :],
+        other=0.0,
     )
-    candidates = tl.load(candidate_ptr + table_offsets, mask=valid[:, None], other=-1)
+    candidates = tl.load(
+        candidate_ptr + table_offsets,
+        mask=valid[:, None] & column_mask[None, :],
+        other=-1,
+    )
     row_sum = tl.sum(probabilities, axis=1)
     fallback = tl.where(candidates >= 0, 1.0, 0.0)
     use_fallback = row_sum <= 0.0
@@ -210,7 +217,7 @@ def _dispatch_probability_kernel(
     sample = tl.load(random_ptr + offsets, mask=in_bounds, other=0.0) * row_sum
     cumulative = tl.cumsum(probabilities, axis=1)
     chosen = tl.sum((cumulative <= sample[:, None]).to(tl.int32), axis=1)
-    chosen = tl.minimum(chosen, K_BOUND - 1)
+    chosen = tl.minimum(chosen, MAX_COPIES - 1)
     selected = tl.sum(
         tl.where(columns[None, :] == chosen[:, None], candidates, 0), axis=1
     )
@@ -231,7 +238,9 @@ def dispatch_probability_cuda(
             f"LPLB supports at most {_DEFAULT_K_BOUND} physical copies per logical "
             f"expert; got {max_copies}."
         )
-    k_bound = max_copies
+    # tl.arange requires a power-of-two extent. Keep MAX_COPIES as the real
+    # row width and mask the padded columns inside the kernel.
+    k_bound = triton.next_power_of_2(max_copies)
     _dispatch_probability_kernel[(triton.cdiv(n, _DISPATCH_BLOCK_DIM),)](
         output,
         logical_ids,

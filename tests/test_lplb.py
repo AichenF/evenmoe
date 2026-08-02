@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import torch
+import pytest
 
 from moe_load_balancer.core.types import (
     PlacementSnapshot,
@@ -174,3 +175,37 @@ def test_orchestrator_prepare_routing_layer_is_generic():
     balancer = MoELoadBalancer(routing_policies={"lplb": router})
     balancer.prepare_routing_layer("lplb", _snapshot())
     assert len(backend.warmups) == 1
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA + Triton")
+def test_cuda_dispatch_supports_non_power_of_two_candidate_width():
+    from moe_load_balancer.policies.l2._lplb_cuda import dispatch_probability_cuda
+
+    probability = torch.tensor(
+        [[0.0, 0.0, 1.0], [0.5, 0.5, 0.0]],
+        dtype=torch.float32,
+        device="cuda",
+    )
+    candidates = torch.tensor(
+        [[10, 11, 12], [20, 21, -1]],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    logical_ids = torch.tensor([0, 1, 0, 1], dtype=torch.int32, device="cuda")
+    random_values = torch.tensor(
+        [0.0, 0.0, 0.999, 0.999], dtype=torch.float32, device="cuda"
+    )
+    output = torch.empty_like(logical_ids)
+
+    dispatch_probability_cuda(
+        output,
+        logical_ids,
+        probability,
+        candidates,
+        random_values,
+    )
+
+    assert torch.equal(
+        output,
+        torch.tensor([12, 20, 12, 21], dtype=torch.int32, device="cuda"),
+    )
