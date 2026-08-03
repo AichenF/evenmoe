@@ -1,4 +1,4 @@
-"""CUDA-only fused Waterfill materialization; imported lazily by the Adapter."""
+"""CUDA materialization of a shared-expert decision into DeepEP layout."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ _BLOCK_SIZE = 256
 
 
 @triton.jit
-def _materialize_waterfill_kernel(
+def _materialize_shared_expert_kernel(
     physical_ids_ptr,
     weights_ptr,
     chosen_rank_ptr,
@@ -63,7 +63,7 @@ def _materialize_waterfill_kernel(
     )
 
 
-def materialize_waterfill_cuda(
+def materialize_shared_expert_cuda(
     physical_ids: Tensor,
     weights: Tensor,
     chosen_rank: Tensor,
@@ -75,10 +75,11 @@ def materialize_waterfill_cuda(
 ) -> None:
     num_tokens, topk = physical_ids.shape
     rank_tensor = chosen_rank.to(
-        device=physical_ids.device, dtype=physical_ids.dtype
+        device=physical_ids.device,
+        dtype=physical_ids.dtype,
     ).contiguous()
     grid = (triton.cdiv(num_tokens, _BLOCK_SIZE),)
-    _materialize_waterfill_kernel[grid](
+    _materialize_shared_expert_kernel[grid](
         physical_ids,
         weights,
         rank_tensor,

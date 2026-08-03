@@ -1,6 +1,6 @@
 """DeepSeek EPLB family — L1 placement planner.
 
-Exports a framework-neutral :class:`DeepSeekEPLBPlanner` plus the vendored
+Exports a framework-neutral :class:`EPLBPlacementPlanner` plus the vendored
 algorithm dispatcher (``rebalance_experts``, ``compute_algorithm``,
 ``EplbAlgorithm``). SGLang adapter at
 :mod:`moe_load_balancer.adapters.sglang.eplb` is the only framework-specific
@@ -14,11 +14,15 @@ from moe_load_balancer.policies.l1.eplb.algorithms import (
     compute_algorithm,
     rebalance_experts,
 )
-from moe_load_balancer.policies.l1.eplb.planner import DeepSeekEPLBPlanner
+from moe_load_balancer.policies.l1.eplb.planner import (
+    EPLBPlacementPlanner,
+    SUPPORTED_PLACEMENT_POLICIES,
+)
 
 __all__ = [
-    "DeepSeekEPLBPlanner",
+    "EPLBPlacementPlanner",
     "EplbAlgorithm",
     "compute_algorithm",
     "rebalance_experts",
+    "SUPPORTED_PLACEMENT_POLICIES",
 ]

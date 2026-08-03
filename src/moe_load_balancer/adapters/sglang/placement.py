@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional
 
 from moe_load_balancer.core.types import (
     PlacementPlan,
@@ -9,6 +9,7 @@ from moe_load_balancer.core.types import (
     PlacementRequest,
     PlacementSnapshot,
     PlacementStats,
+    PlacementTopology,
     TensorLike,
 )
 
@@ -38,19 +39,16 @@ def to_placement_request(
     all-reduce and threshold gating before calling this function.
     """
 
-    policy_metadata: dict[str, Any] = {
-        "algorithm": algorithm,
-        "num_physical_experts": num_physical_experts,
-        "num_local_physical_experts": num_local_physical_experts,
-        "num_groups": num_groups,
-        "num_nodes": num_nodes,
-    }
-    if active_ranks is not None:
-        policy_metadata["active_ranks"] = active_ranks
-
     return PlacementRequest(
         stats=PlacementStats(logical_count=logical_count),
-        policy=PlacementPolicyConfig(name="eplb", metadata=policy_metadata),
+        topology=PlacementTopology(
+            num_physical_experts=num_physical_experts,
+            num_local_physical_experts=num_local_physical_experts,
+            num_groups=num_groups,
+            num_nodes=num_nodes,
+            active_ranks=active_ranks,
+        ),
+        policy=PlacementPolicyConfig(name=algorithm),
     )
 
 

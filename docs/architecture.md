@@ -84,18 +84,20 @@ gating before MLB is called. A stateless adapter then builds:
 ```python
 PlacementRequest(
     stats=PlacementStats(logical_count=...),
-    policy=PlacementPolicyConfig(
-        name="eplb",
-        metadata={
-            "algorithm": ...,
-            "num_physical_experts": ...,
-            "num_local_physical_experts": ...,
-            "num_groups": ...,
-            "num_nodes": ...,
-        },
+    topology=PlacementTopology(
+        num_physical_experts=...,
+        num_local_physical_experts=...,
+        num_groups=...,
+        num_nodes=...,
+        active_ranks=...,
     ),
+    policy=PlacementPolicyConfig(name="deepseek_vec"),
 )
 ```
+
+`PlacementPolicyConfig.name` is the actual L1 algorithm (`deepseek`,
+`deepseek_vec`, `elasticity_aware`, a hierarchical variant, or `auto`).
+Topology and runtime geometry are request inputs, not policy metadata.
 
 ### Output
 

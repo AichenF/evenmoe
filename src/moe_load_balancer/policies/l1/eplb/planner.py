@@ -1,15 +1,6 @@
-"""DeepSeek EPLB L1 planner — framework-neutral.
-
-Wraps :mod:`moe_load_balancer.policies.l1.eplb.algorithms` behind the
-:class:`moe_load_balancer.core.l1.PlacementPlanner` protocol. Style mirrors
-:class:`moe_load_balancer.policies.l2.waterfill.WaterfillL2Router`: stateless
-class, scalar inputs come from ``request.policy.metadata``, tensor inputs
-from ``request.stats``, no framework-specific types.
-"""
+"""Framework-neutral L1 planner for the EPLB placement-policy family."""
 
 from __future__ import annotations
-
-from typing import Optional
 
 import torch
 from torch import Tensor
@@ -17,89 +8,65 @@ from torch import Tensor
 from moe_load_balancer.core.l1 import PlacementPlanner
 from moe_load_balancer.core.types import PlacementPlan, PlacementRequest
 from moe_load_balancer.policies.l1.eplb.algorithms import (
+    EplbAlgorithm,
     compute_algorithm,
     rebalance_experts,
 )
 
-_REQUIRED_METADATA_SCALARS = (
-    "num_physical_experts",
-    "num_local_physical_experts",
-    "num_groups",
-    "num_nodes",
+SUPPORTED_PLACEMENT_POLICIES: tuple[str, ...] = (
+    "auto",
+    *(algorithm.name for algorithm in EplbAlgorithm),
 )
 
 
-class DeepSeekEPLBPlanner(PlacementPlanner):
-    """L1 placement planner backed by the DeepSeek EPLB algorithm family.
+class EPLBPlacementPlanner(PlacementPlanner):
+    """Planner bound to one directly selectable L1 placement policy.
 
-    Implements ``core.PlacementPlanner``. ``plan(request)`` reads scalars
-    from ``request.policy.metadata`` (``num_physical_experts``,
-    ``num_local_physical_experts``, ``num_groups``, ``num_nodes``,
-    optional ``algorithm`` and ``active_ranks``) and the
-    ``logical_count`` tensor from ``request.stats``, dispatches to the
-    matching variant via the vendored algorithms package.
-
-    The returned ``PlacementPlan`` carries the three raw candidate mapping
-    tensors. It is not a committed ``PlacementSnapshot`` and must not become
-    visible to L2 until the framework has moved weights and committed its
-    live placement metadata.
-
-    Equivalence with sglang: a request whose ``policy.metadata`` mirrors
-    sglang's ``_init_common`` scalars and whose ``stats.logical_count`` is
-    the same tensor that sglang's ``init_by_eplb`` would have passed to
-    ``eplb_algorithms.rebalance_experts`` produces a bit-identical plan,
-    because the algorithm body is the same code path.
+    The Orchestrator registry maps each policy name (for example
+    ``deepseek_vec``) to a planner instance bound to that name. Runtime
+    geometry comes from ``request.topology``; the policy name is never hidden
+    inside metadata.
     """
 
-    def __init__(self, *, default_algorithm: str = "auto"):
-        """``default_algorithm`` is used only when
-        ``request.policy.metadata`` does not provide an explicit
-        ``"algorithm"`` key. Acceptable values match SGLang's
-        ``--eplb-algorithm`` flag: ``"auto"`` or any ``EplbAlgorithm`` name.
-        """
-
-        self._default_algorithm = default_algorithm
+    def __init__(self, policy_name: str):
+        if policy_name not in SUPPORTED_PLACEMENT_POLICIES:
+            raise ValueError(
+                f"Unsupported placement policy {policy_name!r}; expected one of "
+                f"{SUPPORTED_PLACEMENT_POLICIES}."
+            )
+        self._policy_name = policy_name
 
     def plan(self, request: PlacementRequest) -> PlacementPlan:
         policy = request.policy
         if policy.is_disabled:
-            raise ValueError("DeepSeekEPLBPlanner cannot run a disabled placement policy.")
-
-        m = policy.metadata
-        missing = [k for k in _REQUIRED_METADATA_SCALARS if k not in m]
-        if missing:
-            raise ValueError(
-                "DeepSeekEPLBPlanner requires policy.metadata to carry "
-                f"{_REQUIRED_METADATA_SCALARS}; missing {missing}."
-            )
+            raise ValueError("EPLBPlacementPlanner cannot run a disabled policy.")
+        if policy.name != self._policy_name:
+            raise ValueError(f"Planner for {self._policy_name!r} received policy {policy.name!r}.")
 
         logical_count = request.stats.logical_count
         if logical_count is None:
-            raise ValueError("DeepSeekEPLBPlanner requires request.stats.logical_count.")
+            raise ValueError("EPLBPlacementPlanner requires request.stats.logical_count.")
         if not isinstance(logical_count, Tensor):
             logical_count = torch.tensor(logical_count)
         if logical_count.dim() == 2:
-            # promote [layers, num_logical] to [1, layers, num_logical] so the
-            # `tokens_per_expert.sum(dim=0)` inside the dispatcher is a no-op.
+            # Promote [layers, logical] to [observations, layers, logical].
             logical_count = logical_count.unsqueeze(0)
 
-        raw_algorithm = m.get("algorithm", self._default_algorithm)
+        topology = request.topology
         algorithm = compute_algorithm(
-            raw_algorithm=raw_algorithm,
-            num_groups=m["num_groups"],
-            num_nodes=m["num_nodes"],
+            raw_algorithm=self._policy_name,
+            num_groups=topology.num_groups,
+            num_nodes=topology.num_nodes,
         )
-
-        active_ranks: Optional[Tensor] = m.get("active_ranks")
 
         phy2log, log2allphy, expert_count = rebalance_experts(
             tokens_per_expert=logical_count,
-            num_physical_experts=m["num_physical_experts"],
-            num_local_physical_experts=m["num_local_physical_experts"],
-            num_groups=m["num_groups"],
-            num_nodes=m["num_nodes"],
+            num_physical_experts=topology.num_physical_experts,
+            num_local_physical_experts=topology.num_local_physical_experts,
+            num_groups=topology.num_groups,
+            num_nodes=topology.num_nodes,
             algorithm=algorithm,
-            active_ranks=active_ranks,
+            active_ranks=topology.active_ranks,
         )
 
         return PlacementPlan(
@@ -107,6 +74,7 @@ class DeepSeekEPLBPlanner(PlacementPlanner):
             logical_to_all_physical_map=log2allphy,
             logical_to_physical_count=expert_count,
             metadata={
-                "algorithm": algorithm.name,
+                "requested_policy": self._policy_name,
+                "resolved_policy": algorithm.name,
             },
         )

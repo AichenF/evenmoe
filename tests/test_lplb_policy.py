@@ -38,13 +38,14 @@ import pytest
 import torch
 from torch import Tensor
 
-from moe_load_balancer.core.l2 import LPLBKernels, TokenRouter
+from moe_load_balancer.core.l2 import TokenRouter
 from moe_load_balancer.core.types import (
     PlacementSnapshot,
     RoutingPolicyConfig,
     RoutingRequest,
     RoutingStage,
 )
+from moe_load_balancer.kernels.lplb import LPLBKernels
 from moe_load_balancer.policies.l2.lplb import (
     LPLBL2Router,
     _build_layer_state,

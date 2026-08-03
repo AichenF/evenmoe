@@ -8,6 +8,7 @@ from moe_load_balancer import (
     PlacementPolicyConfig,
     PlacementRequest,
     PlacementStats,
+    PlacementTopology,
 )
 from moe_load_balancer.adapters.sglang import to_placement_request
 from moe_load_balancer.policies.l1.eplb.algorithms import (
@@ -70,7 +71,50 @@ def test_cold_start_and_periodic_paths_use_same_request_and_policy_entry():
 def test_framework_must_not_call_disabled_l1_policy():
     request = PlacementRequest(
         stats=PlacementStats(logical_count=torch.ones((1, 2))),
+        topology=PlacementTopology(
+            num_physical_experts=2,
+            num_local_physical_experts=1,
+            num_groups=1,
+            num_nodes=1,
+        ),
         policy=PlacementPolicyConfig(),
     )
     with pytest.raises(ValueError, match="framework must skip"):
         MoELoadBalancer().plan_placement(request)
+
+
+@pytest.mark.unit
+def test_l1_policy_name_directly_selects_algorithm():
+    request = to_placement_request(
+        torch.tensor([[10, 7, 4, 1]]),
+        num_physical_experts=8,
+        num_local_physical_experts=4,
+        num_groups=1,
+        num_nodes=1,
+        algorithm="deepseek",
+    )
+
+    assert request.policy.name == "deepseek"
+    assert "algorithm" not in request.policy.metadata
+    assert request.topology.num_physical_experts == 8
+    plan = MoELoadBalancer().plan_placement(request)
+    assert plan.metadata["requested_policy"] == "deepseek"
+    assert plan.metadata["resolved_policy"] == "deepseek"
+
+
+@pytest.mark.unit
+def test_auto_is_a_policy_and_reports_its_resolved_algorithm():
+    request = to_placement_request(
+        torch.tensor([[10, 7, 4, 1]]),
+        num_physical_experts=8,
+        num_local_physical_experts=4,
+        num_groups=1,
+        num_nodes=1,
+        algorithm="auto",
+    )
+
+    plan = MoELoadBalancer().plan_placement(request)
+
+    assert request.policy.name == "auto"
+    assert plan.metadata["requested_policy"] == "auto"
+    assert plan.metadata["resolved_policy"] == "deepseek_hierarchical"

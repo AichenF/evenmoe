@@ -65,7 +65,7 @@ from typing import Dict, Hashable, Optional, Tuple
 import torch
 from torch import Tensor
 
-from moe_load_balancer.core.l2 import LPLBKernels, TokenRouter
+from moe_load_balancer.core.l2 import TokenRouter
 from moe_load_balancer.core.types import (
     PlacementSnapshot,
     RoutingDecision,
@@ -73,6 +73,7 @@ from moe_load_balancer.core.types import (
     RoutingPolicyConfig,
     RoutingRequest,
 )
+from moe_load_balancer.kernels.lplb import LPLBKernels
 
 # Sentinel preserved through the no-redundancy fallback for the
 # "-1 padded slot" convention frameworks use for invalid TopK entries.

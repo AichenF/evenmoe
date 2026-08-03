@@ -5,6 +5,7 @@ This package owns the LPLB Linear-Programming load-balancer kernels:
 - ``cuda_solver``           four JIT-compiled CUDA modules (IPM + LP prep /
                              post / dispatch). Build via
                              ``moe_load_balancer.kernels.utils``.
+- ``protocol``              execution contract consumed by the LPLB policy.
 - ``shmem_budget``           shared-memory size calculation per (NC, NV).
 - ``csrc/``                  CUDA kernel sources (header-only ``.cuh``).
 - ``include/moe_lb_jit/``    Vendored helper C++ headers (TensorView
@@ -13,7 +14,11 @@ This package owns the LPLB Linear-Programming load-balancer kernels:
                              populates ``resources/mathdx/``.
 
 The pipeline has no runtime or build-time dependency on any inference
-framework. Framework-specific glue (e.g. building a ``LPLBKernels``
-Protocol instance backed by these kernels) lives separately under
-``moe_load_balancer.adapters.<framework>``.
+framework. Framework-specific implementations of ``LPLBKernels`` live
+separately under ``moe_load_balancer.adapters.<framework>``.
 """
+
+from moe_load_balancer.kernels.lplb.backend import CUDALPLBKernels
+from moe_load_balancer.kernels.lplb.protocol import LPLBKernels
+
+__all__ = ["CUDALPLBKernels", "LPLBKernels"]

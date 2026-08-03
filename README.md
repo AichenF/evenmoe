@@ -120,10 +120,12 @@ Algorithm code that does not depend on SGLang internals should live in
 
 ### EPLB Placement
 
-`DeepSeekEPLBPlanner` exposes the DeepSeek/SGLang EPLB placement algorithm
-through the framework-neutral `PlacementPlanner` protocol. It consumes
-logical expert activation statistics and returns a `PlacementPlan` plus raw
-metadata that adapters can write back to native placement structures.
+`EPLBPlacementPlanner` exposes the DeepSeek/SGLang EPLB algorithm family
+through the framework-neutral `PlacementPlanner` protocol. L1 policy names
+directly select `deepseek`, `deepseek_vec`, `elasticity_aware`, their
+hierarchical variants, or `auto`; the selected algorithm is not hidden in
+metadata. The planner consumes logical expert activation statistics and
+returns an uncommitted `PlacementPlan`.
 
 ### Waterfill Routing
 

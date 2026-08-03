@@ -131,6 +131,34 @@ class PlacementStats:
 
 
 @dataclass(frozen=True)
+class PlacementTopology:
+    """Runtime placement geometry supplied by the serving framework."""
+
+    num_physical_experts: int
+    num_local_physical_experts: int
+    num_groups: Optional[int]
+    num_nodes: int
+    active_ranks: Optional[TensorLike] = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.num_physical_experts <= 0:
+            raise ValueError("PlacementTopology.num_physical_experts must be positive.")
+        if self.num_local_physical_experts <= 0:
+            raise ValueError("PlacementTopology.num_local_physical_experts must be positive.")
+        if self.num_physical_experts % self.num_local_physical_experts != 0:
+            raise ValueError(
+                "PlacementTopology.num_physical_experts must be divisible by "
+                "num_local_physical_experts."
+            )
+        if self.num_groups is not None and self.num_groups <= 0:
+            raise ValueError("PlacementTopology.num_groups must be positive or None.")
+        if self.num_nodes <= 0:
+            raise ValueError("PlacementTopology.num_nodes must be positive.")
+        object.__setattr__(self, "metadata", _immutable_mapping(self.metadata))
+
+
+@dataclass(frozen=True)
 class PlacementPolicyConfig:
     """Selection and stable configuration for one L1 placement policy."""
 
@@ -163,6 +191,7 @@ class PlacementRequest:
     """Framework-neutral L1 planning input."""
 
     stats: PlacementStats
+    topology: PlacementTopology
     policy: PlacementPolicyConfig | str
     current: Optional[Mapping[int, PlacementSnapshot]] = None
     hbm_budget_bytes: Optional[int] = None

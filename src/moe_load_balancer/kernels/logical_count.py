@@ -1,4 +1,4 @@
-"""CUDA logical-expert counting used by the thin SGLang Adapter."""
+"""CUDA logical-expert counting shared by framework adapters."""
 
 from __future__ import annotations
 

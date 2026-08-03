@@ -12,7 +12,7 @@ from moe_load_balancer import (
     RoutingRequest,
     RoutingStage,
 )
-from moe_load_balancer.core.orchestrator import count_routed_per_rank
+from moe_load_balancer.kernels.rank_count import count_routed_per_rank
 
 
 def _placement() -> PlacementSnapshot:

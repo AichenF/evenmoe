@@ -48,8 +48,12 @@ def test_l1_pre_and_post_adapters_are_plain_translations():
         algorithm="deepseek",
     )
     assert request.stats.logical_count is logical_count
-    assert request.policy.name == "eplb"
-    assert request.policy.metadata["num_physical_experts"] == 4
+    assert request.policy.name == "deepseek"
+    assert request.policy.metadata == {}
+    assert request.topology.num_physical_experts == 4
+    assert request.topology.num_local_physical_experts == 2
+    assert request.topology.num_groups == 1
+    assert request.topology.num_nodes == 1
 
     plan = PlacementPlan(
         physical_to_logical_map=torch.tensor([[0, 1, 0, 1]]),

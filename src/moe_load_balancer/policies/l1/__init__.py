@@ -8,15 +8,17 @@ MoETuner, replica-budget allocators) implement the same
 from __future__ import annotations
 
 from moe_load_balancer.policies.l1.eplb import (
-    DeepSeekEPLBPlanner,
+    EPLBPlacementPlanner,
     EplbAlgorithm,
+    SUPPORTED_PLACEMENT_POLICIES,
     compute_algorithm,
     rebalance_experts,
 )
 
 __all__ = [
-    "DeepSeekEPLBPlanner",
+    "EPLBPlacementPlanner",
     "EplbAlgorithm",
     "compute_algorithm",
     "rebalance_experts",
+    "SUPPORTED_PLACEMENT_POLICIES",
 ]

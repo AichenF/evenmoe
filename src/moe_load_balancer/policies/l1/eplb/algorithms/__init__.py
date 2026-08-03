@@ -9,7 +9,7 @@ intact. To enable a stub, vendor the corresponding sglang file in place.
 
 The dispatcher and ``compute_algorithm`` ``auto`` rule are bit-for-bit copies
 of sglang's behaviour, so a ``PlacementRequest`` going through
-:class:`moe_load_balancer.policies.l1.eplb.DeepSeekEPLBPlanner` produces the
+:class:`moe_load_balancer.policies.l1.eplb.EPLBPlacementPlanner` produces the
 same ``(physical_to_logical_map, logical_to_all_physical_map, expert_count)``
 tensors as a direct call into sglang's ``eplb_algorithms.rebalance_experts``.
 """
@@ -97,8 +97,7 @@ def rebalance_experts(
             num_groups=num_groups,
             num_nodes=num_nodes,
             num_gpus=num_physical_experts // num_local_physical_experts,
-            enable_hierarchical=algorithm
-            == EplbAlgorithm.elasticity_aware_hierarchical,
+            enable_hierarchical=algorithm == EplbAlgorithm.elasticity_aware_hierarchical,
             active_ranks=active_ranks,
         )
 

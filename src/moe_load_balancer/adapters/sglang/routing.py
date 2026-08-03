@@ -48,7 +48,7 @@ def count_logical_experts(
         device=logical_topk_ids.device,
     )
     if logical_topk_ids.is_cuda:
-        from moe_load_balancer.adapters.sglang._logical_count_cuda import (
+        from moe_load_balancer.kernels.logical_count import (
             count_logical_experts_cuda,
         )
 
@@ -117,7 +117,7 @@ def to_sglang_routing_output(
     """Translate an MLB decision into the tensors consumed by SGLang Glue.
 
     The unexpanded physical IDs are returned separately for SGLang's recorder.
-    If Waterfill selected a shared rank, this function appends the shared
+    If an L2 policy selected a shared rank, this function appends the shared
     expert and converts routed IDs into DeepEP's interleaved ID layout.
     """
 
@@ -148,11 +148,7 @@ def to_sglang_routing_output(
     if not isinstance(chosen_rank, torch.Tensor):
         chosen_rank = torch.as_tensor(chosen_rank, device=physical_ids.device)
 
-    from moe_load_balancer.adapters.sglang.waterfill import (
-        materialize_waterfill_output,
-    )
-
-    expanded_ids, expanded_weights = materialize_waterfill_output(
+    expanded_ids, expanded_weights = _materialize_shared_expert_output(
         physical_ids,
         weights,
         chosen_rank,
@@ -170,3 +166,82 @@ def to_sglang_routing_output(
         router_logits=router_logits,
         recorded_physical_topk_ids=physical_ids,
     )
+
+
+def _materialize_shared_expert_output(
+    physical_ids: TensorLike,
+    weights: TensorLike,
+    chosen_rank: TensorLike,
+    *,
+    num_routed_experts: int,
+    world_size: int,
+    routed_scaling_factor: float,
+) -> tuple[TensorLike, TensorLike]:
+    """Translate a shared-rank decision into SGLang's DeepEP TopK layout."""
+
+    import torch
+
+    if physical_ids.ndim != 2 or weights.shape != physical_ids.shape:
+        raise ValueError("physical_ids and weights must have the same 2-D shape.")
+    if chosen_rank.shape != (physical_ids.shape[0],):
+        raise ValueError("chosen_rank must have one entry per token.")
+
+    old_experts_per_rank = num_routed_experts // world_size
+    new_experts_per_rank = old_experts_per_rank + 1
+    shared_weight = 1.0 / routed_scaling_factor if routed_scaling_factor != 0 else 1.0
+
+    if not physical_ids.is_cuda:
+        valid = physical_ids >= 0
+        interleaved = torch.where(
+            valid,
+            physical_ids + physical_ids // old_experts_per_rank,
+            physical_ids,
+        )
+        routed_weights = torch.where(valid, weights, torch.zeros_like(weights))
+        has_valid = valid.any(dim=1)
+        shared_ids = chosen_rank.to(physical_ids.dtype) * new_experts_per_rank
+        shared_ids = shared_ids + old_experts_per_rank
+        shared_ids = torch.where(
+            has_valid & (chosen_rank >= 0),
+            shared_ids,
+            torch.full_like(shared_ids, -1),
+        )
+        shared_weights = torch.where(
+            has_valid,
+            torch.full_like(has_valid, shared_weight, dtype=weights.dtype),
+            torch.zeros_like(has_valid, dtype=weights.dtype),
+        )
+        return (
+            torch.cat((interleaved, shared_ids[:, None]), dim=1),
+            torch.cat((routed_weights, shared_weights[:, None]), dim=1),
+        )
+
+    num_tokens, topk = physical_ids.shape
+    expanded_ids = torch.empty(
+        (num_tokens, topk + 1),
+        dtype=physical_ids.dtype,
+        device=physical_ids.device,
+    )
+    expanded_weights = torch.empty(
+        (num_tokens, topk + 1),
+        dtype=weights.dtype,
+        device=weights.device,
+    )
+    if num_tokens == 0:
+        return expanded_ids, expanded_weights
+
+    from moe_load_balancer.kernels.shared_expert_materialization import (
+        materialize_shared_expert_cuda,
+    )
+
+    materialize_shared_expert_cuda(
+        physical_ids,
+        weights,
+        chosen_rank,
+        expanded_ids,
+        expanded_weights,
+        old_experts_per_rank,
+        new_experts_per_rank,
+        shared_weight,
+    )
+    return expanded_ids, expanded_weights

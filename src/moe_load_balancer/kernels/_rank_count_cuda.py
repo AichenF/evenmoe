@@ -1,4 +1,4 @@
-"""CUDA-only physical-expert rank counting for the L2 orchestrator."""
+"""CUDA implementation of physical-expert rank counting."""
 
 from __future__ import annotations
 
