@@ -170,10 +170,8 @@ def _waterfill_select(
     Returns ``chosen_rank: [num_tokens]`` int64 — the EP rank that should
     receive each token's shared expert.
 
-    Internally this is the per-token decision step extracted from PR #19290's
-    fused expand kernel; materialization back into SGLang's ``StandardTopKOutput``
-    layout is the adapter's responsibility (in
-    ``adapters/sglang/waterfill/runtime.py``).
+    Materialization back into the framework's TopK output layout is the
+    adapter's responsibility.
 
     Sync-free: ``target_total`` is derived inside the kernel via
     ``tl.sum`` over ``routed_load`` (pure routed counts) and ``rank_load``
@@ -369,8 +367,8 @@ def _waterfill_select_kernel(
         cum += w_vec
 
     final_rank = tl.where(total_w > 0, chosen.to(tl.int64), best_rank)
-    # Tokens with no valid routed expert get -1 (caller materializer will
-    # treat them as "drop"; SGLang's empty/padding path uses this signal).
+    # Tokens with no valid routed expert get -1; the materializer treats
+    # the sentinel as "drop" (framework empty/padding convention).
     final_rank = tl.where(has_valid, final_rank, tl.full([BLOCK_SIZE], -1, dtype=tl.int64))
 
     tl.store(chosen_rank_ptr + token_idx, final_rank, mask=mask)

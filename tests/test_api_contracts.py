@@ -66,10 +66,10 @@ def test_routing_request_normalizes_ordered_pipeline():
         layer_id=0,
         logical_topk_ids=[[0]],
         topk_weights=[[1.0]],
-        policies=("lpcf", RoutingPolicyConfig(name="waterfill")),
+        policies=("lplb", RoutingPolicyConfig(name="waterfill")),
         placement=_placement(),
     )
-    assert tuple(policy.name for policy in request.policies) == ("lpcf", "waterfill")
+    assert tuple(policy.name for policy in request.policies) == ("lplb", "waterfill")
 
 
 @pytest.mark.unit

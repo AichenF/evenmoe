@@ -11,7 +11,7 @@ from moe_load_balancer.adapters.sglang.placement import (
     to_placement_snapshot,
     to_sglang_maps,
 )
-from moe_load_balancer.adapters.sglang.lplb import SGLangFusedIPMBackend
+from moe_load_balancer.adapters.sglang.lplb import SGLangLPLBKernels
 from moe_load_balancer.adapters.sglang.routing import (
     SGLangRoutingOutput,
     count_logical_experts,
@@ -21,7 +21,7 @@ from moe_load_balancer.adapters.sglang.routing import (
 
 __all__ = [
     "SGLangPlacementMaps",
-    "SGLangFusedIPMBackend",
+    "SGLangLPLBKernels",
     "SGLangRoutingOutput",
     "count_logical_experts",
     "to_placement_request",
