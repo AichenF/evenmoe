@@ -37,11 +37,21 @@ __global__ void dispatch_probability_kernel(
     const float* __restrict__ log2phy_prob,   // (NUM_LOGICAL, MAX_COPIES)
     const int32_t* __restrict__ log2phy_map,  // (NUM_LOGICAL, MAX_COPIES)
     const float* __restrict__ random_vals,    // (N,)
-    int N) {
+    int N,
+    int num_logical) {
   const int idx = blockIdx.x * BLOCK_DIM + threadIdx.x;
   if (idx >= N) return;
 
   const int32_t logical_id = in_topk_ids[idx];
+  // SGLang pads unused TopK slots with -1.  Do not form row pointers until
+  // the id has been validated: pointer arithmetic with -1 reads before both
+  // tables and surfaces later as an asynchronous illegal-memory-access error
+  // during CUDA graph replay.  Treat any out-of-range id as the framework's
+  // invalid-slot sentinel, matching the pre-SDK Triton implementation.
+  if (logical_id < 0 || logical_id >= num_logical) {
+    out_topk_ids[idx] = -1;
+    return;
+  }
   const int32_t* row_map = log2phy_map + logical_id * MAX_COPIES;
   const float* row_prob = log2phy_prob + logical_id * MAX_COPIES;
 
@@ -106,7 +116,8 @@ void dispatch_probability(
   const int grid = (n + BLOCK_DIM - 1) / BLOCK_DIM;
   const DLDevice device = device_.unwrap();
 
-  using KernelT = void (*)(int32_t*, const int32_t*, const float*, const int32_t*, const float*, int);
+  using KernelT =
+      void (*)(int32_t*, const int32_t*, const float*, const int32_t*, const float*, int, int);
   KernelT kernel = dispatch_probability_kernel<MAX_COPIES, BLOCK_DIM>;
 
   LaunchKernel(grid, BLOCK_DIM, device)(
@@ -116,7 +127,8 @@ void dispatch_probability(
       static_cast<const float*>(log2phy_prob.data_ptr()),
       static_cast<const int32_t*>(log2phy_map.data_ptr()),
       static_cast<const float*>(random_vals.data_ptr()),
-      n);
+      n,
+      static_cast<int>(NUM_LOGICAL.unwrap()));
 }
 
 }  // namespace
