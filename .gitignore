@@ -8,23 +8,8 @@ __pycache__/
 .ruff_cache/
 *.egg-info/
 
-# proposal/PoC visualizations and working notes live outside git
+# Local proposal/PoC artifacts and working notes are not versioned here.
 poc-plan.html
 proposal-moe-load-balancer.md
-docs/
-
-# Keep docs ignored by default, but track the curated docs.
-!docs/
-docs/*
-!docs/assets/
-docs/assets/*
-!docs/assets/*.png
-!docs/assets/*.jpg
-!docs/assets/*.jpeg
-!docs/assets/*.webp
-!docs/assets/*.gif
-!docs/architecture.md
-!docs/deepep-waterfill-lplb-blog-draft.md
-!docs/lpcf-user-guide.md
-!docs/poc-plan.md
-!docs/h20-pr19290-reproduction-howto.md
+/docs/
+/outputs/
