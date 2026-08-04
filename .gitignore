@@ -7,6 +7,12 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 *.egg-info/
+build/
+dist/
+.coverage
+htmlcov/
+.mypy_cache/
+.omo/
 
 # Local proposal/PoC artifacts and working notes are not versioned here.
 poc-plan.html

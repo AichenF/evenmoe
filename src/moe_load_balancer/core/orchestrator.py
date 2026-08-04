@@ -7,6 +7,7 @@ from moe_load_balancer.core.l1 import PlacementPlanner
 from moe_load_balancer.core.l2 import TokenRouter
 from moe_load_balancer.core.types import (
     PlacementPlan,
+    PlacementPolicyConfig,
     PlacementRequest,
     PlacementSnapshot,
     RoutingDecision,
@@ -48,16 +49,17 @@ class MoELoadBalancer:
     def plan_placement(self, request: PlacementRequest) -> PlacementPlan:
         """Run the selected L1 policy and return an uncommitted candidate."""
 
-        if request.policy.is_disabled:
+        policy = PlacementPolicyConfig.from_value(request.policy)
+        if policy.is_disabled:
             raise ValueError(
                 "Placement policy is disabled. The framework must skip the "
                 "plan_placement call when it decides not to rebalance."
             )
         try:
-            planner = self._placement_planners[request.policy.name]
+            planner = self._placement_planners[policy.name]
         except KeyError as exc:
             raise ValueError(
-                f"Unknown placement policy {request.policy.name!r}; registered "
+                f"Unknown placement policy {policy.name!r}; registered "
                 f"policies are {sorted(self._placement_planners)}."
             ) from exc
         return planner.plan(request)
@@ -91,7 +93,8 @@ class MoELoadBalancer:
         executed: list[str] = []
         skipped: list[str] = []
 
-        for policy_config in request.policies:
+        for policy_value in request.policies:
+            policy_config = RoutingPolicyConfig.from_value(policy_value)
             if not policy_config.should_run_for_stage(request.stage):
                 skipped.append(policy_config.name)
                 continue

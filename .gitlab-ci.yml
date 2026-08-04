@@ -1,0 +1,39 @@
+stages:
+  - quality
+  - test
+  - package
+
+default:
+  image: python:3.10
+  before_script:
+    - python -m pip install --upgrade pip
+    - python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.5"
+    - python -m pip install build pytest pytest-cov ruff black mypy
+    - python -m pip install -e . --no-deps
+  cache:
+    key: pip
+    paths:
+      - .cache/pip
+
+quality:
+  stage: quality
+  script:
+    - python -m ruff check .
+    - python -m mypy src/moe_load_balancer
+
+cpu-tests:
+  stage: test
+  script:
+    - python -m pytest -m "not integration"
+    - python examples/quickstart.py
+
+package:
+  stage: package
+  script:
+    - python -m build
+    - python -m pip install --force-reinstall --no-deps dist/*.whl
+    - cd /tmp
+    - python -c "import moe_load_balancer; print(moe_load_balancer.MoELoadBalancer)"
+  artifacts:
+    paths:
+      - dist/

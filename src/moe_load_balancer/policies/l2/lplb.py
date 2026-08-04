@@ -411,7 +411,7 @@ class LPLBL2Router(TokenRouter):
                     "Direct LPLBL2Router calls require exactly one request policy; "
                     "the unified orchestrator always passes the selected policy explicitly."
                 )
-            policy = request.policies[0]
+            policy = RoutingPolicyConfig.from_value(request.policies[0])
         if not policy.should_run_for_stage(request.stage):
             return RoutingDecision(
                 routed_physical_topk_ids=request.logical_topk_ids,

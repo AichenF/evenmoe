@@ -6,7 +6,7 @@ import torch
 from torch import Tensor
 
 from moe_load_balancer.core.l1 import PlacementPlanner
-from moe_load_balancer.core.types import PlacementPlan, PlacementRequest
+from moe_load_balancer.core.types import PlacementPlan, PlacementPolicyConfig, PlacementRequest
 from moe_load_balancer.policies.l1.eplb.algorithms import (
     EplbAlgorithm,
     compute_algorithm,
@@ -15,15 +15,16 @@ from moe_load_balancer.policies.l1.eplb.algorithms import (
 
 SUPPORTED_PLACEMENT_POLICIES: tuple[str, ...] = (
     "auto",
-    *(algorithm.name for algorithm in EplbAlgorithm),
+    EplbAlgorithm.deepseek.name,
+    EplbAlgorithm.deepseek_hierarchical.name,
 )
 
 
 class EPLBPlacementPlanner(PlacementPlanner):
     """Planner bound to one directly selectable L1 placement policy.
 
-    The Orchestrator registry maps each policy name (for example
-    ``deepseek_vec``) to a planner instance bound to that name. Runtime
+    The Orchestrator registry maps each implemented policy name (for example
+    ``deepseek``) to a planner instance bound to that name. Runtime
     geometry comes from ``request.topology``; the policy name is never hidden
     inside metadata.
     """
@@ -37,7 +38,7 @@ class EPLBPlacementPlanner(PlacementPlanner):
         self._policy_name = policy_name
 
     def plan(self, request: PlacementRequest) -> PlacementPlan:
-        policy = request.policy
+        policy = PlacementPolicyConfig.from_value(request.policy)
         if policy.is_disabled:
             raise ValueError("EPLBPlacementPlanner cannot run a disabled policy.")
         if policy.name != self._policy_name:

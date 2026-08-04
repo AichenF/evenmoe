@@ -1,4 +1,7 @@
-# This file is copied from https://github.com/deepseek-ai/EPLB/blob/main/eplb.py since that one is not a pypi package
+# Copyright (c) 2025 DeepSeek
+# SPDX-License-Identifier: MIT
+# Copied from https://github.com/deepseek-ai/EPLB/blob/main/eplb.py and adapted
+# for the framework-neutral MLB placement API.
 from typing import Tuple
 
 import torch

@@ -15,6 +15,7 @@ from moe_load_balancer.policies.l1.eplb.algorithms import (
     EplbAlgorithm,
     rebalance_experts,
 )
+from moe_load_balancer.policies.l1.eplb.planner import SUPPORTED_PLACEMENT_POLICIES
 
 
 @pytest.mark.unit
@@ -118,3 +119,23 @@ def test_auto_is_a_policy_and_reports_its_resolved_algorithm():
     assert request.policy.name == "auto"
     assert plan.metadata["requested_policy"] == "auto"
     assert plan.metadata["resolved_policy"] == "deepseek_hierarchical"
+
+
+@pytest.mark.unit
+def test_default_registry_only_advertises_implemented_eplb_policies():
+    assert SUPPORTED_PLACEMENT_POLICIES == (
+        "auto",
+        "deepseek",
+        "deepseek_hierarchical",
+    )
+
+    request = to_placement_request(
+        torch.tensor([[10, 7, 4, 1]]),
+        num_physical_experts=8,
+        num_local_physical_experts=4,
+        num_groups=1,
+        num_nodes=1,
+        algorithm="deepseek_vec",
+    )
+    with pytest.raises(ValueError, match="Unknown placement policy"):
+        MoELoadBalancer().plan_placement(request)

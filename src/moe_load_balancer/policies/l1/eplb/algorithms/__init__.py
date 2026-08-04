@@ -60,10 +60,12 @@ def rebalance_experts(
     """
 
     if algorithm in (EplbAlgorithm.deepseek, EplbAlgorithm.deepseek_hierarchical):
+        if algorithm == EplbAlgorithm.deepseek_hierarchical and num_groups is None:
+            raise ValueError("deepseek_hierarchical requires num_groups.")
         return deepseek.rebalance_experts(
             weight=tokens_per_expert.sum(dim=0),
             num_replicas=num_physical_experts,
-            num_groups=num_groups,
+            num_groups=1 if num_groups is None else num_groups,
             num_nodes=num_nodes,
             num_gpus=num_physical_experts // num_local_physical_experts,
             enable_hierarchical=algorithm == EplbAlgorithm.deepseek_hierarchical,

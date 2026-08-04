@@ -1,22 +1,54 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "moe-load-balancer"
-version = "0.0.0"
-description = "Framework-decoupled MoE load balancer prototype APIs."
+version = "0.1.0"
+description = "Framework-decoupled expert placement and token routing for Mixture-of-Experts inference."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"]
+authors = [{ name = "MoE Load Balancer Contributors" }]
 requires-python = ">=3.10"
-dependencies = []
+keywords = [
+    "mixture-of-experts",
+    "load-balancing",
+    "inference",
+    "pytorch",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "nvidia-mathdx==25.6.0",
+    "torch>=2.5",
+    "triton>=3.0",
+    "tvm-ffi>=0.1.0",
+]
 
 [project.optional-dependencies]
 dev = [
+    "build",
     "pytest>=7",
     "pytest-cov",
     "ruff",
     "black",
     "mypy",
 ]
+
+[project.urls]
+Homepage = "https://github.com/xutizhou/moe_load_balancer"
+Repository = "https://github.com/xutizhou/moe_load_balancer"
+Issues = "https://github.com/xutizhou/moe_load_balancer/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -43,3 +75,8 @@ target-version = "py310"
 [tool.black]
 line-length = 100
 target-version = ["py310"]
+
+[tool.mypy]
+python_version = "3.10"
+packages = ["moe_load_balancer"]
+ignore_missing_imports = true

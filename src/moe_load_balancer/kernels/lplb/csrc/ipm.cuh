@@ -1,3 +1,6 @@
+// Copyright (c) 2025 DeepSeek
+// SPDX-License-Identifier: MIT
+//
 // Single-SM Interior Point Method (IPM) LP solver.
 //
 // Solves min c^T x subject to A x = b, x >= 0 with a barrier method:

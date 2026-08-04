@@ -1,155 +1,192 @@
 # MoE Load Balancer
 
-`moe_load_balancer` is a prototype Python package for framework-decoupled
-Mixture-of-Experts (MoE) load balancing. It separates algorithm policy code
-from framework glue so the same placement/routing ideas can be validated in
-SGLang first and later reused by other runtimes such as TensorRT-LLM, vLLM,
-NeMo Inference, or Dynamo.
+`moe-load-balancer` is an alpha-stage Python library for framework-decoupled
+Mixture-of-Experts load balancing. It provides one entry point for two levels
+of decisions:
 
-The repo currently focuses on two layers:
+- **L1 placement planning** chooses which logical expert weights should occupy
+  each physical expert slot.
+- **L2 token routing** chooses among equivalent physical replicas and, when
+  configured, selects a destination rank for a shared expert.
 
-- **L1 placement planning**: framework-neutral expert placement plans. The
-  current implementation wraps the DeepSeek/SGLang EPLB placement algorithm.
-- **L2 token routing**: per-layer, per-batch routing decisions that preserve
-  logical router output while choosing physical expert replicas or shared
-  expert dispatch targets. Current policies include shared-expert Waterfill
-  and LP-CF.
+Frameworks retain ownership of model execution, collectives, recording,
+rebalance cadence, weight movement, and committed placement metadata. Adapters
+translate framework-native values to and from the plain request and result
+types used by this package.
 
-The core rule is accuracy preservation: policies must not change the router's
-logical top-k expert choices. They may only choose among equivalent physical
-replicas or add framework-supported shared-expert dispatch metadata.
+## Status
 
-## Repository Layout
+The current release is `0.1.0` and the public API is still evolving.
 
-| Path | Purpose |
+| Level | Policy | Status | Purpose |
+|---|---|---|---|
+| L1 | `auto` | Implemented | Selects the appropriate implemented DeepSeek EPLB mode from topology. |
+| L1 | `deepseek` | Implemented | Non-hierarchical expert placement. |
+| L1 | `deepseek_hierarchical` | Implemented | Node-aware hierarchical expert placement. |
+| L2 | `lplb` | Implemented | LP-based routing among redundant physical replicas. |
+| L2 | `waterfill` | Implemented | Shared-expert destination selection from per-rank routed load. |
+
+`deepseek_vec` and `elasticity_aware` source placeholders are retained for
+future work, but they are intentionally not registered as supported policies.
+
+## Architecture
+
+```text
+Serving framework Glue
+    │
+    ├── framework Adapter: native metadata/tensors → MLB requests
+    │
+    ▼
+MoELoadBalancer
+    ├── L1 placement policy → uncommitted PlacementPlan
+    └── ordered L2 policy pipeline → RoutingDecision
+            ├── LPLB physical-replica routing
+            └── Waterfill shared-expert routing
+    │
+    ├── framework Adapter: MLB result → native values
+    │
+    ▼
+Serving framework applies the result
+```
+
+The main source directories are:
+
+| Path | Responsibility |
 |---|---|
-| `src/moe_load_balancer/core/` | Framework-neutral dataclasses and protocols. |
-| `src/moe_load_balancer/policies/l1/` | L1 placement planning policies, currently EPLB. |
-| `src/moe_load_balancer/policies/l2/` | L2 routing policies, currently Waterfill and LP-CF. |
-| `src/moe_load_balancer/adapters/sglang/` | SGLang-specific conversion, runtime glue, and Triton helper kernels. |
-| `tests/` | Unit tests for core API contracts and LP-CF behavior. |
-| `docs/architecture.md` | Design notes and module boundaries. |
-| `docs/lpcf-user-guide.md` | LP-CF usage guide. |
-| `docs/h20-pr19290-reproduction-howto.md` | Waterfill reproduction notes for the H20/SGLang PR workflow. |
-| `docs/deepep-waterfill-lplb-blog-draft.md` | Blog draft for Waterfill and LPLB work. |
+| `src/moe_load_balancer/core/` | Public request/result types, protocols, and the unified orchestrator. |
+| `src/moe_load_balancer/policies/l1/` | Framework-independent placement algorithms. |
+| `src/moe_load_balancer/policies/l2/` | Framework-independent routing policies. |
+| `src/moe_load_balancer/kernels/` | Triton and CUDA execution implementations. |
+| `src/moe_load_balancer/adapters/sglang/` | Stateless translation between SGLang and MLB values. |
+| `examples/` | Executable examples used by CI. |
+| `tests/` | API, policy, adapter, orchestrator, and GPU integration tests. |
 
-## Install
+## Installation
 
-For local development:
+Python 3.10 or newer, PyTorch 2.5 or newer, Triton, tvm-ffi, and NVIDIA
+MathDX are required. The normal installation installs these dependencies once;
+the Waterfill and LPLB kernels themselves are included in the MLB package.
 
-```bash
-git clone https://github.com/xutizhou/moe_load_balancer.git
-cd moe_load_balancer
-pip install -e ".[dev]"
-```
-
-For use inside an SGLang worktree or dev container:
+Install the complete package:
 
 ```bash
-pip install -e /path/to/moe_load_balancer --no-deps
+python -m pip install -e .
 ```
 
-The core package has no required runtime dependencies. GPU policy/runtime
-modules import `torch` and `triton` only when those modules are imported.
+The LPLB CUDA implementation requires a compatible NVIDIA CUDA toolchain.
+`nvidia-mathdx` is pinned to the version used by the packaged JIT sources. A
+manual MathDX installation can instead be selected with `MATHDX_HOME`.
 
-## Run Tests
+Inside an existing SGLang environment, dependency versions are normally owned
+by that environment:
 
 ```bash
-pytest
+python -m pip install -e /path/to/moe_load_balancer --no-deps
 ```
 
-Useful narrower runs:
+## Quick Start: L1 Placement
 
-```bash
-pytest tests/test_api_contracts.py -v
-pytest tests/test_lpcf.py -v
-```
-
-Some LP-CF tests are CUDA/Triton parity checks and are skipped automatically
-when CUDA is unavailable.
-
-## Use The Core API
-
-Framework-independent callers should depend on `core` types and policy
-protocols, not on SGLang classes:
+The following is also available as `examples/quickstart.py` and is executed by
+CI:
 
 ```python
-from moe_load_balancer.core.types import RoutingPolicyConfig, RoutingRequest, RoutingStage
+import torch
 
-request = RoutingRequest(
-    layer_id=0,
-    stage=RoutingStage.PREFILL,
-    logical_topk_ids=topk_ids,
-    topk_weights=topk_weights,
-    placement=placement_snapshot,
-    policy=RoutingPolicyConfig(name="lpcf"),
+from moe_load_balancer import MoELoadBalancer
+from moe_load_balancer.adapters.sglang import to_placement_request
+
+request = to_placement_request(
+    torch.tensor([[20, 3, 9, 4], [5, 16, 2, 7]]),
+    num_physical_experts=8,
+    num_local_physical_experts=4,
+    num_groups=1,
+    num_nodes=1,
+    algorithm="auto",
 )
 
-decision = router.route_tokens(request)
+plan = MoELoadBalancer().plan_placement(request)
+
+print(plan.physical_to_logical_map.shape)
+print(plan.metadata["resolved_policy"])
 ```
 
-The adapter is responsible for translating framework-native tensors and
-metadata into these neutral request objects, and for writing the returned
-decision back into the framework's native dispatch format.
+`PlacementPlan` is only a candidate. The serving framework must move or load
+weights first and update its live metadata before exposing the resulting
+placement to L2 as a committed `PlacementSnapshot`.
 
-## Use With SGLang
+## Configuring the L2 Pipeline
 
-This repo is meant to be imported as a package by an SGLang integration
-branch instead of being copied into the SGLang source tree.
+The framework constructs the runtime-specific policy instances and registers
+them on one `MoELoadBalancer` instance:
 
-In an SGLang dev environment:
+```python
+from moe_load_balancer import MoELoadBalancer
+from moe_load_balancer.kernels.lplb import CUDALPLBKernels
+from moe_load_balancer.policies.l2.lplb import LPLBL2Router
+from moe_load_balancer.policies.l2.waterfill import WaterfillL2Router
+
+world_size = 16
+source_rank = 0
+
+mlb = MoELoadBalancer(
+    routing_policies={
+        "lplb": LPLBL2Router(
+            kernels=CUDALPLBKernels(),
+            num_gpus=world_size,
+        ),
+        "waterfill": WaterfillL2Router(
+            source_rank=source_rank,
+            world_size=world_size,
+        ),
+    }
+)
+```
+
+For a combined request, the ordered policy sequence is `("lplb",
+"waterfill")`. The orchestrator runs physical-replica routing first, counts the
+resulting per-rank load, and then runs shared-expert Waterfill. A framework may
+also register and run either policy independently.
+
+SGLang Glue is responsible for:
+
+1. Reading TopK output and live placement metadata.
+2. Completing any required EP all-reduce before entering MLB.
+3. Calling the stateless SGLang adapter functions to create a
+   `PlacementRequest`, `PlacementSnapshot`, or `RoutingRequest`.
+4. Calling `MoELoadBalancer.plan_placement()` or
+   `MoELoadBalancer.route_tokens()`.
+5. Translating the result and applying it inside SGLang.
+
+## Development
+
+Install development dependencies and run the local quality gates:
 
 ```bash
-pip install -e /path/to/moe_load_balancer --no-deps
-export PYTHONPATH=/path/to/sglang/python:$PYTHONPATH
+python -m pip install -e ".[dev]"
+python -m ruff check .
+python -m mypy src/moe_load_balancer
+python -m pytest -m unit
+python examples/quickstart.py
+python -m build
 ```
 
-SGLang-side glue should stay small and framework-specific:
+GPU integration tests are separate because they require a CUDA device and the
+matching CUDA toolchain:
 
-- read SGLang metadata such as `ExpertLocationMetadata`;
-- build `PlacementSnapshot` / `RoutingRequest`;
-- call the selected policy/runtime in this package;
-- write the `RoutingDecision` back to SGLang top-k, physical expert ids, or
-  shared-expert dispatch slots.
+```bash
+python -m pytest -m integration
+```
 
-Algorithm code that does not depend on SGLang internals should live in
-`src/moe_load_balancer/policies/`. SGLang-only conversion code should live in
-`src/moe_load_balancer/adapters/sglang/` or in the SGLang integration branch.
+## Compatibility and Performance
 
-## Current Algorithms
+The current CUDA integration has been smoke-tested on NVIDIA H20 GPUs in the
+corresponding SGLang integration environment. GPU compatibility depends on the
+PyTorch, CUDA, Triton, tvm-ffi, and MathDX versions used by the serving
+framework; new combinations should run the integration test suite before
+deployment.
 
-### EPLB Placement
+## License
 
-`EPLBPlacementPlanner` exposes the DeepSeek/SGLang EPLB algorithm family
-through the framework-neutral `PlacementPlanner` protocol. L1 policy names
-directly select `deepseek`, `deepseek_vec`, `elasticity_aware`, their
-hierarchical variants, or `auto`; the selected algorithm is not hidden in
-metadata. The planner consumes logical expert activation statistics and
-returns an uncommitted `PlacementPlan`.
-
-### Waterfill Routing
-
-`WaterfillL2Router` implements shared-expert Waterfill routing. It does not
-change routed top-k experts. It consumes per-rank routed load and optional
-active token counts, then chooses the shared-expert destination rank.
-
-Waterfill is intentionally usable with or without stage gating. A framework
-adapter may run it only in prefill, only in decode, in both, or without
-passing stage information.
-
-### LP-CF Routing
-
-`LPCFL2Router` is a closed-form L2 routing policy for logical experts with
-redundant physical replicas. See `docs/lpcf-user-guide.md` for the SGLang
-launch flow, environment variables, tests, and benchmark guidance.
-
-## Development Notes
-
-- Keep framework-neutral API contracts in `core`.
-- Keep algorithm logic in `policies`.
-- Keep SGLang, DeepEP, process-group, interleaved-id, and native writeback
-  logic in adapters or SGLang glue.
-- Do not put per-step tensors in policy `metadata`; pass them through
-  `RoutingRequest` or a provider interface.
-- Stage is optional context. Policies should support ungated execution unless
-  a specific algorithm truly requires stage-specific behavior.
+MoE Load Balancer is licensed under Apache-2.0. Copied and adapted DeepSeek and
+SGLang components retain their original notices and licenses; see
+`THIRD_PARTY_NOTICES.md`.
