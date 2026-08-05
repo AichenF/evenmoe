@@ -177,6 +177,50 @@ matching CUDA toolchain:
 python -m pytest -m integration
 ```
 
+## Reproducible EPLB Experiments
+
+An EPLB performance comparison must reuse one immutable recording artifact.
+Re-recording the same prompts can change small token counts and therefore
+change the discrete expert placement, which creates a different experimental
+cohort rather than a repeat of the original run.
+
+After recording once, seal the recording together with the record/benchmark
+datasets and request schedule:
+
+```bash
+python scripts/eplb_repro_artifact.py seal \
+  --manifest artifacts/eplb_manifest.json \
+  --record-dataset artifacts/record_2k.jsonl \
+  --benchmark-dataset artifacts/benchmark_2k.jsonl \
+  --schedule artifacts/benchmark_schedule.json \
+  --recording artifacts/logical_count.pt \
+  --num-physical-experts 288 \
+  --num-local-physical-experts 18 \
+  --num-groups 8 --num-nodes 2 --algorithm auto \
+  --identity model=DeepSeek-V3 --identity profile=gsm8k_1k
+```
+
+Every server launch in the comparison must pass verification before using the
+recording with SGLang's `--init-expert-location`:
+
+```bash
+python scripts/eplb_repro_artifact.py verify artifacts/eplb_manifest.json
+```
+
+The manifest binds the raw file bytes, canonical `logical_count` tensor,
+topology, resolved policy, and all derived placement maps. It is immutable:
+sealing an existing path with different inputs fails instead of silently
+overwriting the reference placement. Use `compare` to confirm that two staged
+experiment directories belong to the same EPLB cohort.
+
+For short-input serving benchmarks, also replay every held-out request in the
+same order and at the same concurrency on every round. Use fresh server
+launches, alternate the A/B launch order, and compare within-launch-group
+medians. The manifest prevents placement drift; the fixed replay protocol
+prevents asynchronous request completion from silently changing the continuous
+batch sequence. Record the client and launch configuration alongside the
+manifest.
+
 ## Compatibility and Performance
 
 The current CUDA integration has been smoke-tested on NVIDIA H20 GPUs in the
