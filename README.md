@@ -29,6 +29,53 @@ The current release is `0.1.0` and the public API is still evolving.
 `deepseek_vec` and `elasticity_aware` source placeholders are retained for
 future work, but they are intentionally not registered as supported policies.
 
+## End-to-End Serving Performance
+
+The table below shows observed end-to-end SGLang serving throughput with a
+DeepSeek-V3 FP8 10-layer integration checkpoint. Each value is total throughput
+in K tokens/s; the parenthesized value is the observed difference from the
+Baseline in the same dataset. **Bold** marks the highest observed throughput in
+each row. `All` enables EPLB, Waterfill, and LPLB together.
+
+| Dataset | Baseline | Waterfill | LPLB | EPLB | EPLB + Waterfill | EPLB + LPLB | All |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| GSM8K-1K | 161.77 | 165.48 (+2.29%) | 159.72 (-1.27%) | 188.69 (+16.64%) | 190.03 (+17.47%) | 189.44 (+17.11%) | **191.44 (+18.34%)** |
+| MMLU-1K | 183.96 | 189.04 (+2.76%) | 180.82 (-1.71%) | 193.47 (+5.17%) | **194.27 (+5.61%)** | 192.62 (+4.71%) | 192.86 (+4.84%) |
+| GPQA-1K | 187.91 | 192.53 (+2.46%) | 182.51 (-2.87%) | 193.53 (+2.99%) | **195.00 (+3.77%)** | 192.90 (+2.66%) | 192.71 (+2.55%) |
+| ShareGPT-1K | 192.71 | **194.88 (+1.12%)** | 189.69 (-1.57%) | 193.48 (+0.40%) | 194.42 (+0.89%) | 192.10 (-0.32%) | 192.37 (-0.18%) |
+
+In this experiment, standalone Waterfill had a positive observed difference on
+all four datasets. EPLB produced the largest differences on GSM8K, while
+EPLB + Waterfill had the highest observed throughput on MMLU and GPQA. The
+highest observed ShareGPT result used Waterfill alone. Standalone LPLB was
+below the Baseline in these four workloads; its purpose is replica routing and
+its benefit depends on the placement and request distribution.
+
+Benchmark protocol:
+
+- MLB commit `80c44ed83055ffa9332e8d7d254fa3abfa4c0f62` with SGLang commit
+  `a380a107ed705b18e1f512b03f55b3c2970e61b4`.
+- Two exclusive nodes with 8 NVIDIA H20 96 GB GPUs per node,
+  TP16/DP16/EP16; GPU clocks were not locked.
+- DeepSeek-V3 FP8 checkpoint with a 10-layer configuration overlay. These are
+  integration-benchmark results, not full-model production-serving numbers.
+- Fixed 1,024-token inputs, a disjoint 2,000-prompt benchmark set replayed in
+  the same order, concurrency 256, `max_tokens=1`, and `temperature=0`.
+- Three fresh-server groups per dataset and mode. Each group used four nominal
+  warmup rounds, an explicit convergence gate, and eight measured rounds. The
+  reported value is the median of the three group medians.
+- 672 measured rounds and 1,344,000/1,344,000 completed measured requests,
+  with zero request errors and zero invalid output-token counts.
+- Immutable, verified per-dataset EPLB artifacts; CUDA Graph enabled, DeepEP
+  auto mode, and the overlap scheduler disabled.
+- All modes passed the predefined 3% gates. The worst within-group CV was
+  2.57%, and the worst range across the three fresh-server medians was 0.72%.
+
+The relative values above are descriptive differences for this pinned
+end-to-end serving setup. Bold identifies the largest observed value, not
+statistical significance between close alternatives. These results are not a
+hardware-normalized kernel SOL measurement.
+
 ## Architecture
 
 ```text
@@ -221,7 +268,7 @@ prevents asynchronous request completion from silently changing the continuous
 batch sequence. Record the client and launch configuration alongside the
 manifest.
 
-## Compatibility and Performance
+## Compatibility
 
 The current CUDA integration has been smoke-tested on NVIDIA H20 GPUs in the
 corresponding SGLang integration environment. GPU compatibility depends on the
