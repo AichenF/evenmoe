@@ -68,8 +68,15 @@ class MoELoadBalancer:
         self,
         policy_name: str,
         placement: PlacementSnapshot,
-    ) -> None:
-        """Prepare optional per-layer policy state outside the hot path."""
+    ) -> bool:
+        """Install state for one committed placement outside the hot path.
+
+        Frameworks call this after initial weight loading and after every
+        placement update. Policies without placement-derived state may omit a
+        ``prepare_layer`` implementation. The return value reports whether
+        existing execution storage had to be replaced, allowing a framework
+        to recapture execution graphs only when tensor layouts changed.
+        """
 
         try:
             router = self._routing_policies[policy_name]
@@ -80,7 +87,33 @@ class MoELoadBalancer:
             ) from exc
         prepare = getattr(router, "prepare_layer", None)
         if prepare is not None:
-            prepare(placement)
+            return bool(prepare(placement))
+        return False
+
+    def transform_routing_inputs(
+        self,
+        policy_name: str,
+        router_logits: object,
+        correction_bias: Optional[object] = None,
+    ) -> tuple[object, Optional[object]]:
+        """Run an optional policy-owned transform before logical TopK.
+
+        Production physical-routing policies normally leave these inputs
+        untouched. This hook keeps experimental stimuli such as ``fake`` in
+        MLB without moving framework-owned TopK selection into MLB.
+        """
+
+        try:
+            router = self._routing_policies[policy_name]
+        except KeyError as exc:
+            raise ValueError(
+                f"Unknown routing policy {policy_name!r}; registered policies are "
+                f"{sorted(self._routing_policies)}."
+            ) from exc
+        transform = getattr(router, "transform_routing_inputs", None)
+        if transform is None:
+            return router_logits, correction_bias
+        return transform(router_logits, correction_bias)
 
     def route_tokens(self, request: RoutingRequest) -> RoutingDecision:
         """Run physical routing and shared-expert policies in order."""

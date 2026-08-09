@@ -23,11 +23,15 @@ The current release is `0.1.0` and the public API is still evolving.
 | L1 | `auto` | Implemented | Selects the appropriate implemented DeepSeek EPLB mode from topology. |
 | L1 | `deepseek` | Implemented | Non-hierarchical expert placement. |
 | L1 | `deepseek_hierarchical` | Implemented | Node-aware hierarchical expert placement. |
+| L1 | `deepseek_vec` | Implemented | Vectorized non-hierarchical expert placement. |
+| L1 | `deepseek_vec_hierarchical` | Implemented | Vectorized node-aware expert placement. |
+| L1 | `elasticity_aware` | Implemented | Placement that excludes inactive EP ranks. |
+| L1 | `elasticity_aware_hierarchical` | Implemented | Node-aware placement that excludes inactive EP ranks. |
 | L2 | `lplb` | Implemented | LP-based routing among redundant physical replicas. |
+| L2 | `static` | Implemented | Deterministic routing through the framework-selected replica. |
+| L2 | `dynamic` | Implemented | Random routing among committed physical replicas. |
+| L2 | `fake` | Experimental | Uniform random router stimulus followed by dynamic replica routing. |
 | L2 | `waterfill` | Implemented | Shared-expert destination selection from per-rank routed load. |
-
-`deepseek_vec` and `elasticity_aware` source placeholders are retained for
-future work, but they are intentionally not registered as supported policies.
 
 ## End-to-End Serving Performance
 
@@ -87,7 +91,7 @@ Serving framework Glue
 MoELoadBalancer
     ├── L1 placement policy → uncommitted PlacementPlan
     └── ordered L2 policy pipeline → RoutingDecision
-            ├── LPLB physical-replica routing
+            ├── Static, dynamic, fake, or LPLB physical-replica routing
             └── Waterfill shared-expert routing
     │
     ├── framework Adapter: MLB result → native values
@@ -170,6 +174,11 @@ them on one `MoELoadBalancer` instance:
 from moe_load_balancer import MoELoadBalancer
 from moe_load_balancer.kernels.lplb import CUDALPLBKernels
 from moe_load_balancer.policies.l2.lplb import LPLBL2Router
+from moe_load_balancer.policies.l2.replica import (
+    DynamicL2Router,
+    FakeL2Router,
+    StaticL2Router,
+)
 from moe_load_balancer.policies.l2.waterfill import WaterfillL2Router
 
 world_size = 16
@@ -177,6 +186,9 @@ source_rank = 0
 
 mlb = MoELoadBalancer(
     routing_policies={
+        "static": StaticL2Router(),
+        "dynamic": DynamicL2Router(),
+        "fake": FakeL2Router(),
         "lplb": LPLBL2Router(
             kernels=CUDALPLBKernels(),
             num_gpus=world_size,
@@ -188,6 +200,11 @@ mlb = MoELoadBalancer(
     }
 )
 ```
+
+`fake` is an experimental baseline. A framework first calls
+`transform_routing_inputs("fake", router_logits, correction_bias)` before its
+normal logical TopK, then selects the `fake` policy in the post-TopK
+`RoutingRequest`. Static and dynamic routing do not transform TopK inputs.
 
 For a combined request, the ordered policy sequence is `("lplb",
 "waterfill")`. The orchestrator runs physical-replica routing first, counts the

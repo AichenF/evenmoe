@@ -54,6 +54,16 @@ class _PassThroughPhysicalRouter:
         )
 
 
+class _PreparingPhysicalRouter(_PassThroughPhysicalRouter):
+    def __init__(self, storage_changed):
+        self.storage_changed = storage_changed
+        self.prepared = None
+
+    def prepare_layer(self, placement):
+        self.prepared = placement
+        return self.storage_changed
+
+
 class _SharedRouter:
     phase = RoutingPhase.SHARED_EXPERT
 
@@ -109,6 +119,20 @@ def test_combined_pipeline_runs_lplb_then_count_then_waterfill():
         torch.tensor([[0, 2], [2, 2]]),
     )
     assert torch.equal(decision.shared_expert_rank, torch.zeros(2, dtype=torch.int64))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("storage_changed", [False, True])
+def test_prepare_routing_layer_propagates_storage_change(storage_changed):
+    router = _PreparingPhysicalRouter(storage_changed)
+    mlb = MoELoadBalancer(
+        placement_planners={},
+        routing_policies={"lplb": router},
+    )
+    placement = _placement()
+
+    assert mlb.prepare_routing_layer("lplb", placement) is storage_changed
+    assert router.prepared is placement
 
 
 @pytest.mark.unit

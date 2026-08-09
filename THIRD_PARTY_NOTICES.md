@@ -9,7 +9,9 @@ licenses.
 
 - Source: <https://github.com/deepseek-ai/EPLB>
 - License: MIT
-- Local code: `src/moe_load_balancer/policies/l1/eplb/algorithms/deepseek.py`
+- Local code:
+  `src/moe_load_balancer/policies/l1/eplb/algorithms/deepseek.py` and
+  `src/moe_load_balancer/policies/l1/eplb/algorithms/deepseek_vec.py`
 - Copyright: Copyright (c) 2025 DeepSeek
 
 ## DeepSeek LPLB
@@ -49,7 +51,11 @@ The MIT-licensed components above are distributed under the following terms:
 - Copyright: Copyright 2023-2026 SGLang Team
 - Local code includes the LPLB policy and CUDA/JIT support under
   `src/moe_load_balancer/policies/l2/lplb.py`,
+  the static, dynamic, and experimental fake replica-routing behavior in
+  `src/moe_load_balancer/policies/l2/replica.py`,
   `src/moe_load_balancer/kernels/utils.py`, and
-  `src/moe_load_balancer/kernels/lplb/`.
+  `src/moe_load_balancer/kernels/lplb/`, plus the Elastic-EP-aware placement
+  policy in
+  `src/moe_load_balancer/policies/l1/eplb/algorithms/elasticity_aware.py`.
 
 The Apache License 2.0 text is provided in the repository's `LICENSE` file.

@@ -17,6 +17,10 @@ SUPPORTED_PLACEMENT_POLICIES: tuple[str, ...] = (
     "auto",
     EplbAlgorithm.deepseek.name,
     EplbAlgorithm.deepseek_hierarchical.name,
+    EplbAlgorithm.deepseek_vec.name,
+    EplbAlgorithm.deepseek_vec_hierarchical.name,
+    EplbAlgorithm.elasticity_aware.name,
+    EplbAlgorithm.elasticity_aware_hierarchical.name,
 )
 
 

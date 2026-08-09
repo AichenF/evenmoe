@@ -39,11 +39,10 @@ Per-layer state
 ---------------
 
 The LP constraint matrices (``B1``, ``A_base``, ``c_vec``, ``log2phy``, …)
-depend only on the placement — not on per-batch data. They are pre-built
-once per ``(layer_id, placement_version)`` and cached. The adapter signals
-placement changes by bumping
-``PlacementSnapshot.metadata["placement_version"]``; the router rebuilds the
-state on the next ``route_tokens`` call.
+depend only on the placement — not on per-batch data. The framework calls
+``prepare_routing_layer`` after initial weight loading and after each committed
+placement update. MLB then updates the affected layer's derived state; no
+placement version or tensor-identity protocol is required.
 
 Sync-free
 ---------
@@ -52,7 +51,7 @@ The policy itself performs **no collectives** and **no host-GPU syncs**.
 It expects ``RoutingRequest.global_logical_count`` to already be the
 post-all-reduce per-logical-expert token counts; the adapter is responsible
 for the local scatter-add and EP all-reduce upstream. Placement-derived
-matrices are cached per layer/version. Mutable outputs (``A_full``, ``b``,
+matrices are prepared per committed layer placement. Mutable outputs (``A_full``, ``b``,
 ``t1``, ``x``, ``log2phy_prob``) are isolated per CUDA graph or eager stream
 so overlapping execution cannot overwrite another batch's LP state.
 """
@@ -85,8 +84,8 @@ class _LPLBLayerState:
     """Pre-built LP constraint matrices + reusable workspace for one layer.
 
     Constructed lazily by ``LPLBL2Router._get_or_build_layer_state`` on the
-    first ``route_tokens`` call seeing a ``(layer_id, placement_version)``
-    pair. The constant matrices (everything except the workspace tail) are
+    first ``route_tokens`` call for a layer. The constant matrices
+    (everything except the workspace tail) are
     derived from ``PlacementSnapshot``; the workspace tensors are
     pre-allocated once and overwritten in place by every routing call.
     """
@@ -117,6 +116,46 @@ class _LPLBLayerState:
     t1: Tensor  # [num_single] float32
     x: Tensor  # [NV] float32
     log2phy_prob: Tensor  # [num_logical, max_copies] float32
+
+
+_PLACEMENT_STATE_TENSORS = (
+    "log_single",
+    "phy_single",
+    "log_replicated",
+    "phy_replicated",
+    "B1",
+    "A_base",
+    "A_base_row_sum",
+    "c_vec",
+    "log2phy",
+    "log2phy_map_for_dispatch",
+    "A_full",
+)
+
+
+def _same_state_layout(left: _LPLBLayerState, right: _LPLBLayerState) -> bool:
+    if (
+        left.num_logical != right.num_logical
+        or left.num_phy != right.num_phy
+        or left.num_gpus != right.num_gpus
+        or left.has_redundancy != right.has_redundancy
+    ):
+        return False
+    for name in _PLACEMENT_STATE_TENSORS:
+        left_tensor = getattr(left, name)
+        right_tensor = getattr(right, name)
+        if (
+            left_tensor.shape != right_tensor.shape
+            or left_tensor.dtype != right_tensor.dtype
+            or left_tensor.device != right_tensor.device
+        ):
+            return False
+    return True
+
+
+def _copy_placement_state_(destination: _LPLBLayerState, source: _LPLBLayerState) -> None:
+    for name in _PLACEMENT_STATE_TENSORS:
+        getattr(destination, name).copy_(getattr(source, name))
 
 
 def _build_layer_state(
@@ -356,8 +395,8 @@ class LPLBL2Router(TokenRouter):
 
     - ``request.placement``: required. The ``logical_to_physical_candidates``,
       ``logical_to_physical_count``, and ``num_physical_experts`` fields drive
-      the LP constraint construction. ``metadata["placement_version"]`` keys
-      the per-layer state cache; bump it on EPLB rebalance to force a rebuild.
+      the LP constraint construction. The framework prepares every committed
+      placement before forwarding requests that use it.
     - ``request.global_logical_count``: required. Per-logical-expert token
       count summed across the EP group; the adapter is responsible for the
       local scatter-add and EP all-reduce upstream.
@@ -390,15 +429,36 @@ class LPLBL2Router(TokenRouter):
         self.num_gpus = num_gpus
         self.big_m_penalty = big_m_penalty
         self.ipm_iters = ipm_iters
-        # Per-layer state keyed by (layer_id, placement_version).
-        self._layer_state: Dict[Tuple[int, int], _LPLBLayerState] = {}
+        # Placement-derived state is authoritative only for the current
+        # framework-committed snapshot of each layer.
+        self._layer_state: Dict[int, _LPLBLayerState] = {}
         # Mutable LP workspaces cannot be shared by overlapping CUDA graphs.
-        self._execution_state: Dict[Tuple[int, int, Hashable], _LPLBLayerState] = {}
+        self._execution_state: Dict[Tuple[int, Hashable], _LPLBLayerState] = {}
 
-    def prepare_layer(self, snapshot: PlacementSnapshot) -> None:
-        """Build placement-dependent matrices outside CUDA graph capture."""
+    def prepare_layer(self, snapshot: PlacementSnapshot) -> bool:
+        """Install state for the framework's newly committed placement.
 
-        self._get_or_build_layer_state(snapshot.layer_id, snapshot)
+        Returns ``True`` only when existing tensor layouts changed and stored
+        execution graphs therefore need recapture. Shape-compatible updates
+        preserve tensor addresses and copy new placement-derived values in
+        place so already captured graphs observe the committed placement.
+        """
+
+        layer_id = snapshot.layer_id
+        state = self._build_and_warmup_layer_state(snapshot)
+        current = self._layer_state.get(layer_id)
+        if current is not None and _same_state_layout(current, state):
+            _copy_placement_state_(current, state)
+            for key, execution_state in self._execution_state.items():
+                if key[0] == layer_id:
+                    _copy_placement_state_(execution_state, state)
+            return False
+
+        self._layer_state[layer_id] = state
+        self._execution_state = {
+            key: value for key, value in self._execution_state.items() if key[0] != layer_id
+        }
+        return current is not None
 
     def route_tokens(
         self,
@@ -463,7 +523,6 @@ class LPLBL2Router(TokenRouter):
 
         state = self._get_execution_state(
             request.layer_id,
-            request.placement,
             topk_ids,
             base_state,
         )
@@ -518,22 +577,17 @@ class LPLBL2Router(TokenRouter):
     def _get_or_build_layer_state(
         self, layer_id: int, snapshot: PlacementSnapshot
     ) -> _LPLBLayerState:
-        """Return the cached state for this (layer, version), building if needed.
+        """Return prepared state, with lazy construction for direct callers."""
 
-        ``snapshot.metadata["placement_version"]`` keys the cache. The
-        framework adapter bumps this whenever placement changes (e.g. on
-        EPLB rebalance), so the next ``route_tokens`` call observes a miss
-        and rebuilds the LP matrices.
-
-        Older versions of the same layer are evicted from the cache when a
-        new version arrives to keep the memory footprint bounded.
-        """
-        version = int(snapshot.metadata.get("placement_version", 0))
-        key = (layer_id, version)
-        cached = self._layer_state.get(key)
+        cached = self._layer_state.get(layer_id)
         if cached is not None:
             return cached
 
+        state = self._build_and_warmup_layer_state(snapshot)
+        self._layer_state[layer_id] = state
+        return state
+
+    def _build_and_warmup_layer_state(self, snapshot: PlacementSnapshot) -> _LPLBLayerState:
         state = _build_layer_state(snapshot, self.num_gpus, self.big_m_penalty)
 
         # Warmup is per-shape; only meaningful when LP is actually used.
@@ -545,17 +599,11 @@ class LPLBL2Router(TokenRouter):
                 num_iters=self.ipm_iters,
                 device=state.A_full.device,
             )
-
-        # Evict any older versions of this layer; only the latest is needed.
-        self._layer_state = {k: v for k, v in self._layer_state.items() if k[0] != layer_id}
-        self._execution_state = {k: v for k, v in self._execution_state.items() if k[0] != layer_id}
-        self._layer_state[key] = state
         return state
 
     def _get_execution_state(
         self,
         layer_id: int,
-        snapshot: PlacementSnapshot,
         topk_ids: Tensor,
         base: _LPLBLayerState,
     ) -> _LPLBLayerState:
@@ -569,7 +617,6 @@ class LPLBL2Router(TokenRouter):
         if not topk_ids.is_cuda:
             return base
 
-        version = int(snapshot.metadata.get("placement_version", 0))
         if torch.cuda.is_current_stream_capturing():
             execution_key: Hashable = ("graph", topk_ids.data_ptr())
         else:
@@ -577,7 +624,7 @@ class LPLBL2Router(TokenRouter):
                 "stream",
                 torch.cuda.current_stream(topk_ids.device).cuda_stream,
             )
-        cache_key = (layer_id, version, execution_key)
+        cache_key = (layer_id, execution_key)
         cached = self._execution_state.get(cache_key)
         if cached is not None:
             return cached

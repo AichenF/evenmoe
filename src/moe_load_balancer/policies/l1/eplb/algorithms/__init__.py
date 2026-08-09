@@ -1,11 +1,9 @@
 """DeepSeek EPLB algorithm family — framework-neutral.
 
-This package vendors the algorithm-side of SGLang's
-``python/sglang/srt/eplb/eplb_algorithms/``. Only the ``deepseek`` variant is
-fully vendored in the current POC; ``deepseek_vec`` and ``elasticity_aware``
-are stub modules that raise on call, with the enum entries kept so the public
-``EplbAlgorithm`` surface and the ``--eplb-algorithm`` flag mapping stay
-intact. To enable a stub, vendor the corresponding sglang file in place.
+This package owns the algorithm-side formerly implemented in SGLang's
+``python/sglang/srt/eplb/eplb_algorithms/``. All DeepSeek, vectorized, and
+Elastic-EP-aware variants live here; frameworks provide runtime inputs such
+as load statistics, topology, and active ranks through the common request.
 
 The dispatcher and ``compute_algorithm`` ``auto`` rule are bit-for-bit copies
 of sglang's behaviour, so a ``PlacementRequest`` going through
@@ -29,7 +27,7 @@ from moe_load_balancer.policies.l1.eplb.algorithms import (
 
 
 class EplbAlgorithm(Enum):
-    """Mirror of ``sglang.srt.eplb.eplb_algorithms.EplbAlgorithm``."""
+    """Framework-neutral EPLB placement algorithms."""
 
     deepseek = auto()
     deepseek_hierarchical = auto()
@@ -59,13 +57,20 @@ def rebalance_experts(
     expert_count)``.
     """
 
+    hierarchical_algorithms = (
+        EplbAlgorithm.deepseek_hierarchical,
+        EplbAlgorithm.deepseek_vec_hierarchical,
+        EplbAlgorithm.elasticity_aware_hierarchical,
+    )
+    if algorithm in hierarchical_algorithms and num_groups is None:
+        raise ValueError(f"{algorithm.name} requires num_groups.")
+    effective_num_groups = 1 if num_groups is None else num_groups
+
     if algorithm in (EplbAlgorithm.deepseek, EplbAlgorithm.deepseek_hierarchical):
-        if algorithm == EplbAlgorithm.deepseek_hierarchical and num_groups is None:
-            raise ValueError("deepseek_hierarchical requires num_groups.")
         return deepseek.rebalance_experts(
             weight=tokens_per_expert.sum(dim=0),
             num_replicas=num_physical_experts,
-            num_groups=1 if num_groups is None else num_groups,
+            num_groups=effective_num_groups,
             num_nodes=num_nodes,
             num_gpus=num_physical_experts // num_local_physical_experts,
             enable_hierarchical=algorithm == EplbAlgorithm.deepseek_hierarchical,
@@ -79,7 +84,7 @@ def rebalance_experts(
             tokens_per_expert=tokens_per_expert,
             num_physical_experts=num_physical_experts,
             num_local_physical_experts=num_local_physical_experts,
-            num_groups=num_groups,
+            num_groups=effective_num_groups,
             num_nodes=num_nodes,
             enable_hierarchical=algorithm == EplbAlgorithm.deepseek_vec_hierarchical,
         )
@@ -96,7 +101,7 @@ def rebalance_experts(
         return elasticity_aware.rebalance_experts(
             weight=tokens_per_expert.sum(dim=0),
             num_replicas=num_physical_experts,
-            num_groups=num_groups,
+            num_groups=effective_num_groups,
             num_nodes=num_nodes,
             num_gpus=num_physical_experts // num_local_physical_experts,
             enable_hierarchical=algorithm == EplbAlgorithm.elasticity_aware_hierarchical,

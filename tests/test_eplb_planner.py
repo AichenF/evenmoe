@@ -122,20 +122,50 @@ def test_auto_is_a_policy_and_reports_its_resolved_algorithm():
 
 
 @pytest.mark.unit
-def test_default_registry_only_advertises_implemented_eplb_policies():
+def test_default_registry_advertises_all_migrated_eplb_policies():
     assert SUPPORTED_PLACEMENT_POLICIES == (
         "auto",
         "deepseek",
         "deepseek_hierarchical",
+        "deepseek_vec",
+        "deepseek_vec_hierarchical",
+        "elasticity_aware",
+        "elasticity_aware_hierarchical",
     )
 
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "algorithm",
+    [
+        "deepseek",
+        "deepseek_hierarchical",
+        "deepseek_vec",
+        "deepseek_vec_hierarchical",
+        "elasticity_aware",
+        "elasticity_aware_hierarchical",
+    ],
+)
+def test_all_migrated_eplb_policies_run_through_default_registry(algorithm):
+    active_ranks = torch.tensor([True, True]) if algorithm.startswith("elasticity_aware") else None
     request = to_placement_request(
-        torch.tensor([[10, 7, 4, 1]]),
+        torch.tensor(
+            [
+                [[20, 3, 9, 4], [5, 16, 2, 7]],
+                [[18, 4, 11, 2], [6, 12, 3, 8]],
+            ]
+        ),
         num_physical_experts=8,
         num_local_physical_experts=4,
         num_groups=1,
         num_nodes=1,
-        algorithm="deepseek_vec",
+        algorithm=algorithm,
+        active_ranks=active_ranks,
     )
-    with pytest.raises(ValueError, match="Unknown placement policy"):
-        MoELoadBalancer().plan_placement(request)
+    plan = MoELoadBalancer().plan_placement(request)
+
+    assert plan.physical_to_logical_map.shape == (2, 8)
+    assert plan.logical_to_all_physical_map.shape[:2] == (2, 4)
+    assert plan.logical_to_physical_count.shape == (2, 4)
+    assert torch.all(plan.logical_to_physical_count >= 1)
+    assert plan.metadata["resolved_policy"] == algorithm

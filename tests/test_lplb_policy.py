@@ -20,12 +20,12 @@ because the real SGLang kernels require CUDA + cuBLASDx + Math-DX. Kernel
 
 1. The LP constraint matrices match a hand-derived reference for a known
    placement (geometry and sign conventions).
-2. The per-(layer, placement_version) state cache rebuilds on version
-   change and reuses on same version.
+2. Explicit ``prepare_layer`` calls replace placement-derived state, while
+   forwards reuse the prepared state without version or identity checks.
 3. ``route_tokens`` fast paths (stage gating, no redundancy, empty batch)
    bypass the kernel pipeline cleanly.
 4. ``route_tokens`` invokes the kernels in the right order with buffers
-   from the cached layer state (no per-call allocation).
+   from the prepared layer state (no per-call allocation).
 5. Protocol conformance and input validation.
 """
 
@@ -77,7 +77,7 @@ from moe_load_balancer.policies.l2.lplb import (
 # -------------------------------------------------------------------------
 
 
-def _toy_snapshot(layer_id: int = 0, placement_version: int = 0) -> PlacementSnapshot:
+def _toy_snapshot(layer_id: int = 0) -> PlacementSnapshot:
     log2phy = torch.tensor([[0, 3], [1, -1], [2, 4], [5, -1]], dtype=torch.int64)
     log_counts = torch.tensor([2, 1, 2, 1], dtype=torch.int64)
     return PlacementSnapshot(
@@ -90,7 +90,37 @@ def _toy_snapshot(layer_id: int = 0, placement_version: int = 0) -> PlacementSna
         logical_to_physical_candidates=log2phy,
         logical_to_physical_count=log_counts,
         default_physical_for_logical=None,
-        metadata={"placement_version": placement_version},
+    )
+
+
+def _same_shape_rebalanced_snapshot(layer_id: int = 0) -> PlacementSnapshot:
+    return PlacementSnapshot(
+        layer_id=layer_id,
+        num_logical_experts=4,
+        num_physical_experts=6,
+        ep_size=2,
+        num_local_physical_experts=3,
+        physical_to_logical_map=torch.tensor([0, 1, 1, 2, 3, 3]),
+        logical_to_physical_candidates=torch.tensor(
+            [[0, -1], [1, 2], [3, -1], [4, 5]], dtype=torch.int64
+        ),
+        logical_to_physical_count=torch.tensor([1, 2, 1, 2], dtype=torch.int64),
+    )
+
+
+def _shape_changing_rebalanced_snapshot(layer_id: int = 0) -> PlacementSnapshot:
+    return PlacementSnapshot(
+        layer_id=layer_id,
+        num_logical_experts=4,
+        num_physical_experts=6,
+        ep_size=2,
+        num_local_physical_experts=3,
+        physical_to_logical_map=torch.tensor([0, 1, 2, 3, 0, 0]),
+        logical_to_physical_candidates=torch.tensor(
+            [[0, 4, 5], [1, -1, -1], [2, -1, -1], [3, -1, -1]],
+            dtype=torch.int64,
+        ),
+        logical_to_physical_count=torch.tensor([3, 1, 1, 1], dtype=torch.int64),
     )
 
 
@@ -110,7 +140,6 @@ def _no_redundancy_snapshot(
         ),
         logical_to_physical_count=torch.tensor([1, 1, 1, 1], dtype=torch.int64),
         default_physical_for_logical=default_map,
-        metadata={"placement_version": 0},
     )
 
 
@@ -317,7 +346,6 @@ class TestBuildLayerState:
             physical_to_logical_map=torch.tensor([0, 1, 2, 3, -1, -1]),
             logical_to_physical_candidates=log2phy,
             logical_to_physical_count=log_counts,
-            metadata={"placement_version": 0},
         )
         state = _build_layer_state(snap, num_gpus=2, big_m_penalty=1000.0)
         # With every logical at exactly 1 copy and 2 physical slots unclaimed,
@@ -348,52 +376,61 @@ class TestBuildLayerState:
             _build_layer_state(bad, num_gpus=2, big_m_penalty=1000.0)
 
 
-# -- 2. Layer-state cache --------------------------------------------------
+# -- 2. Prepared layer state ----------------------------------------------
 
 
 @pytest.mark.unit
-class TestLayerStateCache:
-    def test_same_version_reuses_cached_state(self):
+class TestPreparedLayerState:
+    def test_forward_reuses_prepared_state(self):
         kernels = _RecordingKernels()
         router = LPLBL2Router(kernels=kernels, num_gpus=2)
-        snap = _toy_snapshot(layer_id=0, placement_version=0)
+        snap = _toy_snapshot(layer_id=0)
         topk = torch.tensor([[0, 1, 2]], dtype=torch.int32)
 
+        router.prepare_layer(snap)
         router.route_tokens(_toy_request(snapshot=snap, topk_ids=topk))
         router.route_tokens(_toy_request(snapshot=snap, topk_ids=topk))
 
-        # Warmup fires once for the first call only.
+        # Warmup fires during prepare only; forwards reuse the installed state.
         assert kernels.warmup_shapes == [(4, 8)]
 
-    def test_bumped_version_triggers_rebuild_and_warmup(self):
+    def test_shape_compatible_prepare_updates_existing_storage_in_place(self):
         kernels = _RecordingKernels()
         router = LPLBL2Router(kernels=kernels, num_gpus=2)
-        topk = torch.tensor([[0, 1]], dtype=torch.int32)
+        first = _toy_snapshot()
+        second = _same_shape_rebalanced_snapshot()
 
-        router.route_tokens(
-            _toy_request(snapshot=_toy_snapshot(placement_version=0), topk_ids=topk)
-        )
-        router.route_tokens(
-            _toy_request(snapshot=_toy_snapshot(placement_version=1), topk_ids=topk)
-        )
-        router.route_tokens(
-            _toy_request(snapshot=_toy_snapshot(placement_version=1), topk_ids=topk)
-        )
+        assert router.prepare_layer(first) is False
+        first_state = router._layer_state[0]
+        execution_state = router._clone_execution_state(first_state)
+        router._execution_state[(0, ("graph", 1))] = execution_state
 
-        # v0: warmup once; v1: warmup once; v1 again: cache hit.
+        assert router.prepare_layer(second) is False
+        second_state = router._layer_state[0]
+
+        assert second_state is first_state
+        assert torch.equal(second_state.log2phy, second.logical_to_physical_candidates)
+        assert torch.equal(execution_state.A_full, second_state.A_full)
         assert kernels.warmup_shapes == [(4, 8), (4, 8)]
 
-    def test_eviction_keeps_only_latest_version_per_layer(self):
+    def test_shape_changing_prepare_replaces_storage_and_requests_recapture(self):
+        router = LPLBL2Router(kernels=_RecordingKernels(), num_gpus=2)
+        router.prepare_layer(_toy_snapshot())
+        first_state = router._layer_state[0]
+        router._execution_state[(0, ("graph", 1))] = router._clone_execution_state(first_state)
+
+        assert router.prepare_layer(_shape_changing_rebalanced_snapshot()) is True
+        assert router._layer_state[0] is not first_state
+        assert router._execution_state == {}
+
+    def test_prepare_keeps_one_state_per_layer(self):
         kernels = _RecordingKernels()
         router = LPLBL2Router(kernels=kernels, num_gpus=2)
-        topk = torch.tensor([[0, 1]], dtype=torch.int32)
 
-        for v in range(3):
-            router.route_tokens(
-                _toy_request(snapshot=_toy_snapshot(placement_version=v), topk_ids=topk)
-            )
+        for _ in range(3):
+            router.prepare_layer(_toy_snapshot())
 
-        assert list(router._layer_state.keys()) == [(0, 2)]
+        assert list(router._layer_state.keys()) == [0]
 
     def test_buffer_reuse_across_calls(self):
         kernels = _RecordingKernels()
