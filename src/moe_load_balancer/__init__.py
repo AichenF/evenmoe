@@ -3,6 +3,10 @@
 from moe_load_balancer.core.l1 import PlacementPlanner
 from moe_load_balancer.core.l2 import RoutingLoadHistoryProvider, TokenRouter
 from moe_load_balancer.core.orchestrator import MoELoadBalancer
+from moe_load_balancer.core.routing_pipeline import (
+    RoutingCapabilities,
+    RoutingPipeline,
+)
 from moe_load_balancer.core.types import (
     PlacementPlan,
     PlacementPolicyConfig,
@@ -31,9 +35,11 @@ __all__ = [
     "PlacementStats",
     "PlacementTopology",
     "RoutingDecision",
+    "RoutingCapabilities",
     "RoutingLoadHistory",
     "RoutingLoadHistoryProvider",
     "RoutingPhase",
+    "RoutingPipeline",
     "RoutingPolicyConfig",
     "RoutingRequest",
     "RoutingStage",

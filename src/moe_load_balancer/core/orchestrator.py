@@ -5,6 +5,7 @@ from typing import Callable, Mapping, Optional
 
 from moe_load_balancer.core.l1 import PlacementPlanner
 from moe_load_balancer.core.l2 import TokenRouter
+from moe_load_balancer.core.routing_pipeline import RoutingCapabilities, RoutingPipeline
 from moe_load_balancer.core.types import (
     PlacementPlan,
     PlacementPolicyConfig,
@@ -14,7 +15,9 @@ from moe_load_balancer.core.types import (
     RoutingPhase,
     RoutingPolicyConfig,
     RoutingRequest,
+    TensorLike,
 )
+from moe_load_balancer.kernels.lplb.protocol import LPLBKernels
 
 RankLoadCounter = Callable[[object, Optional[PlacementSnapshot], RoutingPolicyConfig], object]
 
@@ -28,6 +31,7 @@ class MoELoadBalancer:
         placement_planners: Optional[Mapping[str, PlacementPlanner]] = None,
         routing_policies: Optional[Mapping[str, TokenRouter]] = None,
         rank_load_counter: Optional[RankLoadCounter] = None,
+        routing_pipeline: RoutingPipeline | str | None = None,
     ) -> None:
         if placement_planners is None:
             from moe_load_balancer.policies.l1.eplb import (
@@ -45,6 +49,70 @@ class MoELoadBalancer:
         self._placement_planners = dict(placement_planners)
         self._routing_policies = dict(routing_policies or {})
         self._rank_load_counter = rank_load_counter
+        self._routing_pipeline = RoutingPipeline.from_value(routing_pipeline)
+
+    @classmethod
+    def from_algorithm(
+        cls,
+        algorithm: RoutingPipeline | str,
+        *,
+        ep_size: int,
+        source_rank: int,
+        experts_per_rank: int,
+        lplb_kernels: Optional[LPLBKernels] = None,
+    ) -> MoELoadBalancer:
+        """Build the MLB-owned implementations for one algorithm expression."""
+
+        pipeline = RoutingPipeline.from_value(algorithm)
+        routers: dict[str, TokenRouter] = {}
+        policy_names = {policy.name for policy in pipeline.post_topk_policies}
+        if "lplb" in policy_names:
+            from moe_load_balancer.policies.l2.lplb import LPLBL2Router
+
+            if lplb_kernels is None:
+                from moe_load_balancer.kernels.lplb import CUDALPLBKernels
+
+                lplb_kernels = CUDALPLBKernels()
+            routers["lplb"] = LPLBL2Router(
+                kernels=lplb_kernels,
+                num_gpus=ep_size,
+            )
+        if "waterfill" in policy_names:
+            from moe_load_balancer.policies.l2.waterfill import WaterfillL2Router
+
+            routers["waterfill"] = WaterfillL2Router(
+                source_rank=source_rank,
+                world_size=ep_size,
+                experts_per_rank=experts_per_rank,
+            )
+        return cls(routing_policies=routers, routing_pipeline=pipeline)
+
+    @property
+    def routing_pipeline(self) -> RoutingPipeline:
+        return self._routing_pipeline
+
+    @property
+    def routing_capabilities(self) -> RoutingCapabilities:
+        return self._routing_pipeline.capabilities
+
+    def on_placement_committed(self, placement: PlacementSnapshot) -> None:
+        """Notify active policies that a framework placement was committed.
+
+        No placement version or snapshot cache is maintained by the
+        orchestrator. Policies that derive execution state consume the
+        framework's current snapshot at this explicit lifecycle event.
+        """
+
+        policy_names = (
+            tuple(policy.name for policy in self._routing_pipeline.post_topk_policies)
+            if self._routing_pipeline.post_topk_policies
+            else tuple(self._routing_policies)
+        )
+        for policy_name in policy_names:
+            router = self._routing_policies[policy_name]
+            prepare = getattr(router, "prepare_layer", None)
+            if prepare is not None:
+                prepare(placement)
 
     def plan_placement(self, request: PlacementRequest) -> PlacementPlan:
         """Run the selected L1 policy and return an uncommitted candidate."""
@@ -64,56 +132,27 @@ class MoELoadBalancer:
             ) from exc
         return planner.plan(request)
 
-    def prepare_routing_layer(
+    def transform_topk_inputs(
         self,
-        policy_name: str,
-        placement: PlacementSnapshot,
-    ) -> bool:
-        """Install state for one committed placement outside the hot path.
-
-        Frameworks call this after initial weight loading and after every
-        placement update. Policies without placement-derived state may omit a
-        ``prepare_layer`` implementation. The return value reports whether
-        existing execution storage had to be replaced, allowing a framework
-        to recapture execution graphs only when tensor layouts changed.
-        """
-
-        try:
-            router = self._routing_policies[policy_name]
-        except KeyError as exc:
-            raise ValueError(
-                f"Unknown routing policy {policy_name!r}; registered policies are "
-                f"{sorted(self._routing_policies)}."
-            ) from exc
-        prepare = getattr(router, "prepare_layer", None)
-        if prepare is not None:
-            return bool(prepare(placement))
-        return False
-
-    def transform_routing_inputs(
-        self,
-        policy_name: str,
-        router_logits: object,
-        correction_bias: Optional[object] = None,
-    ) -> tuple[object, Optional[object]]:
-        """Run an optional policy-owned transform before logical TopK.
+        router_logits: TensorLike,
+        correction_bias: Optional[TensorLike] = None,
+    ) -> tuple[TensorLike, Optional[TensorLike]]:
+        """Run the configured pipeline's optional transform before TopK.
 
         Production physical-routing policies normally leave these inputs
         untouched. This hook keeps experimental stimuli such as ``fake`` in
         MLB without moving framework-owned TopK selection into MLB.
         """
 
-        try:
-            router = self._routing_policies[policy_name]
-        except KeyError as exc:
-            raise ValueError(
-                f"Unknown routing policy {policy_name!r}; registered policies are "
-                f"{sorted(self._routing_policies)}."
-            ) from exc
-        transform = getattr(router, "transform_routing_inputs", None)
-        if transform is None:
-            return router_logits, correction_bias
-        return transform(router_logits, correction_bias)
+        from moe_load_balancer.policies.l2.replica import (
+            transform_replica_routing_inputs,
+        )
+
+        return transform_replica_routing_inputs(
+            self.routing_capabilities.replica_policy,
+            router_logits,
+            correction_bias,
+        )
 
     def route_tokens(self, request: RoutingRequest) -> RoutingDecision:
         """Run physical routing and shared-expert policies in order."""
@@ -126,7 +165,8 @@ class MoELoadBalancer:
         executed: list[str] = []
         skipped: list[str] = []
 
-        for policy_value in request.policies:
+        policy_values = request.policies or self._routing_pipeline.post_topk_policies
+        for policy_value in policy_values:
             policy_config = RoutingPolicyConfig.from_value(policy_value)
             if not policy_config.should_run_for_stage(request.stage):
                 skipped.append(policy_config.name)

@@ -167,49 +167,37 @@ placement to L2 as a committed `PlacementSnapshot`.
 
 ## Configuring the L2 Pipeline
 
-The framework constructs the runtime-specific policy instances and registers
-them on one `MoELoadBalancer` instance:
+The framework passes one algorithm expression to MLB. A single algorithm can
+be selected directly, and `+` composes physical-replica and shared-expert
+routing:
 
 ```python
 from moe_load_balancer import MoELoadBalancer
-from moe_load_balancer.kernels.lplb import CUDALPLBKernels
-from moe_load_balancer.policies.l2.lplb import LPLBL2Router
-from moe_load_balancer.policies.l2.replica import (
-    DynamicL2Router,
-    FakeL2Router,
-    StaticL2Router,
-)
-from moe_load_balancer.policies.l2.waterfill import WaterfillL2Router
 
-world_size = 16
-source_rank = 0
-
-mlb = MoELoadBalancer(
-    routing_policies={
-        "static": StaticL2Router(),
-        "dynamic": DynamicL2Router(),
-        "fake": FakeL2Router(),
-        "lplb": LPLBL2Router(
-            kernels=CUDALPLBKernels(),
-            num_gpus=world_size,
-        ),
-        "waterfill": WaterfillL2Router(
-            source_rank=source_rank,
-            world_size=world_size,
-        ),
-    }
+mlb = MoELoadBalancer.from_algorithm(
+    "lplb+waterfill",
+    ep_size=16,
+    source_rank=0,
+    experts_per_rank=18,
 )
 ```
 
-`fake` is an experimental baseline. A framework first calls
-`transform_routing_inputs("fake", router_logits, correction_bias)` before its
-normal logical TopK, then selects the `fake` policy in the post-TopK
-`RoutingRequest`. Static and dynamic routing do not transform TopK inputs.
+Supported expressions include `static`, `dynamic`, `fake`, `lplb`,
+`waterfill`, `waterfill_dynamic`, and combinations such as
+`lplb+waterfill`. Bare `waterfill` expands to `static+waterfill`, so redundant
+experts still receive deterministic physical routing without a second
+selection parameter. `lp` remains an input alias for `lplb`.
 
-For a combined request, the ordered policy sequence is `("lplb",
-"waterfill")`. The orchestrator runs physical-replica routing first, counts the
-resulting per-rank load, and then runs shared-expert Waterfill. A framework may
-also register and run either policy independently.
+Parsing, validation, implementation construction, and policy ordering are MLB
+responsibilities. Framework code consumes `mlb.routing_capabilities` to learn
+which framework-owned inputs must be prepared, such as a global logical count
+or a dynamic per-rank load collective. It does not branch on algorithm names.
+
+After initial weight loading and after each placement update is committed, the
+framework passes its current metadata to
+`mlb.on_placement_committed(snapshot)`. MLB does not own a placement version;
+placement-derived execution state is rebuilt only at this explicit framework
+lifecycle event.
 
 SGLang Glue is responsible for:
 
@@ -217,7 +205,8 @@ SGLang Glue is responsible for:
 2. Completing any required EP all-reduce before entering MLB.
 3. Calling the stateless SGLang adapter functions to create a
    `PlacementRequest`, `PlacementSnapshot`, or `RoutingRequest`.
-4. Calling `MoELoadBalancer.plan_placement()` or
+4. Calling `MoELoadBalancer.plan_placement()`,
+   `MoELoadBalancer.on_placement_committed()`, or
    `MoELoadBalancer.route_tokens()`.
 5. Translating the result and applying it inside SGLang.
 

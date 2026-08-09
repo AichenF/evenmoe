@@ -40,7 +40,7 @@ Per-layer state
 
 The LP constraint matrices (``B1``, ``A_base``, ``c_vec``, ``log2phy``, …)
 depend only on the placement — not on per-batch data. The framework calls
-``prepare_routing_layer`` after initial weight loading and after each committed
+``on_placement_committed`` after initial weight loading and after each committed
 placement update. MLB then updates the affected layer's derived state; no
 placement version or tensor-identity protocol is required.
 
@@ -435,13 +435,14 @@ class LPLBL2Router(TokenRouter):
         # Mutable LP workspaces cannot be shared by overlapping CUDA graphs.
         self._execution_state: Dict[Tuple[int, Hashable], _LPLBLayerState] = {}
 
-    def prepare_layer(self, snapshot: PlacementSnapshot) -> bool:
+    def prepare_layer(self, snapshot: PlacementSnapshot) -> None:
         """Install state for the framework's newly committed placement.
 
-        Returns ``True`` only when existing tensor layouts changed and stored
-        execution graphs therefore need recapture. Shape-compatible updates
-        preserve tensor addresses and copy new placement-derived values in
-        place so already captured graphs observe the committed placement.
+        Shape-compatible updates preserve tensor addresses and copy new
+        placement-derived values in place. Shape-changing updates replace the
+        prepared state used by subsequent uncaptured execution. Keeping a
+        previously captured graph valid across such a shape change requires a
+        future fixed-shape LPLB state representation.
         """
 
         layer_id = snapshot.layer_id
@@ -452,13 +453,12 @@ class LPLBL2Router(TokenRouter):
             for key, execution_state in self._execution_state.items():
                 if key[0] == layer_id:
                     _copy_placement_state_(execution_state, state)
-            return False
+            return
 
         self._layer_state[layer_id] = state
         self._execution_state = {
             key: value for key, value in self._execution_state.items() if key[0] != layer_id
         }
-        return current is not None
 
     def route_tokens(
         self,

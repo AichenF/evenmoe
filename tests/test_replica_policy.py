@@ -14,7 +14,9 @@ from moe_load_balancer.policies.l2.replica import (
     FakeL2Router,
     StaticL2Router,
     route_dynamic_replicas,
+    route_replicas,
     route_static_replicas,
+    transform_replica_routing_inputs,
 )
 
 
@@ -134,14 +136,14 @@ def test_replica_helpers_are_fullgraph_compilable(policy):
 @pytest.mark.unit
 def test_fake_policy_owns_pre_topk_stimulus_and_dynamic_routing():
     router = FakeL2Router()
-    mlb = MoELoadBalancer(routing_policies={"fake": router})
+    mlb = MoELoadBalancer(routing_policies={"fake": router}, routing_pipeline="fake")
     logits = torch.zeros((4, 8))
     bias = torch.arange(8, dtype=torch.float32)
 
     torch.manual_seed(29)
     expected_logits = torch.empty_like(logits).uniform_(5, 10)
     torch.manual_seed(29)
-    transformed_logits, transformed_bias = mlb.transform_routing_inputs("fake", logits, bias)
+    transformed_logits, transformed_bias = mlb.transform_topk_inputs(logits, bias)
     decision = mlb.route_tokens(_request("fake", torch.tensor([[0, 1], [2, 3]])))
 
     assert transformed_logits is logits
@@ -156,7 +158,7 @@ def test_fake_policy_owns_pre_topk_stimulus_and_dynamic_routing():
     [("static", StaticL2Router()), ("dynamic", DynamicL2Router())],
 )
 def test_replica_policies_run_through_unified_l2_orchestrator(name, router):
-    mlb = MoELoadBalancer(routing_policies={name: router})
+    mlb = MoELoadBalancer(routing_policies={name: router}, routing_pipeline=name)
     logical_ids = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
 
     decision = mlb.route_tokens(_request(name, logical_ids))
@@ -175,7 +177,49 @@ def test_production_replica_policies_leave_pre_topk_inputs_unchanged(name, route
     logits = torch.randn(2, 4)
     bias = torch.randn(4)
 
-    transformed = mlb.transform_routing_inputs(name, logits, bias)
+    transformed = mlb.transform_topk_inputs(logits, bias)
 
     assert transformed[0] is logits
     assert transformed[1] is bias
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("name", ["static", "dynamic", "fake"])
+def test_generic_replica_entry_points_keep_dispatch_inside_mlb(name):
+    placement = _placement()
+    logical_ids = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
+    logits = torch.zeros((2, 4))
+
+    transformed, _ = transform_replica_routing_inputs(name, logits, None)
+    physical_ids = route_replicas(
+        name,
+        logical_ids,
+        default_physical_for_logical=placement.default_physical_for_logical,
+        logical_to_physical_candidates=placement.logical_to_physical_candidates,
+        logical_to_physical_count=placement.logical_to_physical_count,
+    )
+
+    assert physical_ids.shape == logical_ids.shape
+    assert transformed is logits
+    if name == "fake":
+        assert torch.all((transformed >= 5) & (transformed < 10))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("name", ["static", "dynamic", "fake"])
+def test_generic_replica_dispatch_is_fullgraph_compilable(name):
+    placement = _placement()
+
+    def dispatch(logical_ids):
+        return route_replicas(
+            name,
+            logical_ids,
+            default_physical_for_logical=placement.default_physical_for_logical,
+            logical_to_physical_candidates=placement.logical_to_physical_candidates,
+            logical_to_physical_count=placement.logical_to_physical_count,
+        )
+
+    compiled = torch.compile(dispatch, backend="eager", fullgraph=True)
+    logical_ids = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
+
+    assert compiled(logical_ids).shape == logical_ids.shape

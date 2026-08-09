@@ -46,9 +46,8 @@ class WaterfillL2Router(TokenRouter):
     - ``request.routed_rank_load``: per-rank routed expert assignment count.
     - ``request.active_rank_token_count``: per-rank active token count
       (set only in dynamic mode; ``None`` signals static mode).
-    - ``policy.metadata["experts_per_rank"]``: contiguous physical layout
-      assumption (each rank holds N contiguously-numbered physical experts).
-      This is a stable per-policy config string field, not a tensor.
+    The constructor receives the stable contiguous physical layout geometry;
+    per-request tensors remain in ``RoutingRequest``.
 
     The router does not consume ``request.placement`` (Waterfill operates on
     already-physical IDs handed by the adapter).
@@ -62,6 +61,7 @@ class WaterfillL2Router(TokenRouter):
         source_rank: int,
         local_preference: float = 1.1,
         world_size: int,
+        experts_per_rank: int,
     ):
         if world_size <= 0:
             raise ValueError("WaterfillL2Router.world_size must be positive.")
@@ -71,9 +71,12 @@ class WaterfillL2Router(TokenRouter):
             )
         if local_preference <= 0:
             raise ValueError("WaterfillL2Router.local_preference must be positive.")
+        if experts_per_rank <= 0:
+            raise ValueError("WaterfillL2Router.experts_per_rank must be positive.")
         self.source_rank = source_rank
         self.local_preference = local_preference
         self.world_size = world_size
+        self.experts_per_rank = experts_per_rank
 
     def route_tokens(
         self,
@@ -94,13 +97,6 @@ class WaterfillL2Router(TokenRouter):
             raise TypeError(
                 "WaterfillL2Router.active_rank_token_count must be a torch.Tensor or None."
             )
-
-        try:
-            experts_per_rank = int(policy.metadata["experts_per_rank"])
-        except KeyError as exc:
-            raise ValueError(
-                "WaterfillL2Router requires policy.metadata['experts_per_rank']."
-            ) from exc
 
         if topk_ids.numel() == 0:
             return RoutingDecision(
@@ -135,7 +131,7 @@ class WaterfillL2Router(TokenRouter):
             source_rank=self.source_rank,
             local_preference=self.local_preference,
             world_size=self.world_size,
-            experts_per_rank=experts_per_rank,
+            experts_per_rank=self.experts_per_rank,
         )
 
         return RoutingDecision(

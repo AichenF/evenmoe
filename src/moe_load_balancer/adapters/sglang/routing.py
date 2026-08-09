@@ -71,7 +71,7 @@ def to_routing_request(
     layer_id: int,
     logical_topk_ids: TensorLike,
     topk_weights: TensorLike,
-    policies: Sequence[RoutingPolicyConfig | str],
+    policies: Sequence[RoutingPolicyConfig | str] = (),
     placement: Optional[PlacementSnapshot] = None,
     routed_physical_topk_ids: Optional[TensorLike] = None,
     stage: Optional[RoutingStage | str] = None,

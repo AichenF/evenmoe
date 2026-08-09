@@ -32,6 +32,20 @@ def transform_fake_routing_inputs(
     return router_logits, correction_bias
 
 
+def transform_replica_routing_inputs(
+    policy_name: Optional[str],
+    router_logits: Tensor,
+    correction_bias: Optional[Tensor],
+) -> tuple[Tensor, Optional[Tensor]]:
+    """Apply the configured replica policy's optional pre-TopK transform."""
+
+    if policy_name == "fake":
+        return transform_fake_routing_inputs(router_logits, correction_bias)
+    if policy_name in {None, "static", "dynamic"}:
+        return router_logits, correction_bias
+    raise ValueError(f"Unknown inline replica-routing policy {policy_name!r}.")
+
+
 def route_static_replicas(
     logical_topk_ids: Tensor,
     default_physical_for_logical: Tensor,
@@ -80,6 +94,31 @@ def route_dynamic_replicas(
     )
     physical_ids = logical_to_physical_candidates[safe_ids, chosen_dispatch_index]
     return torch.where(valid, physical_ids, logical_topk_ids)
+
+
+def route_replicas(
+    policy_name: Optional[str],
+    logical_topk_ids: Tensor,
+    *,
+    default_physical_for_logical: Optional[Tensor],
+    logical_to_physical_candidates: Tensor,
+    logical_to_physical_count: Tensor,
+) -> Tensor:
+    """Route replica IDs through one MLB-selected inline policy."""
+
+    if policy_name is None:
+        return logical_topk_ids
+    if policy_name == "static":
+        if default_physical_for_logical is None:
+            raise ValueError("Static replica routing requires a default physical map.")
+        return route_static_replicas(logical_topk_ids, default_physical_for_logical)
+    if policy_name in {"dynamic", "fake"}:
+        return route_dynamic_replicas(
+            logical_topk_ids,
+            logical_to_physical_candidates,
+            logical_to_physical_count,
+        )
+    raise ValueError(f"Unknown inline replica-routing policy {policy_name!r}.")
 
 
 def _safe_logical_ids(

@@ -400,12 +400,12 @@ class TestPreparedLayerState:
         first = _toy_snapshot()
         second = _same_shape_rebalanced_snapshot()
 
-        assert router.prepare_layer(first) is False
+        router.prepare_layer(first)
         first_state = router._layer_state[0]
         execution_state = router._clone_execution_state(first_state)
         router._execution_state[(0, ("graph", 1))] = execution_state
 
-        assert router.prepare_layer(second) is False
+        router.prepare_layer(second)
         second_state = router._layer_state[0]
 
         assert second_state is first_state
@@ -413,13 +413,13 @@ class TestPreparedLayerState:
         assert torch.equal(execution_state.A_full, second_state.A_full)
         assert kernels.warmup_shapes == [(4, 8), (4, 8)]
 
-    def test_shape_changing_prepare_replaces_storage_and_requests_recapture(self):
+    def test_shape_changing_prepare_replaces_storage_and_evicts_execution_state(self):
         router = LPLBL2Router(kernels=_RecordingKernels(), num_gpus=2)
         router.prepare_layer(_toy_snapshot())
         first_state = router._layer_state[0]
         router._execution_state[(0, ("graph", 1))] = router._clone_execution_state(first_state)
 
-        assert router.prepare_layer(_shape_changing_rebalanced_snapshot()) is True
+        router.prepare_layer(_shape_changing_rebalanced_snapshot())
         assert router._layer_state[0] is not first_state
         assert router._execution_state == {}
 
