@@ -152,7 +152,13 @@ void lp_prep(
   TensorMatcher({NUM_SINGLE}).with_dtype<float>().with_device<kDLCUDA>(device_).verify(t1);
   TensorMatcher({NUM_SINGLE}).with_dtype<int64_t>().with_device<kDLCUDA>(device_).verify(log_single);
   TensorMatcher({NUM_RED_LOG}).with_dtype<int64_t>().with_device<kDLCUDA>(device_).verify(log_replicated);
-  TensorMatcher({NUM_GPUS, NUM_SINGLE}).with_dtype<float>().with_device<kDLCUDA>(device_).verify(B1);
+  // A zero-width PyTorch tensor has implementation-defined row strides (for
+  // example, shape [2, 0] may report strides [1, 1]). The kernel never reads
+  // B1 when there are no single-copy experts, so a 2-D contiguous-layout
+  // check is both unnecessary and rejects an otherwise valid placement.
+  if constexpr (NUM_SINGLE > 0) {
+    TensorMatcher({NUM_GPUS, NUM_SINGLE}).with_dtype<float>().with_device<kDLCUDA>(device_).verify(B1);
+  }
   TensorMatcher({NC}).with_dtype<float>().with_device<kDLCUDA>(device_).verify(A_base_row_sum);
 
   constexpr int WARPS_PER_BLOCK = BLOCK_DIM / 32;
