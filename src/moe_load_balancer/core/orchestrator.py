@@ -319,6 +319,8 @@ class MoELoadBalancer:
             token_slot.fill_(int(local_token_count))
 
         reduced = self._all_reduce_sum(payload, world_size)
+        if not isinstance(reduced, torch.Tensor):
+            raise TypeError("Global Waterfill AllReduce must return a torch.Tensor.")
         return reduced[:world_size], reduced[world_size:]
 
     def _all_reduce_sum(self, payload: object, expected_world_size: int) -> object:
