@@ -4,7 +4,7 @@ from dataclasses import replace
 from typing import Callable, Mapping, Optional
 
 from moe_load_balancer.core.l1 import PlacementPlanner
-from moe_load_balancer.core.l2 import TokenRouter
+from moe_load_balancer.core.l2 import RoutingCollectives, TokenRouter
 from moe_load_balancer.core.routing_pipeline import RoutingCapabilities, RoutingPipeline
 from moe_load_balancer.core.types import (
     PlacementPlan,
@@ -32,6 +32,7 @@ class MoELoadBalancer:
         routing_policies: Optional[Mapping[str, TokenRouter]] = None,
         rank_load_counter: Optional[RankLoadCounter] = None,
         routing_pipeline: RoutingPipeline | str | None = None,
+        collectives: Optional[RoutingCollectives] = None,
     ) -> None:
         if placement_planners is None:
             from moe_load_balancer.policies.l1.eplb import (
@@ -50,6 +51,7 @@ class MoELoadBalancer:
         self._routing_policies = dict(routing_policies or {})
         self._rank_load_counter = rank_load_counter
         self._routing_pipeline = RoutingPipeline.from_value(routing_pipeline)
+        self._collectives = collectives
 
     @classmethod
     def from_algorithm(
@@ -60,12 +62,21 @@ class MoELoadBalancer:
         source_rank: int,
         experts_per_rank: int,
         lplb_kernels: Optional[LPLBKernels] = None,
+        collectives: Optional[RoutingCollectives] = None,
     ) -> MoELoadBalancer:
         """Build the MLB-owned implementations for one algorithm expression."""
 
         pipeline = RoutingPipeline.from_value(algorithm)
         routers: dict[str, TokenRouter] = {}
         policy_names = {policy.name for policy in pipeline.post_topk_policies}
+        if "static" in policy_names:
+            from moe_load_balancer.policies.l2.replica import StaticL2Router
+
+            routers["static"] = StaticL2Router()
+        if "dynamic" in policy_names:
+            from moe_load_balancer.policies.l2.replica import DynamicL2Router
+
+            routers["dynamic"] = DynamicL2Router()
         if "lplb" in policy_names:
             from moe_load_balancer.policies.l2.lplb import LPLBL2Router
 
@@ -85,7 +96,11 @@ class MoELoadBalancer:
                 world_size=ep_size,
                 experts_per_rank=experts_per_rank,
             )
-        return cls(routing_policies=routers, routing_pipeline=pipeline)
+        return cls(
+            routing_policies=routers,
+            routing_pipeline=pipeline,
+            collectives=collectives,
+        )
 
     @property
     def routing_pipeline(self) -> RoutingPipeline:
@@ -144,12 +159,10 @@ class MoELoadBalancer:
         MLB without moving framework-owned TopK selection into MLB.
         """
 
-        from moe_load_balancer.policies.l2.replica import (
-            transform_replica_routing_inputs,
-        )
+        from moe_load_balancer.policies.l2.replica import transform_topk_inputs
 
-        return transform_replica_routing_inputs(
-            self.routing_capabilities.replica_policy,
+        return transform_topk_inputs(
+            self._routing_pipeline.input_transform,
             router_logits,
             correction_bias,
         )
@@ -162,6 +175,7 @@ class MoELoadBalancer:
         shared_expert_rank = None
         ran_physical_policy = False
         ran_shared_policy = False
+        physical_decision_metadata: Mapping[str, object] = {}
         executed: list[str] = []
         skipped: list[str] = []
 
@@ -191,10 +205,16 @@ class MoELoadBalancer:
                     routed_physical_topk_ids=None,
                     routed_rank_load=None,
                     active_rank_token_count=None,
+                    global_logical_count=(
+                        self._global_logical_count(request)
+                        if policy_config.name == "lplb" and request.global_logical_count is None
+                        else request.global_logical_count
+                    ),
                 )
                 decision = router.route_tokens(policy_request, policy_config)
                 current_physical = decision.routed_physical_topk_ids
                 current_weights = decision.topk_weights
+                physical_decision_metadata = decision.metadata
                 ran_physical_policy = True
             elif router.phase is RoutingPhase.SHARED_EXPERT:
                 if ran_shared_policy:
@@ -204,25 +224,32 @@ class MoELoadBalancer:
                 if current_physical is None:
                     current_physical = _default_physical_routing(request)
 
-                if ran_physical_policy or request.routed_rank_load is None:
+                planned_rank_load = physical_decision_metadata.get("planned_rank_load")
+                if planned_rank_load is not None:
+                    routed_rank_load = planned_rank_load
+                else:
                     routed_rank_load = self._rank_load_counter(
                         current_physical,
                         request.placement,
                         policy_config,
                     )
+
+                load_view = policy_config.metadata.get("load_view", "local")
+                if load_view == "global":
+                    routed_rank_load, active_rank_token_count = self._global_waterfill_load(
+                        routed_rank_load, request
+                    )
+                elif load_view == "local":
+                    active_rank_token_count = None
                 else:
-                    routed_rank_load = request.routed_rank_load
+                    raise ValueError(f"Unknown Waterfill load view {load_view!r}.")
 
                 policy_request = replace(
                     request,
                     topk_weights=current_weights,
                     routed_physical_topk_ids=current_physical,
                     routed_rank_load=routed_rank_load,
-                    # Combined LPLB + Waterfill deliberately uses Waterfill's
-                    # static path and therefore performs no second collective.
-                    active_rank_token_count=(
-                        None if ran_physical_policy else request.active_rank_token_count
-                    ),
+                    active_rank_token_count=active_rank_token_count,
                 )
                 decision = router.route_tokens(policy_request, policy_config)
                 current_physical = decision.routed_physical_topk_ids
@@ -247,6 +274,71 @@ class MoELoadBalancer:
                 "skipped_policies": tuple(skipped),
             },
         )
+
+    def _global_logical_count(self, request: RoutingRequest) -> object:
+        if request.placement is None:
+            raise ValueError("LPLB routing requires a committed placement.")
+        from moe_load_balancer.kernels.expert_count import count_logical_experts
+
+        local_count = count_logical_experts(
+            request.logical_topk_ids,
+            request.placement.num_logical_experts,
+        )
+        return self._all_reduce_sum(local_count, request.placement.ep_size)
+
+    def _global_waterfill_load(
+        self,
+        local_routed_rank_load: object,
+        request: RoutingRequest,
+    ) -> tuple[object, object]:
+        if request.placement is None:
+            raise ValueError("Global Waterfill routing requires a committed placement.")
+
+        import torch
+
+        if not isinstance(local_routed_rank_load, torch.Tensor):
+            raise TypeError("Global Waterfill rank load must be a torch.Tensor.")
+        world_size = request.placement.ep_size
+        rank = 0 if world_size == 1 and self._collectives is None else self._collective_rank()
+        if not 0 <= rank < world_size:
+            raise ValueError("Routing collective rank is outside the placement EP group.")
+
+        payload = torch.zeros(
+            world_size * 2,
+            dtype=torch.int64,
+            device=local_routed_rank_load.device,
+        )
+        payload[:world_size].copy_(local_routed_rank_load.to(torch.int64))
+        local_token_count = request.token_count
+        token_slot = payload[world_size + rank]
+        if local_token_count is None:
+            token_slot.fill_(request.logical_topk_ids.shape[0])
+        elif isinstance(local_token_count, torch.Tensor):
+            token_slot.copy_(local_token_count.reshape(-1)[0].to(torch.int64))
+        else:
+            token_slot.fill_(int(local_token_count))
+
+        reduced = self._all_reduce_sum(payload, world_size)
+        return reduced[:world_size], reduced[world_size:]
+
+    def _all_reduce_sum(self, payload: object, expected_world_size: int) -> object:
+        if expected_world_size == 1 and self._collectives is None:
+            return payload
+        if self._collectives is None:
+            raise RuntimeError(
+                "The configured MLB routing pipeline requires EP AllReduce, but no "
+                "RoutingCollectives adapter was provided."
+            )
+        if self._collectives.world_size != expected_world_size:
+            raise ValueError(
+                "RoutingCollectives.world_size does not match the committed placement."
+            )
+        return self._collectives.all_reduce_sum(payload)
+
+    def _collective_rank(self) -> int:
+        if self._collectives is None:
+            raise RuntimeError("RoutingCollectives is required for this routing pipeline.")
+        return self._collectives.rank
 
 
 def _default_physical_routing(request: RoutingRequest) -> object:

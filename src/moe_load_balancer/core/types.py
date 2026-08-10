@@ -234,10 +234,9 @@ class RoutingRequest:
     """Framework-neutral input to the ordered L2 policy pipeline.
 
     ``logical_topk_ids`` is always the framework's logical TopK result.
-    ``routed_physical_topk_ids`` is optional input for a physical-only path
-    such as standalone Waterfill. When absent, the orchestrator obtains
-    physical IDs from a physical-routing policy or the committed placement's
-    default mapping.
+    The framework normally supplies logical TopK, weights, the live committed
+    placement and token count. The remaining load fields are internal policy
+    inputs populated by the MLB orchestrator while it executes the pipeline.
     """
 
     layer_id: int

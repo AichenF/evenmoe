@@ -1,4 +1,4 @@
-"""CUDA logical-expert counting shared by framework adapters."""
+"""CUDA logical-expert counting used by MLB token routing."""
 
 from __future__ import annotations
 

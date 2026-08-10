@@ -1,18 +1,20 @@
 """Shared-expert Waterfill L2 router.
 
 The algorithm is a degenerate L2 case: it does not modify the routed top-k
-(which already lives in physical-id space when the adapter calls in), and only
-decides which EP rank receives each token's shared expert. Static and dynamic
-modes are auto-distinguished by whether ``RoutingRequest.active_rank_token_count``
-is provided:
+(which already lives in physical-id space after the preceding replica router),
+and only decides which EP rank receives each token's shared expert. The two
+load views are distinguished by whether
+``RoutingRequest.active_rank_token_count`` is provided:
 
-- Static (no EP all-reduce): adapter passes ``routed_rank_load = local_routed
+- Local-load Waterfill (``waterfill``, no EP all-reduce): the orchestrator passes
+  ``routed_rank_load = local_routed
   counts`` and ``active_rank_token_count = None``. The kernel sees
   ``rank_load == routed_load`` and derives ``target_total`` from their sum.
   ``ALLOW_ALL_RANKS=True`` (caller asserts every rank is a valid shared-expert
   destination because EPLB already balances routed load).
 
-- Dynamic (post EP all-reduce): adapter passes ``routed_rank_load`` (post-AR
+- Collective-backed Waterfill (``waterfill_dynamic``): the orchestrator passes
+  ``routed_rank_load`` (post-AR
   global routed counts) and ``active_rank_token_count`` (post-AR per-rank
   active token counts). The kernel uses ``rank_load = routed + active`` for
   scoring and ``routed_load = routed`` for ``total_tokens`` derivation. The
@@ -50,7 +52,7 @@ class WaterfillL2Router(TokenRouter):
     per-request tensors remain in ``RoutingRequest``.
 
     The router does not consume ``request.placement`` (Waterfill operates on
-    already-physical IDs handed by the adapter).
+    already-physical IDs produced earlier in the MLB token pipeline).
     """
 
     phase = RoutingPhase.SHARED_EXPERT

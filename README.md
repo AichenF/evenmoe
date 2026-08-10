@@ -30,7 +30,7 @@ The current release is `0.1.0` and the public API is still evolving.
 | L2 | `lplb` | Implemented | LP-based routing among redundant physical replicas. |
 | L2 | `static` | Implemented | Deterministic routing through the framework-selected replica. |
 | L2 | `dynamic` | Implemented | Random routing among committed physical replicas. |
-| L2 | `fake` | Experimental | Uniform random router stimulus followed by dynamic replica routing. |
+| L2 | `fake` | Experimental | Pre-TopK uniform router stimulus preset; defaults to dynamic replica routing. |
 | L2 | `waterfill` | Implemented | Shared-expert destination selection from per-rank routed load. |
 
 ## End-to-End Serving Performance
@@ -86,12 +86,14 @@ hardware-normalized kernel SOL measurement.
 Serving framework Glue
     │
     ├── framework Adapter: native metadata/tensors → MLB requests
+    ├── collective Adapter: MLB sum payload → framework EP process group
     │
     ▼
 MoELoadBalancer
     ├── L1 placement policy → uncommitted PlacementPlan
+    ├── optional Fake pre-TopK workload transform
     └── ordered L2 policy pipeline → RoutingDecision
-            ├── Static, dynamic, fake, or LPLB physical-replica routing
+            ├── Static, dynamic, or LPLB physical-replica routing
             └── Waterfill shared-expert routing
     │
     ├── framework Adapter: MLB result → native values
@@ -179,6 +181,7 @@ mlb = MoELoadBalancer.from_algorithm(
     ep_size=16,
     source_rank=0,
     experts_per_rank=18,
+    collectives=framework_ep_collectives,
 )
 ```
 
@@ -188,10 +191,21 @@ Supported expressions include `static`, `dynamic`, `fake`, `lplb`,
 experts still receive deterministic physical routing without a second
 selection parameter. `lp` remains an input alias for `lplb`.
 
+`fake` is a pre-TopK experimental stimulus preset. Bare `fake` preserves the
+existing behavior by expanding internally to Fake stimulus plus Dynamic
+replica routing. An explicit replica policy can be composed when needed, for
+example `fake+static` or `fake+lplb`.
+
 Parsing, validation, implementation construction, and policy ordering are MLB
-responsibilities. Framework code consumes `mlb.routing_capabilities` to learn
-which framework-owned inputs must be prepared, such as a global logical count
-or a dynamic per-rank load collective. It does not branch on algorithm names.
+responsibilities. The framework supplies logical TopK, live placement, token
+count, and a generic EP collective adapter. MLB creates algorithm-specific
+counts, packs compatible payloads, and decides when to request a sum; framework
+Glue does not branch on algorithm names.
+
+`dynamic+waterfill_dynamic` packs routed-rank load and active-token count into
+one collective. `lplb+waterfill` performs one logical-count collective, then
+derives Waterfill's planned global rank load from the LPLB solution, so it does
+not issue a second collective.
 
 After initial weight loading and after each placement update is committed, the
 framework passes its current metadata to
@@ -202,8 +216,8 @@ lifecycle event.
 SGLang Glue is responsible for:
 
 1. Reading TopK output and live placement metadata.
-2. Completing any required EP all-reduce before entering MLB.
-3. Calling the stateless SGLang adapter functions to create a
+2. Providing a generic EP sum adapter backed by SGLang's process group.
+3. Calling the stateless SGLang data adapters to create a
    `PlacementRequest`, `PlacementSnapshot`, or `RoutingRequest`.
 4. Calling `MoELoadBalancer.plan_placement()`,
    `MoELoadBalancer.on_placement_committed()`, or

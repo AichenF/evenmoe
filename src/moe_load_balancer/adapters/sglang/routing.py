@@ -27,43 +27,11 @@ def count_logical_experts(
     logical_topk_ids: TensorLike,
     num_logical_experts: int,
 ) -> TensorLike:
-    """Translate SGLang TopK IDs into a plain logical-count tensor.
+    """Compatibility export for the MLB-owned logical count helper."""
 
-    SGLang DP-attention can retain ``-1`` padding on otherwise non-empty
-    ranks. CUDA handles that in one fused kernel instead of materializing a
-    validity mask, clamped IDs, and scatter contributions separately.
-    Communication remains owned by SGLang Glue.
-    """
+    from moe_load_balancer.kernels.expert_count import count_logical_experts as count
 
-    if num_logical_experts <= 0:
-        raise ValueError("num_logical_experts must be positive.")
-
-    import torch
-
-    if not isinstance(logical_topk_ids, torch.Tensor):
-        raise TypeError("Logical expert counting requires a torch.Tensor.")
-    counts = torch.zeros(
-        num_logical_experts,
-        dtype=torch.float32,
-        device=logical_topk_ids.device,
-    )
-    if logical_topk_ids.is_cuda:
-        from moe_load_balancer.kernels.logical_count import (
-            count_logical_experts_cuda,
-        )
-
-        count_logical_experts_cuda(logical_topk_ids, counts)
-        return counts
-
-    valid = (logical_topk_ids >= 0) & (logical_topk_ids < num_logical_experts)
-    if valid.any():
-        counts.copy_(
-            torch.bincount(
-                logical_topk_ids[valid].to(torch.int64),
-                minlength=num_logical_experts,
-            ).to(torch.float32)
-        )
-    return counts
+    return count(logical_topk_ids, num_logical_experts)
 
 
 def to_routing_request(
@@ -73,20 +41,11 @@ def to_routing_request(
     topk_weights: TensorLike,
     policies: Sequence[RoutingPolicyConfig | str] = (),
     placement: Optional[PlacementSnapshot] = None,
-    routed_physical_topk_ids: Optional[TensorLike] = None,
     stage: Optional[RoutingStage | str] = None,
-    routed_rank_load: Optional[TensorLike] = None,
-    active_rank_token_count: Optional[TensorLike] = None,
-    global_logical_count: Optional[TensorLike] = None,
     token_count: Optional[TensorLike] = None,
-    lb_token_mask: Optional[TensorLike] = None,
     routed_scaling_factor: float = 1.0,
 ) -> RoutingRequest:
-    """Translate SGLang TopK and prepared framework statistics into MLB input.
-
-    Communication is intentionally absent: SGLang Glue supplies any
-    all-reduced ``global_logical_count`` or dynamic Waterfill load tensors.
-    """
+    """Translate SGLang's logical TopK and live placement into MLB input."""
 
     normalized_stage = None if stage is None else RoutingStage.from_str(stage)
     return RoutingRequest(
@@ -95,13 +54,8 @@ def to_routing_request(
         topk_weights=topk_weights,
         policies=tuple(policies),
         placement=placement,
-        routed_physical_topk_ids=routed_physical_topk_ids,
         stage=normalized_stage,
-        routed_rank_load=routed_rank_load,
-        active_rank_token_count=active_rank_token_count,
-        global_logical_count=global_logical_count,
         token_count=token_count,
-        lb_token_mask=lb_token_mask,
         routed_scaling_factor=routed_scaling_factor,
     )
 

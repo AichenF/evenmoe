@@ -1,7 +1,11 @@
 """Framework-decoupled MoE load-balancing policies and adapters."""
 
 from moe_load_balancer.core.l1 import PlacementPlanner
-from moe_load_balancer.core.l2 import RoutingLoadHistoryProvider, TokenRouter
+from moe_load_balancer.core.l2 import (
+    RoutingCollectives,
+    RoutingLoadHistoryProvider,
+    TokenRouter,
+)
 from moe_load_balancer.core.orchestrator import MoELoadBalancer
 from moe_load_balancer.core.routing_pipeline import (
     RoutingCapabilities,
@@ -36,6 +40,7 @@ __all__ = [
     "PlacementTopology",
     "RoutingDecision",
     "RoutingCapabilities",
+    "RoutingCollectives",
     "RoutingLoadHistory",
     "RoutingLoadHistoryProvider",
     "RoutingPhase",

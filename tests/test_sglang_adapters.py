@@ -84,7 +84,6 @@ def test_snapshot_reads_live_committed_metadata_without_state():
 def test_routing_pre_adapter_only_packages_prepared_values():
     metadata = _Metadata()
     snapshot = to_placement_snapshot(metadata, 0)
-    global_count = torch.tensor([5, 7])
     request = to_routing_request(
         layer_id=0,
         logical_topk_ids=torch.tensor([[0, 1]]),
@@ -95,10 +94,9 @@ def test_routing_pre_adapter_only_packages_prepared_values():
         ),
         placement=snapshot,
         stage="PREFILL",
-        global_logical_count=global_count,
     )
     assert request.stage.value == "prefill"
-    assert request.global_logical_count is global_count
+    assert request.global_logical_count is None
     assert tuple(policy.name for policy in request.policies) == ("lplb", "waterfill")
 
 

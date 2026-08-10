@@ -1278,12 +1278,13 @@
           <p class="figure-summary">
             SGLang 仍然决定何时初始化、前向推理、重新计算布局和搬权重；MLB 只在这些固定位置
             被调用。ModelRunner 只持有一个框架无关的 <code>MoELoadBalancer</code>；
-            SGLang Adapter 保持无状态，只负责把 live metadata 和运行期统计翻译成 MLB 请求。
+            数据 Adapter 保持无状态，只把 logical TopK 与 live metadata 翻译成 MLB 请求；
+            SGLang 另注入一个极小的 EP collective Adapter，MLB 决定统计、payload 合并和调用时机。
             EPLB 的 Step 1–6、8–15 和 Missing-weight recovery 直接复用 reviewed restored 流程；
             Step 7 的生命周期位置保持不变，但执行者改为“前置 Adapter → MLB Orchestrator → 后置 Adapter”。
             <code>--moe-load-balancer-algorithm</code> 接受单算法或 <code>+</code> 组合；
             解析、校验、能力推导和算法实例化全部由 MLB 完成。<code>static</code>、
-            <code>dynamic</code>、实验性的 <code>fake</code>、<code>lplb</code> 与
+            <code>dynamic</code>、实验性的 <code>fake</code> preset、<code>lplb</code> 与
             <code>waterfill</code> 都由 MLB 拥有；SGLang 只保留兼容不同 TopK/硬件后端的调用点。
             L2 始终从 SGLang 已生效的 metadata 读取 placement；初始权重加载或 placement
             更新完成后，SGLang 用 committed snapshot 调用一次
@@ -1408,7 +1409,7 @@
                style="left:474px;top:318px;width:220px;height:160px">
               <span class="step">步骤 06 · EXISTING LOGICAL ROUTING</span>
               <span class="card-title">Existing logical routing</span>
-              <span class="card-copy">Gate + TopK 仍是 SGLang MoE 逻辑<br>fake 模式在 TopK 前调用 MLB stimulus</span>
+              <span class="card-copy">Gate + logical TopK 仍是 SGLang MoE 逻辑<br>所有模式先调用 MLB pre-TopK hook；仅 fake 生效</span>
               <span class="card-code">topk.py</span>
             </a>
 
@@ -1416,8 +1417,8 @@
                  style="left:722px;top:318px;width:220px;height:160px">
               <span class="step">步骤 07 · MLB ORCHESTRATOR</span>
               <span class="card-title">Logical → physical</span>
-              <span class="card-copy">MLB 解析 / 组装 / 排序算法组合<br><strong>SGLang 只消费 capabilities</strong><br>placement 只来自 live metadata</span>
-              <span class="card-code">RoutingPipeline → RoutingRequest → RoutingDecision</span>
+              <span class="card-copy">Static / Dynamic / LPLB / Waterfill<br>统一在 TopK 后顺序执行<br>placement 只来自 live metadata</span>
+              <span class="card-code">唯一入口：route_tokens(RoutingRequest)</span>
             </div>
 
             <a class="card sglang" href="../../sglang/python/sglang/srt/layers/moe/token_dispatcher/deepep.py"
@@ -1431,8 +1432,8 @@
             <div class="card l2" style="left:1218px;top:318px;width:220px;height:200px">
               <span class="step">主路径展开 · TARGET L2 链</span>
               <span class="card-title">LPLB → Waterfill 串接</span>
-              <span class="card-copy">MLB capabilities 告诉 Glue 准备哪些统计；Glue 不判断算法名</span>
-              <span class="card-code">① AR global_logical_count → LPLB<br>② count_local_routed_per_rank(post-LPLB topk)<br>③ → routed_rank_load → Waterfill(static)<br>共 1 次 EP 通信</span>
+              <span class="card-copy">MLB 计算统计并通过通用 collective Adapter 请求通信；Glue 不判断算法名</span>
+              <span class="card-code">① count logical → 1× AR → LPLB<br>② 从 LP 解推导 planned global rank load<br>③ → Waterfill（不再二次 AR）</span>
             </div>
 
             <a class="card sglang" href="../../sglang/python/sglang/srt/eplb/expert_distribution.py"
@@ -1508,7 +1509,7 @@
 
             <div class="ownership-strip"
                  style="left:722px;top:282px;width:220px;height:34px">
-              <strong>前置 ADAPTER · TOPK → RoutingRequest</strong>
+              <strong>前置 ADAPTER · LOGICAL TOPK → RoutingRequest</strong>
             </div>
             <div class="ownership-strip"
                  style="left:722px;top:480px;width:220px;height:34px">
@@ -1569,7 +1570,7 @@
       </div>
 
       <div class="legend">
-        <span class="legend-item"><span class="swatch sg"></span>SGLang：生命周期 / 通信 / 权重</span>
+        <span class="legend-item"><span class="swatch sg"></span>SGLang：生命周期 / collective transport / 权重</span>
         <span class="legend-item"><span class="swatch glue"></span>SGLang Glue：初始化接线</span>
         <span class="legend-item"><span class="swatch adapter"></span>SGLang Adapter：无状态数据翻译</span>
         <span class="legend-item"><span class="swatch mlb"></span>MoELoadBalancer：框架无关 Orchestrator</span>
@@ -1599,8 +1600,12 @@
           <span>当前 LPLB 按 single-copy 与 replicated logical expert 构造紧凑 LP 矩阵。同样的每-rank physical slot 数量并不能保证矩阵形状不变：EPLB 可能把副本分布从 <code>[2,2,1,1]</code> 改成 <code>[3,1,1,1]</code>。shape 相同时 MLB 可以原位更新已捕获 graph 引用的 tensor；shape 改变时，现有紧凑表示尚不能保证旧 graph 正确读取新 placement。本次删除 SGLang recapture 补丁，后续应在 MLB 内将 LPLB 改成固定容量、固定地址的 graph-stable 状态，而不是让框架感知算法内部矩阵形状。</span>
         </div>
         <div class="comparison-card">
-          <strong>fake 是 MLB 的实验策略，不是 SGLang 特例</strong>
-          <span><code>fake</code> 包含两个算法步骤：TopK 前生成 uniform random router stimulus，以及 TopK 后像 <code>dynamic</code> 一样随机选择 committed replica。两步都由 MLB 实现；SGLang 只在原有 TopK 生命周期位置调用，因此 fused shared expert、HashTopK 和 NPU 的框架兼容逻辑不进入 MLB。</span>
+          <strong>fake 是 MLB 的实验 preset，不是 replica router</strong>
+          <span><code>fake</code> 在 TopK 前生成 uniform random router stimulus；裸 <code>fake</code> 由 MLB 内部补上 <code>dynamic</code> replica routing 以保持现有行为。TopK 后仍只调用统一的 <code>route_tokens()</code>；显式组合时可选择 <code>fake+static</code> 或 <code>fake+lplb</code>。</span>
+        </div>
+        <div class="comparison-card">
+          <strong>L2 collective 由 MLB 编排、SGLang 提供 transport</strong>
+          <span>Adapter 只暴露 rank、world size 和 SUM。<code>dynamic+waterfill_dynamic</code> 将 routed-rank load 与 active-token count 打包为一次 AR；<code>lplb+waterfill</code> 只做 logical-count AR，随后直接使用 LPLB planned rank load，因此总计也是一次通信。</span>
         </div>
         <div class="comparison-card">
           <strong>一个参数选择单算法或组合</strong>
@@ -1745,7 +1750,7 @@
               <span class="step">步骤 05 · EXISTING TOPK PATH</span>
               <span class="card-title">Keep logical IDs</span>
               <span class="card-copy">模型照常生成 TopK<br>UltraEP 与 LP 一样把 logical IDs 留给 MLB L2</span>
-              <span class="card-code">topk_ids_logical_to_physical()</span>
+              <span class="card-code">logical TopK → route_tokens()</span>
             </a>
 
             <a class="card sglang" href="../../sglang-ultraep-minimal/python/sglang/srt/eplb/moe_load_balancer_glue.py"

@@ -32,18 +32,18 @@ def transform_fake_routing_inputs(
     return router_logits, correction_bias
 
 
-def transform_replica_routing_inputs(
-    policy_name: Optional[str],
+def transform_topk_inputs(
+    transform_name: Optional[str],
     router_logits: Tensor,
     correction_bias: Optional[Tensor],
 ) -> tuple[Tensor, Optional[Tensor]]:
-    """Apply the configured replica policy's optional pre-TopK transform."""
+    """Apply an optional experimental transform before framework TopK."""
 
-    if policy_name == "fake":
+    if transform_name == "fake":
         return transform_fake_routing_inputs(router_logits, correction_bias)
-    if policy_name in {None, "static", "dynamic"}:
+    if transform_name is None:
         return router_logits, correction_bias
-    raise ValueError(f"Unknown inline replica-routing policy {policy_name!r}.")
+    raise ValueError(f"Unknown pre-TopK transform {transform_name!r}.")
 
 
 def route_static_replicas(
@@ -112,7 +112,7 @@ def route_replicas(
         if default_physical_for_logical is None:
             raise ValueError("Static replica routing requires a default physical map.")
         return route_static_replicas(logical_topk_ids, default_physical_for_logical)
-    if policy_name in {"dynamic", "fake"}:
+    if policy_name == "dynamic":
         return route_dynamic_replicas(
             logical_topk_ids,
             logical_to_physical_candidates,
@@ -185,14 +185,3 @@ class DynamicL2Router(TokenRouter):
             topk_weights=request.topk_weights,
             metadata={"policy": policy.name},
         )
-
-
-class FakeL2Router(DynamicL2Router):
-    """Experimental uniform-load stimulus plus dynamic replica routing."""
-
-    def transform_routing_inputs(
-        self,
-        router_logits: Tensor,
-        correction_bias: Optional[Tensor],
-    ) -> tuple[Tensor, Optional[Tensor]]:
-        return transform_fake_routing_inputs(router_logits, correction_bias)

@@ -24,25 +24,27 @@ def _placement() -> PlacementSnapshot:
 @pytest.mark.parametrize(
     ("value", "canonical", "replica", "post_topk"),
     [
-        ("static", "static", "static", ()),
-        ("dynamic", "dynamic", "dynamic", ()),
-        ("fake", "fake", "fake", ()),
-        ("lp", "lplb", None, ("lplb",)),
-        ("waterfill", "static+waterfill", "static", ("waterfill",)),
+        ("static", "static", "static", ("static",)),
+        ("dynamic", "dynamic", "dynamic", ("dynamic",)),
+        ("fake", "fake", "dynamic", ("dynamic",)),
+        ("fake+static", "fake+static", "static", ("static",)),
+        ("fake+lplb", "fake+lplb", "lplb", ("lplb",)),
+        ("lp", "lplb", "lplb", ("lplb",)),
+        ("waterfill", "static+waterfill", "static", ("static", "waterfill")),
         (
             "dynamic+waterfill_dynamic",
             "dynamic+waterfill_dynamic",
             "dynamic",
-            ("waterfill",),
+            ("dynamic", "waterfill"),
         ),
-        ("lplb+waterfill", "lplb+waterfill", None, ("lplb", "waterfill")),
+        ("lplb+waterfill", "lplb+waterfill", "lplb", ("lplb", "waterfill")),
     ],
 )
 def test_routing_pipeline_parses_and_canonicalizes(value, canonical, replica, post_topk):
     pipeline = RoutingPipeline.from_value(value)
 
     assert pipeline.name == canonical
-    assert pipeline.capabilities.replica_policy == replica
+    assert pipeline.policies[0] == replica
     assert tuple(policy.name for policy in pipeline.post_topk_policies) == post_topk
 
 
@@ -51,11 +53,9 @@ def test_pipeline_capabilities_hide_algorithm_selection_from_framework_glue():
     pipeline = RoutingPipeline.from_value("lplb+waterfill")
 
     assert pipeline.capabilities.requires_post_topk_routing
-    assert pipeline.capabilities.requires_global_logical_count
     assert pipeline.capabilities.requires_placement_state
     assert pipeline.capabilities.routes_shared_expert
     assert pipeline.capabilities.requires_deepep
-    assert not pipeline.capabilities.requires_dynamic_rank_load
     assert not pipeline.capabilities.requires_rank_dispatch_map
 
 
@@ -65,7 +65,20 @@ def test_default_replica_selection_is_owned_by_mlb():
 
     assert pipeline.name == "static"
     assert pipeline.capabilities.requires_rank_dispatch_map
-    assert pipeline.capabilities.routes_replicas_inline
+    assert pipeline.capabilities.requires_post_topk_routing
+
+
+@pytest.mark.unit
+def test_fake_is_a_pre_topk_preset_with_dynamic_default():
+    pipeline = RoutingPipeline.from_value("fake+waterfill")
+
+    assert pipeline.name == "fake+waterfill"
+    assert pipeline.input_transform == "fake"
+    assert pipeline.policies[0] == "dynamic"
+    assert tuple(policy.name for policy in pipeline.post_topk_policies) == (
+        "dynamic",
+        "waterfill",
+    )
 
 
 @pytest.mark.unit

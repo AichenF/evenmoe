@@ -44,14 +44,14 @@ depend only on the placement — not on per-batch data. The framework calls
 placement update. MLB then updates the affected layer's derived state; no
 placement version or tensor-identity protocol is required.
 
-Sync-free
----------
+Collective boundary
+-------------------
 
-The policy itself performs **no collectives** and **no host-GPU syncs**.
-It expects ``RoutingRequest.global_logical_count`` to already be the
-post-all-reduce per-logical-expert token counts; the adapter is responsible
-for the local scatter-add and EP all-reduce upstream. Placement-derived
-matrices are prepared per committed layer placement. Mutable outputs (``A_full``, ``b``,
+The LPLB policy consumes ``RoutingRequest.global_logical_count``. The MLB
+orchestrator creates that tensor and requests one sum through the injected
+framework collective adapter before invoking the policy. The policy itself
+contains no framework or process-group calls. Placement-derived matrices are
+prepared per committed layer placement. Mutable outputs (``A_full``, ``b``,
 ``t1``, ``x``, ``log2phy_prob``) are isolated per CUDA graph or eager stream
 so overlapping execution cannot overwrite another batch's LP state.
 """
@@ -388,6 +388,63 @@ def _identity_dispatch(topk_ids: Tensor, snapshot: PlacementSnapshot) -> Tensor:
     return result.to(topk_ids.dtype)
 
 
+def _rank_ids_for_physical(
+    physical_ids: Tensor,
+    snapshot: PlacementSnapshot,
+) -> Tensor:
+    safe_ids = physical_ids.clamp(min=0).to(torch.int64)
+    if snapshot.physical_to_rank_map is not None:
+        rank_map = snapshot.physical_to_rank_map
+        if not isinstance(rank_map, Tensor):
+            rank_map = torch.as_tensor(rank_map, device=physical_ids.device)
+        return rank_map[safe_ids].to(torch.int64)
+    return safe_ids // snapshot.num_local_physical_experts
+
+
+def _planned_rank_load_from_mapping(
+    global_counts: Tensor,
+    physical_for_logical: Tensor,
+    snapshot: PlacementSnapshot,
+) -> Tensor:
+    rank_ids = _rank_ids_for_physical(physical_for_logical, snapshot)
+    valid = (physical_for_logical >= 0) & (rank_ids >= 0) & (rank_ids < snapshot.ep_size)
+    planned = torch.zeros(
+        snapshot.ep_size,
+        dtype=torch.float32,
+        device=global_counts.device,
+    )
+    planned.scatter_add_(
+        0,
+        torch.where(valid, rank_ids, 0),
+        torch.where(valid, global_counts.to(torch.float32), 0),
+    )
+    return planned.round().to(torch.int64)
+
+
+def _planned_rank_load_from_probability(
+    global_counts: Tensor,
+    probabilities: Tensor,
+    physical_candidates: Tensor,
+    snapshot: PlacementSnapshot,
+) -> Tensor:
+    """Derive Waterfill's global planned load without a second collective."""
+
+    rank_ids = _rank_ids_for_physical(physical_candidates, snapshot)
+    valid = (physical_candidates >= 0) & (rank_ids >= 0) & (rank_ids < snapshot.ep_size)
+    contributions = global_counts.to(torch.float32)[:, None] * probabilities.to(torch.float32)
+    planned = torch.zeros(
+        snapshot.ep_size,
+        dtype=torch.float32,
+        device=global_counts.device,
+    )
+    planned.scatter_add_(
+        0,
+        torch.where(valid, rank_ids, 0).reshape(-1),
+        torch.where(valid, contributions, 0).reshape(-1),
+    )
+    return planned.round().to(torch.int64)
+
+
 class LPLBL2Router(TokenRouter):
     """LP-based per-batch routing among physical replicas.
 
@@ -398,8 +455,8 @@ class LPLBL2Router(TokenRouter):
       the LP constraint construction. The framework prepares every committed
       placement before forwarding requests that use it.
     - ``request.global_logical_count``: required. Per-logical-expert token
-      count summed across the EP group; the adapter is responsible for the
-      local scatter-add and EP all-reduce upstream.
+      count summed across the EP group by the MLB orchestrator through its
+      injected collective adapter.
     - ``request.logical_topk_ids``: required. ``[num_tokens, top_k]`` tensor
       of logical expert ids from the router.
 
@@ -487,8 +544,8 @@ class LPLBL2Router(TokenRouter):
         if request.global_logical_count is None:
             raise ValueError(
                 "LPLBL2Router requires RoutingRequest.global_logical_count "
-                "(the adapter must count + all-reduce per-logical-expert "
-                "token counts before invoking the router)."
+                "(the MLB orchestrator must count + all-reduce per-logical-expert "
+                "token counts before invoking the policy)."
             )
 
         topk_ids = request.logical_topk_ids
@@ -505,15 +562,26 @@ class LPLBL2Router(TokenRouter):
         # untouched (caller upstream is expected to short-circuit the path
         # when num_tokens == 0, but be tolerant here).
         if not base_state.has_redundancy:
+            default_map = request.placement.default_physical_for_logical
+            if default_map is None:
+                default_map = request.placement.logical_to_physical_candidates[:, 0]
             return RoutingDecision(
                 routed_physical_topk_ids=_identity_dispatch(topk_ids, request.placement),
                 topk_weights=request.topk_weights,
-                metadata={"policy": policy.name, "lp_skipped": "no_redundancy"},
+                metadata={
+                    "policy": policy.name,
+                    "lp_skipped": "no_redundancy",
+                    "planned_rank_load": _planned_rank_load_from_mapping(
+                        request.global_logical_count,
+                        default_map,
+                        request.placement,
+                    ),
+                },
             )
 
-        # Empty-token fast path: the adapter is responsible for participating
-        # in the EP all-reduce on empty ranks before calling us; here we just
-        # avoid invoking the kernels on a degenerate input.
+        # Empty-token fast path: the orchestrator has already participated in
+        # the EP all-reduce on this rank; avoid invoking the kernels on a
+        # degenerate local input.
         if topk_ids.shape[0] == 0:
             return RoutingDecision(
                 routed_physical_topk_ids=topk_ids,
@@ -569,7 +637,15 @@ class LPLBL2Router(TokenRouter):
         return RoutingDecision(
             routed_physical_topk_ids=routed_physical,
             topk_weights=request.topk_weights,
-            metadata={"policy": policy.name},
+            metadata={
+                "policy": policy.name,
+                "planned_rank_load": _planned_rank_load_from_probability(
+                    global_counts,
+                    state.log2phy_prob,
+                    state.log2phy_map_for_dispatch,
+                    request.placement,
+                ),
+            },
         )
 
     # -- Internal helpers --------------------------------------------------

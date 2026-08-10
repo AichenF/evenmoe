@@ -54,6 +54,16 @@ class _PassThroughPhysicalRouter:
         )
 
 
+class _PlannedPhysicalRouter(_PhysicalRouter):
+    def route_tokens(self, request, policy):
+        decision = super().route_tokens(request, policy)
+        return RoutingDecision(
+            routed_physical_topk_ids=decision.routed_physical_topk_ids,
+            topk_weights=decision.topk_weights,
+            metadata={"planned_rank_load": torch.tensor([7, 1])},
+        )
+
+
 class _SharedRouter:
     phase = RoutingPhase.SHARED_EXPERT
 
@@ -71,6 +81,19 @@ class _SharedRouter:
             topk_weights=request.topk_weights,
             shared_expert_rank=torch.zeros(2, dtype=torch.int64),
         )
+
+
+class _RecordingCollectives:
+    rank = 0
+    world_size = 2
+
+    def __init__(self, peer_contribution):
+        self.peer_contribution = peer_contribution
+        self.payloads = []
+
+    def all_reduce_sum(self, payload):
+        self.payloads.append(payload.clone())
+        return payload + self.peer_contribution.to(payload)
 
 
 @pytest.mark.unit
@@ -97,6 +120,7 @@ def test_combined_pipeline_runs_lplb_then_count_then_waterfill():
         # Combined mode must ignore these pre-LPLB values.
         routed_rank_load=torch.tensor([99, 1]),
         active_rank_token_count=torch.tensor([5, 5]),
+        global_logical_count=torch.tensor([2.0, 2.0]),
     )
 
     decision = mlb.route_tokens(request)
@@ -112,33 +136,68 @@ def test_combined_pipeline_runs_lplb_then_count_then_waterfill():
 
 
 @pytest.mark.unit
-def test_standalone_dynamic_waterfill_uses_framework_prepared_load():
+def test_dynamic_waterfill_packs_rank_and_active_load_into_one_collective():
     calls = []
     shared = _SharedRouter(calls)
+    collectives = _RecordingCollectives(torch.tensor([1, 1, 0, 3]))
     mlb = MoELoadBalancer(
         placement_planners={},
-        routing_policies={"waterfill": shared},
+        routing_policies={
+            "dynamic": _PhysicalRouter(calls),
+            "waterfill": shared,
+        },
+        collectives=collectives,
     )
-    physical_ids = torch.tensor([[0, 1], [2, 3]])
     request = RoutingRequest(
         layer_id=0,
         logical_topk_ids=torch.tensor([[0, 1], [0, 1]]),
-        routed_physical_topk_ids=physical_ids,
         topk_weights=torch.ones((2, 2)),
+        placement=_placement(),
+        token_count=2,
         policies=(
+            RoutingPolicyConfig(name="dynamic"),
             RoutingPolicyConfig(
                 name="waterfill",
-                metadata={"experts_per_rank": 2, "world_size": 2},
+                metadata={"load_view": "global"},
             ),
         ),
-        routed_rank_load=torch.tensor([9, 1]),
-        active_rank_token_count=torch.tensor([2, 2]),
     )
 
     mlb.route_tokens(request)
 
-    assert torch.equal(shared.seen_rank_load, torch.tensor([9, 1]))
-    assert torch.equal(shared.seen_active, torch.tensor([2, 2]))
+    assert torch.equal(collectives.payloads[0], torch.tensor([1, 3, 2, 0]))
+    assert len(collectives.payloads) == 1
+    assert torch.equal(shared.seen_rank_load, torch.tensor([2, 4]))
+    assert torch.equal(shared.seen_active, torch.tensor([2, 3]))
+
+
+@pytest.mark.unit
+def test_lplb_waterfill_reuses_planned_load_after_one_collective():
+    calls = []
+    shared = _SharedRouter(calls)
+    collectives = _RecordingCollectives(torch.tensor([1.0, 1.0]))
+    mlb = MoELoadBalancer(
+        placement_planners={},
+        routing_policies={
+            "lplb": _PlannedPhysicalRouter(calls),
+            "waterfill": shared,
+        },
+        routing_pipeline="lplb+waterfill",
+        collectives=collectives,
+    )
+    request = RoutingRequest(
+        layer_id=0,
+        logical_topk_ids=torch.tensor([[0, 1], [1, 0]]),
+        topk_weights=torch.ones((2, 2)),
+        placement=_placement(),
+    )
+
+    mlb.route_tokens(request)
+
+    assert len(collectives.payloads) == 1
+    assert torch.equal(collectives.payloads[0], torch.tensor([2.0, 2.0]))
+    assert torch.equal(shared.seen_rank_load, torch.tensor([7, 1]))
+    assert shared.seen_active is None
 
 
 @pytest.mark.unit
@@ -153,6 +212,7 @@ def test_physical_only_pipeline_returns_policy_ids_and_weights():
         topk_weights=torch.ones((1, 2)),
         placement=_placement(),
         policies=(RoutingPolicyConfig(name="lplb"),),
+        global_logical_count=torch.tensor([1.0, 1.0]),
     )
 
     decision = mlb.route_tokens(request)
