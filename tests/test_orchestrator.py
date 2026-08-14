@@ -222,6 +222,49 @@ def test_physical_only_pipeline_returns_policy_ids_and_weights():
 
 
 @pytest.mark.unit
+def test_pipeline_hands_back_the_policy_metadata_it_produced():
+    """A policy's metadata is part of its answer, not pipeline scratch space.
+
+    ``defer_dispatch`` replies with a ``replica_selection`` table carried only
+    there, so rebuilding the metadata around the pipeline's own bookkeeping
+    silently reduces deferred dispatch to a no-op: the caller sees no table and
+    keeps its built-in routing, while the policy still pays to solve.
+    """
+
+    class _TableRouter:
+        phase = RoutingPhase.PHYSICAL_ROUTING
+
+        def route_tokens(self, request, policy):
+            del policy
+            return RoutingDecision(
+                routed_physical_topk_ids=request.logical_topk_ids,
+                topk_weights=request.topk_weights,
+                metadata={"replica_selection": "TABLE", "policy": "lplb"},
+            )
+
+    mlb = MoELoadBalancer(
+        placement_planners={}, routing_policies={"lplb": _TableRouter()}
+    )
+    decision = mlb.route_tokens(
+        RoutingRequest(
+            layer_id=0,
+            logical_topk_ids=torch.tensor([[0, 1]]),
+            topk_weights=torch.ones((1, 2)),
+            placement=_placement(),
+            policies=(RoutingPolicyConfig(name="lplb"),),
+            global_logical_count=torch.tensor([1.0, 1.0]),
+            defer_dispatch=True,
+        )
+    )
+
+    assert decision.metadata["replica_selection"] == "TABLE"
+    assert decision.metadata["policy"] == "lplb"
+    # The pipeline's own bookkeeping still wins its keys.
+    assert decision.metadata["executed_policies"] == ("lplb",)
+    assert decision.metadata["skipped_policies"] == ()
+
+
+@pytest.mark.unit
 def test_empty_token_input_still_runs_combined_pipeline_with_zero_rank_load():
     calls = []
     shared = _SharedRouter(calls)

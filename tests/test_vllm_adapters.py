@@ -5,6 +5,7 @@ import torch
 
 from moe_load_balancer import PlacementPlan, RoutingDecision, RoutingStage
 from moe_load_balancer.adapters.vllm import (
+    collapse_candidates_to_local,
     nearest_replica_table,
     stage_from_vllm,
     to_placement_request,
@@ -188,6 +189,59 @@ def test_nearest_replica_table_prefers_local_then_first_valid():
     # From rank 0 the same expert resolves to the other replica.
     table0 = nearest_replica_table(candidates, counts, ep_rank=0, num_local_physical_experts=2)
     assert int(table0[0]) == 0
+
+
+@pytest.mark.unit
+def test_collapse_keeps_one_local_replica_and_leaves_remote_lists_whole():
+    # 4 ranks x 2 slots. Logical 0 is replicated on rank 0 and rank 2;
+    # logical 1 lives only on rank 1.
+    candidates = torch.tensor([[0, 4, -1], [2, -1, -1]])
+    counts = torch.tensor([2, 1])
+
+    got, got_counts = collapse_candidates_to_local(
+        candidates, counts, ep_rank=2, num_local_physical_experts=2
+    )
+    # Rank 2 holds a copy of logical 0, so it keeps only that one.
+    assert got[0].tolist() == [4, -1, -1]
+    assert int(got_counts[0]) == 1
+    # Logical 1 is remote from here, so its list survives untouched.
+    assert got[1].tolist() == [2, -1, -1]
+    assert int(got_counts[1]) == 1
+
+    # A rank holding neither replica keeps the full choice.
+    got3, counts3 = collapse_candidates_to_local(
+        candidates, counts, ep_rank=3, num_local_physical_experts=2
+    )
+    assert got3[0].tolist() == [0, 4, -1]
+    assert int(counts3[0]) == 2
+
+
+@pytest.mark.unit
+def test_collapse_does_not_synchronize_on_candidate_values():
+    """The sentinel must come from the dtype, not from ``candidates.max()``.
+
+    Rank-dispatch callers run this per layer inside a forward pass, where
+    reading a value off the device stalls the pipeline every call. Guard it by
+    construction: a tensor that raises when read cannot be read.
+    """
+
+    class _NoItem(torch.Tensor):
+        @staticmethod
+        def __new__(cls, data):
+            return torch.Tensor._make_subclass(cls, data)
+
+        def item(self):  # pragma: no cover - must never be reached
+            raise AssertionError("collapse_candidates_to_local synced the device")
+
+    candidates = _NoItem(torch.tensor([[0, 4, -1], [2, -1, -1]]))
+    counts = torch.tensor([2, 1])
+    got, _ = collapse_candidates_to_local(
+        candidates, counts, ep_rank=2, num_local_physical_experts=2
+    )
+    # `got` inherits the subclass, so compare without going back through it.
+    assert torch.equal(
+        got.as_subclass(torch.Tensor)[0], torch.tensor([4, -1, -1])
+    )
 
 
 @pytest.mark.unit

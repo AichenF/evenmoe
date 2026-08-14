@@ -269,7 +269,14 @@ class MoELoadBalancer:
             routed_physical_topk_ids=current_physical,
             topk_weights=current_weights,
             shared_expert_rank=shared_expert_rank,
+            # The executing policy's own metadata is part of its decision, not
+            # scratch space: `defer_dispatch` answers with a
+            # ``replica_selection`` table there and nothing else carries it, so
+            # dropping it silently turns the whole deferred-dispatch contract
+            # into a no-op. The pipeline's own keys are written last so a policy
+            # cannot shadow them.
             metadata={
+                **physical_decision_metadata,
                 "executed_policies": tuple(executed),
                 "skipped_policies": tuple(skipped),
             },

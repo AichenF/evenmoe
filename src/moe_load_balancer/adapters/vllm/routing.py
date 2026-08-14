@@ -28,19 +28,25 @@ def collapse_candidates_to_local(
     ep_rank: int,
     num_local_physical_experts: int,
 ) -> tuple[TensorLike, TensorLike]:
-    """Collapse the candidate list to the nearest local replica, matching SGLang.
+    """Collapse the candidate list to the nearest local replica.
 
-    SGLang's ``_compute_logical_to_all_physical_map`` does this at init time:
-    for each logical expert that has at least one replica on this EP rank, the
-    candidate list is replaced with just that local replica.  Experts with no
-    local replica keep their full (remote) candidate list unchanged.
+    For each logical expert with at least one replica on this EP rank, the
+    candidate list is replaced by just that replica; experts with no local
+    replica keep their full (remote) list.
 
-    Why this matters for LPLB:
-    - Experts with a local copy get a list of size 1 → LP problem is trivial
-      for them (route locally, no cross-GPU traffic).
-    - Only experts without a local copy need real LP routing decisions.
-    - The LP problem is therefore smaller and faster, and cross-GPU dispatch is
-      avoided when a local copy exists.
+    **This is for rank-dispatch policies only** -- ``static`` and anything else
+    that reports ``requires_rank_dispatch_map``. Do not apply it to a
+    replica-routing policy such as LPLB, whose entire job is to decide how a
+    replicated expert's traffic splits: leaving one candidate answers that
+    question in advance, and a rank that holds a copy of every expert it sees is
+    left with no redundancy at all, so the LP is skipped outright.
+
+    SGLang draws the same line. The collapse there lives in
+    ``compute_logical_to_rank_dispatch_physical_map``, built only when the
+    pipeline reports ``requires_rank_dispatch_map``, and in the
+    ``init_by_mapping`` / ``init_trivial`` startup paths. ``init_by_eplb`` --
+    taken on every rebalance, and the configuration its published EPLB numbers
+    were measured in -- passes the policy the full global list.
 
     Args:
         candidates: ``[num_logical, max_replicas]`` physical slot ids, -1 where
@@ -64,7 +70,10 @@ def collapse_candidates_to_local(
     has_local = is_local.any(dim=-1)  # [num_logical]
 
     # For experts with a local copy, find the first (lowest-slot) local replica.
-    sentinel = int(candidates.max().item()) + 1
+    # The sentinel only has to lose a `min`, so take it from the dtype rather
+    # than from the data: reading `candidates.max()` would sync the device on
+    # every call, and callers may run this per layer inside a forward pass.
+    sentinel = torch.iinfo(candidates.dtype).max
     local_only_vals = torch.where(is_local, candidates, torch.full_like(candidates, sentinel))
     first_local = local_only_vals.min(dim=-1).values  # [num_logical]
 
