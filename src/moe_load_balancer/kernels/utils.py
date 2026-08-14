@@ -314,9 +314,20 @@ def _find_package_root(package: str) -> Optional[pathlib.Path]:
         # as "package absent" so dependency resolvers can give a clean
         # descriptive RuntimeError downstream.
         return None
-    if spec is None or spec.origin is None:
+    if spec is None:
         return None
-    return pathlib.Path(spec.origin).resolve().parent
+    if spec.origin is not None:
+        return pathlib.Path(spec.origin).resolve().parent
+    # Namespace packages (no __init__.py) have no origin, but do carry their
+    # directory in submodule_search_locations. `nvidia.mathdx` ships this way,
+    # so without this branch a pip-installed `nvidia-mathdx` looks absent and
+    # the caller reports "Cannot find NVIDIA Math-DX headers" while the headers
+    # are sitting in site-packages.
+    for location in spec.submodule_search_locations or ():
+        candidate = pathlib.Path(location).resolve()
+        if candidate.exists():
+            return candidate
+    return None
 
 
 _REGISTERED_DEPENDENCIES: Dict[str, Callable[[], List[str]]] = {}
