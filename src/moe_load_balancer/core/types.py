@@ -229,6 +229,30 @@ class RoutingLoadHistory:
         object.__setattr__(self, "metadata", _immutable_mapping(self.metadata))
 
 
+@dataclass(frozen=True)
+class ReplicaSelection:
+    """How a logical expert's traffic should be split across its replicas.
+
+    This is what a replica-routing policy actually decides; per-token ids are
+    one mechanical step away from it. Published under
+    ``RoutingDecision.metadata["replica_selection"]`` when the caller asked for
+    :attr:`RoutingRequest.defer_dispatch`.
+
+    Both tensors are ``[num_logical_experts, max_replicas]`` and share a layout:
+    column ``j`` of :attr:`probability` is the share of that expert's traffic
+    assigned to the physical slot in column ``j`` of :attr:`candidates`. Columns
+    past an expert's live replica count are padded -- ``candidates`` holds -1
+    there and ``probability`` holds 0 -- so a consumer can walk a row without a
+    separate count.
+
+    Rows are not guaranteed normalized: a consumer sampling from them must
+    divide by the row sum, and treat an all-zero row as "no preference".
+    """
+
+    probability: TensorLike
+    candidates: TensorLike
+
+
 @dataclass(frozen=True, kw_only=True)
 class RoutingRequest:
     """Framework-neutral input to the ordered L2 policy pipeline.
@@ -252,6 +276,21 @@ class RoutingRequest:
     token_count: Optional[TensorLike] = None
     lb_token_mask: Optional[TensorLike] = None
     routed_scaling_factor: float = 1.0
+    defer_dispatch: bool = False
+    """Return the replica-selection table instead of applying it.
+
+    A replica policy decides *how much* of each logical expert's traffic each
+    physical replica should take; turning that into per-token ids is a separate,
+    purely mechanical step. Frameworks that already own a dispatch kernel can
+    keep it -- and with it whatever else that kernel does, such as recording
+    expert load -- by asking for the table and applying it themselves.
+
+    When set, a policy that supports it leaves ``routed_physical_topk_ids``
+    untouched and publishes ``RoutingDecision.metadata["replica_selection"]``.
+    Policies that cannot express their decision as a table ignore the flag and
+    dispatch as usual, so the caller must check for the key rather than assume
+    it.
+    """
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

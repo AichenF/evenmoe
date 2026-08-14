@@ -138,8 +138,15 @@ def to_routing_request(
     stage: Optional[RoutingStage | str] = None,
     token_count: Optional[TensorLike] = None,
     routed_scaling_factor: float = 1.0,
+    defer_dispatch: bool = False,
 ) -> RoutingRequest:
-    """Translate vLLM's logical TopK and live placement into MLB input."""
+    """Translate vLLM's logical TopK and live placement into MLB input.
+
+    ``defer_dispatch`` asks for the replica-share table instead of per-token
+    ids. vLLM fuses replica selection with expert-load recording in one kernel,
+    so applying the split itself is how it keeps the recording -- see
+    ``RoutingRequest.defer_dispatch``.
+    """
 
     normalized_stage = None if stage is None else RoutingStage.from_str(stage)
     return RoutingRequest(
@@ -151,6 +158,7 @@ def to_routing_request(
         stage=normalized_stage,
         token_count=token_count,
         routed_scaling_factor=routed_scaling_factor,
+        defer_dispatch=defer_dispatch,
     )
 
 

@@ -67,6 +67,7 @@ from torch import Tensor
 from moe_load_balancer.core.l2 import TokenRouter
 from moe_load_balancer.core.types import (
     PlacementSnapshot,
+    ReplicaSelection,
     RoutingDecision,
     RoutingPhase,
     RoutingPolicyConfig,
@@ -628,6 +629,31 @@ class LPLBL2Router(TokenRouter):
             state.phy_replicated,
             state.log2phy,
         )
+        metadata = {
+            "policy": policy.name,
+            "planned_rank_load": _planned_rank_load_from_probability(
+                global_counts,
+                state.log2phy_prob,
+                state.log2phy_map_for_dispatch,
+                request.placement,
+            ),
+        }
+
+        if request.defer_dispatch:
+            # The LP solution *is* the decision; turning it into per-token ids
+            # is mechanical. Hand the table over and let the caller's own
+            # dispatch apply it, so whatever else that kernel does -- recording
+            # expert load, in vLLM's case -- keeps working unchanged.
+            metadata["replica_selection"] = ReplicaSelection(
+                probability=state.log2phy_prob,
+                candidates=state.log2phy_map_for_dispatch,
+            )
+            return RoutingDecision(
+                routed_physical_topk_ids=topk_ids,
+                topk_weights=request.topk_weights,
+                metadata=metadata,
+            )
+
         routed_physical = self._kernels.dispatch_probability(
             topk_ids,
             state.log2phy_prob,
@@ -637,15 +663,7 @@ class LPLBL2Router(TokenRouter):
         return RoutingDecision(
             routed_physical_topk_ids=routed_physical,
             topk_weights=request.topk_weights,
-            metadata={
-                "policy": policy.name,
-                "planned_rank_load": _planned_rank_load_from_probability(
-                    global_counts,
-                    state.log2phy_prob,
-                    state.log2phy_map_for_dispatch,
-                    request.placement,
-                ),
-            },
+            metadata=metadata,
         )
 
     # -- Internal helpers --------------------------------------------------
