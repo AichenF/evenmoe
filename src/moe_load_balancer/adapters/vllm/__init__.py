@@ -11,6 +11,8 @@ from moe_load_balancer.adapters.vllm.placement import (
     to_vllm_physical_to_logical,
 )
 from moe_load_balancer.adapters.vllm.routing import (
+    build_physical_to_rank_map,
+    collapse_candidates_to_local,
     nearest_replica_table,
     stage_from_vllm,
     to_placement_snapshot,
@@ -20,6 +22,8 @@ from moe_load_balancer.adapters.vllm.routing import (
 
 __all__ = [
     "VllmPlacementMaps",
+    "build_physical_to_rank_map",
+    "collapse_candidates_to_local",
     "nearest_replica_table",
     "stage_from_vllm",
     "to_placement_request",

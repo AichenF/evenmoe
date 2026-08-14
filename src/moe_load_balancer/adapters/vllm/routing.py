@@ -21,6 +21,78 @@ _VLLM_MODE_TO_STAGE = {
 }
 
 
+def collapse_candidates_to_local(
+    candidates: TensorLike,
+    counts: TensorLike,
+    *,
+    ep_rank: int,
+    num_local_physical_experts: int,
+) -> tuple[TensorLike, TensorLike]:
+    """Collapse the candidate list to the nearest local replica, matching SGLang.
+
+    SGLang's ``_compute_logical_to_all_physical_map`` does this at init time:
+    for each logical expert that has at least one replica on this EP rank, the
+    candidate list is replaced with just that local replica.  Experts with no
+    local replica keep their full (remote) candidate list unchanged.
+
+    Why this matters for LPLB:
+    - Experts with a local copy get a list of size 1 → LP problem is trivial
+      for them (route locally, no cross-GPU traffic).
+    - Only experts without a local copy need real LP routing decisions.
+    - The LP problem is therefore smaller and faster, and cross-GPU dispatch is
+      avoided when a local copy exists.
+
+    Args:
+        candidates: ``[num_logical, max_replicas]`` physical slot ids, -1 where
+            unused.
+        counts:     ``[num_logical]`` number of valid replicas per expert.
+        ep_rank:    this rank's index in the EP group.
+        num_local_physical_experts: number of physical slots owned by each rank.
+
+    Returns:
+        (collapsed_candidates, collapsed_counts) with the same shapes.
+    """
+    import torch
+
+    if not isinstance(candidates, torch.Tensor) or not isinstance(counts, torch.Tensor):
+        raise TypeError("collapse_candidates_to_local requires torch.Tensor inputs.")
+
+    low = ep_rank * num_local_physical_experts
+    high = low + num_local_physical_experts
+
+    is_local = (candidates >= low) & (candidates < high) & (candidates >= 0)
+    has_local = is_local.any(dim=-1)  # [num_logical]
+
+    # For experts with a local copy, find the first (lowest-slot) local replica.
+    sentinel = int(candidates.max().item()) + 1
+    local_only_vals = torch.where(is_local, candidates, torch.full_like(candidates, sentinel))
+    first_local = local_only_vals.min(dim=-1).values  # [num_logical]
+
+    # Build collapsed tensor: keep original for non-local experts, replace for local.
+    local_row = torch.full_like(candidates, -1)
+    local_row[:, 0] = first_local  # [local_id, -1, -1, ...]
+
+    collapsed = torch.where(has_local.unsqueeze(-1), local_row, candidates)
+    collapsed_counts = torch.where(has_local, torch.ones_like(counts), counts)
+    return collapsed, collapsed_counts
+
+
+def build_physical_to_rank_map(
+    num_physical_experts: int,
+    ep_size: int,
+    device: object,
+) -> TensorLike:
+    """Build a [num_physical_experts] tensor mapping each slot to its EP rank.
+
+    SGLang passes this as ``PlacementSnapshot.physical_to_rank_map``, letting
+    LPLB incorporate cross-GPU transfer cost into its placement decisions.
+    """
+    import torch
+
+    num_local = num_physical_experts // ep_size
+    return torch.arange(num_physical_experts, device=device) // num_local
+
+
 def nearest_replica_table(
     candidates: TensorLike,
     counts: TensorLike,
@@ -78,28 +150,36 @@ def to_placement_snapshot(
     num_logical_experts: int,
     num_physical_experts: int,
     ep_size: int,
+    candidates: Optional[TensorLike] = None,
+    counts: Optional[TensorLike] = None,
     default_physical_for_logical: Optional[TensorLike] = None,
+    physical_to_rank_map: Optional[TensorLike] = None,
 ) -> PlacementSnapshot:
     """Translate vLLM's per-layer ``EplbLayerState`` into an L2 snapshot.
 
-    ``EplbLayerState`` already holds per-layer views of
-    ``logical_to_physical_map`` and ``logical_replica_count``
-    (``set_layer_state`` slices them by ``moe_layer_idx``), so those map onto
-    MLB's candidate/count pair with no reshaping.
+    ``candidates`` and ``counts`` are the logical-to-physical candidate map and
+    replica-count tensor to pass to MLB.  If omitted, they are read from
+    ``layer_state.logical_to_physical_map`` and
+    ``layer_state.logical_replica_count`` (the raw global-all-replicas lists
+    that vLLM keeps).
+
+    Callers that want SGLang-compatible behaviour should pre-collapse the
+    candidate list with :func:`collapse_candidates_to_local` and pass the
+    result here.  Without collapsing, LPLB sees every global replica and may
+    route cross-GPU even when a local copy exists.
 
     ``physical_to_logical_map`` must be supplied by Glue: vLLM keeps it on the
     model-level ``EplbModelState``, not on the layer state.
 
-    IMPORTANT semantic note.  vLLM's ``compute_logical_maps`` enumerates *all*
-    physical replicas of a logical expert in ascending slot order.  SGLang's
-    ``logical_to_all_physical_map`` collapses to the nearest local replica when
-    one exists, so an L2 policy tuned against SGLang sees a strictly smaller
-    action space than it will see here.  Replica-choice quality measured on
-    SGLang does not transfer; re-measure on vLLM.
+    ``physical_to_rank_map`` maps each physical slot to its EP rank; SGLang
+    always provides this so LPLB can incorporate cross-GPU transfer cost.
+    Build it with :func:`build_physical_to_rank_map`.
     """
 
-    candidates = getattr(layer_state, "logical_to_physical_map", None)
-    counts = getattr(layer_state, "logical_replica_count", None)
+    if candidates is None:
+        candidates = getattr(layer_state, "logical_to_physical_map", None)
+    if counts is None:
+        counts = getattr(layer_state, "logical_replica_count", None)
     if candidates is None or counts is None:
         raise ValueError(
             "vLLM L2 routing requires a layer state with logical_to_physical_map "
@@ -117,14 +197,8 @@ def to_placement_snapshot(
         physical_to_logical_map=physical_to_logical_map,
         logical_to_physical_candidates=candidates,
         logical_to_physical_count=counts,
-        # vLLM has no precomputed per-rank dispatch table (SGLang's
-        # logical_to_rank_dispatch_physical_map); its baseline picks a replica
-        # with a Knuth hash of the token index instead.  Glue may synthesize
-        # one with :func:`nearest_replica_table`; policies that require it
-        # (``static``) fail loudly when it is absent rather than silently
-        # routing somewhere else.
         default_physical_for_logical=default_physical_for_logical,
-        physical_to_rank_map=None,
+        physical_to_rank_map=physical_to_rank_map,
     )
 
 
