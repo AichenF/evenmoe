@@ -55,6 +55,12 @@ class _PassThroughPhysicalRouter:
 
 
 class _PlannedPhysicalRouter(_PhysicalRouter):
+    # Stands in for LPLB, which declares GlobalLogicalCountConsumer: the
+    # orchestrator gathers the count on the capability, not on the policy name.
+    def needs_global_logical_count(self, request):
+        del request
+        return True
+
     def route_tokens(self, request, policy):
         decision = super().route_tokens(request, policy)
         return RoutingDecision(
@@ -400,3 +406,108 @@ def test_physical_policy_cannot_run_after_shared_policy():
     )
     with pytest.raises(ValueError, match="physical-routing policy"):
         mlb.route_tokens(request)
+
+
+class _CountDeclaringPhysicalRouter:
+    """A physical router that states whether it consumes the global count."""
+
+    phase = RoutingPhase.PHYSICAL_ROUTING
+
+    def __init__(self, needs: bool):
+        self._needs = needs
+        self.seen_count = object()
+
+    def needs_global_logical_count(self, request):
+        del request
+        return self._needs
+
+    def route_tokens(self, request, policy):
+        del policy
+        self.seen_count = request.global_logical_count
+        return RoutingDecision(
+            routed_physical_topk_ids=request.logical_topk_ids,
+            topk_weights=request.topk_weights,
+        )
+
+
+def _count_request(**overrides) -> RoutingRequest:
+    kwargs = dict(
+        layer_id=0,
+        logical_topk_ids=torch.tensor([[0, 1]]),
+        topk_weights=torch.ones((1, 2)),
+        placement=_placement(),
+        policies=(RoutingPolicyConfig(name="lplb"),),
+    )
+    kwargs.update(overrides)
+    return RoutingRequest(**kwargs)
+
+
+def _mlb_with(router, collectives) -> MoELoadBalancer:
+    return MoELoadBalancer(
+        placement_planners={},
+        routing_policies={"lplb": router},
+        collectives=collectives,
+    )
+
+
+@pytest.mark.unit
+def test_the_count_collective_is_skipped_when_the_policy_declares_no_need():
+    """An LP with nothing to solve must not cost a collective.
+
+    A layer whose logical experts each hold one replica gives LPLB no traffic
+    split to decide, so it returns identity dispatch and never reads the count.
+    Gathering it anyway is one EP collective per layer per forward for a result
+    that is thrown away -- measurable as a straight loss on zero-redundancy
+    configurations.
+    """
+    router = _CountDeclaringPhysicalRouter(needs=False)
+    collectives = _RecordingCollectives(torch.tensor([1.0, 1.0]))
+
+    _mlb_with(router, collectives).route_tokens(_count_request())
+
+    assert collectives.payloads == []
+    assert router.seen_count is None
+
+
+@pytest.mark.unit
+def test_the_count_collective_runs_when_the_policy_declares_it_needs_one():
+    router = _CountDeclaringPhysicalRouter(needs=True)
+    collectives = _RecordingCollectives(torch.tensor([1.0, 1.0]))
+
+    _mlb_with(router, collectives).route_tokens(_count_request())
+
+    assert len(collectives.payloads) == 1
+    assert router.seen_count is not None
+
+
+@pytest.mark.unit
+def test_a_policy_that_never_declares_the_protocol_gets_no_count():
+    """The need is a capability, not a policy name.
+
+    The gate used to read ``policy_config.name == "lplb"``, which both taxed
+    every LPLB layer regardless of redundancy and left any other count-consuming
+    policy unable to ask.
+    """
+    router = _PassThroughPhysicalRouter()
+    collectives = _RecordingCollectives(torch.tensor([1.0, 1.0]))
+
+    _mlb_with(router, collectives).route_tokens(_count_request())
+
+    assert collectives.payloads == []
+
+
+@pytest.mark.unit
+def test_a_caller_supplied_count_is_never_re_gathered():
+    """vLLM accumulates per-layer counts inside its CUDA graph and all-reduces
+    once per step for every layer at once, because a collective cannot be
+    captured. MLB must pass that through, not issue a second one."""
+    router = _CountDeclaringPhysicalRouter(needs=True)
+    collectives = _RecordingCollectives(torch.tensor([1.0, 1.0]))
+    supplied = torch.tensor([5.0, 7.0])
+
+    _mlb_with(router, collectives).route_tokens(
+        _count_request(global_logical_count=supplied)
+    )
+
+    assert collectives.payloads == []
+    assert torch.equal(router.seen_count, supplied)

@@ -518,6 +518,26 @@ class LPLBL2Router(TokenRouter):
             key: value for key, value in self._execution_state.items() if key[0] != layer_id
         }
 
+    def needs_global_logical_count(self, request: RoutingRequest) -> bool:
+        """Report whether this layer's LP actually consumes the count.
+
+        A layer whose logical experts each hold exactly one replica has no
+        traffic split to decide: :meth:`route_tokens` returns identity dispatch
+        and never reads the count. Gathering it anyway costs one EP collective
+        per layer per forward for a result that is discarded -- the whole of the
+        overhead seen on zero-redundancy configurations.
+
+        The answer is read off the cached per-layer state, so asking costs
+        nothing after the first call for a given placement.
+        """
+
+        if request.placement is None:
+            return False
+        return self._get_or_build_layer_state(
+            request.layer_id,
+            request.placement,
+        ).has_redundancy
+
     def route_tokens(
         self,
         request: RoutingRequest,
@@ -542,13 +562,6 @@ class LPLBL2Router(TokenRouter):
                 "LPLBL2Router requires RoutingRequest.placement to be a "
                 "PlacementSnapshot (logical->physical translation is non-optional)."
             )
-        if request.global_logical_count is None:
-            raise ValueError(
-                "LPLBL2Router requires RoutingRequest.global_logical_count "
-                "(the MLB orchestrator must count + all-reduce per-logical-expert "
-                "token counts before invoking the policy)."
-            )
-
         topk_ids = request.logical_topk_ids
         if not isinstance(topk_ids, Tensor):
             raise TypeError("LPLBL2Router requires torch.Tensor logical_topk_ids.")
@@ -562,22 +575,41 @@ class LPLBL2Router(TokenRouter):
         # physical slot for each logical. Still passes through empty batches
         # untouched (caller upstream is expected to short-circuit the path
         # when num_tokens == 0, but be tolerant here).
+        #
+        # This runs before the global_logical_count requirement below, because
+        # the count is what this path exists to avoid paying for: the
+        # orchestrator asks needs_global_logical_count() first and skips the EP
+        # collective when the answer is False, so arriving here without a count
+        # is the expected case, not an error.
         if not base_state.has_redundancy:
-            default_map = request.placement.default_physical_for_logical
-            if default_map is None:
-                default_map = request.placement.logical_to_physical_candidates[:, 0]
+            metadata: dict[str, object] = {
+                "policy": policy.name,
+                "lp_skipped": "no_redundancy",
+            }
+            # The planned load can only be stated when the count was gathered.
+            # Without it the orchestrator falls back to counting the physical
+            # ids returned here, which for identity dispatch describes the very
+            # same placement.
+            if request.global_logical_count is not None:
+                default_map = request.placement.default_physical_for_logical
+                if default_map is None:
+                    default_map = request.placement.logical_to_physical_candidates[:, 0]
+                metadata["planned_rank_load"] = _planned_rank_load_from_mapping(
+                    request.global_logical_count,
+                    default_map,
+                    request.placement,
+                )
             return RoutingDecision(
                 routed_physical_topk_ids=_identity_dispatch(topk_ids, request.placement),
                 topk_weights=request.topk_weights,
-                metadata={
-                    "policy": policy.name,
-                    "lp_skipped": "no_redundancy",
-                    "planned_rank_load": _planned_rank_load_from_mapping(
-                        request.global_logical_count,
-                        default_map,
-                        request.placement,
-                    ),
-                },
+                metadata=metadata,
+            )
+
+        if request.global_logical_count is None:
+            raise ValueError(
+                "LPLBL2Router requires RoutingRequest.global_logical_count "
+                "(the MLB orchestrator must count + all-reduce per-logical-expert "
+                "token counts before invoking the policy)."
             )
 
         # Empty-token fast path: the orchestrator has already participated in

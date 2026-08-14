@@ -4,7 +4,11 @@ from dataclasses import replace
 from typing import Callable, Mapping, Optional
 
 from moe_load_balancer.core.l1 import PlacementPlanner
-from moe_load_balancer.core.l2 import RoutingCollectives, TokenRouter
+from moe_load_balancer.core.l2 import (
+    GlobalLogicalCountConsumer,
+    RoutingCollectives,
+    TokenRouter,
+)
 from moe_load_balancer.core.routing_pipeline import RoutingCapabilities, RoutingPipeline
 from moe_load_balancer.core.types import (
     PlacementPlan,
@@ -205,10 +209,8 @@ class MoELoadBalancer:
                     routed_physical_topk_ids=None,
                     routed_rank_load=None,
                     active_rank_token_count=None,
-                    global_logical_count=(
-                        self._global_logical_count(request)
-                        if policy_config.name == "lplb" and request.global_logical_count is None
-                        else request.global_logical_count
+                    global_logical_count=self._resolve_global_logical_count(
+                        router, request
                     ),
                 )
                 decision = router.route_tokens(policy_request, policy_config)
@@ -281,6 +283,34 @@ class MoELoadBalancer:
                 "skipped_policies": tuple(skipped),
             },
         )
+
+    def _resolve_global_logical_count(
+        self,
+        router: TokenRouter,
+        request: RoutingRequest,
+    ) -> object:
+        """Gather the EP-wide per-logical token count, but only if it is used.
+
+        Two things have to hold before paying for it. The router has to consume
+        the count at all -- asked through ``GlobalLogicalCountConsumer`` rather
+        than by policy name -- and it has to consume it *for this placement*.
+        LPLB's LP is degenerate on a layer where no logical expert is
+        replicated; it answers ``False`` there and returns identity dispatch, so
+        counting would buy an EP collective per layer per forward whose result
+        is discarded.
+
+        A framework that already holds the count passes it in and none of this
+        runs: vLLM accumulates per-layer counts inside its CUDA graph and
+        all-reduces once per step for every layer at once, because a collective
+        cannot be captured.
+        """
+        if request.global_logical_count is not None:
+            return request.global_logical_count
+        if not isinstance(router, GlobalLogicalCountConsumer):
+            return None
+        if not router.needs_global_logical_count(request):
+            return None
+        return self._global_logical_count(request)
 
     def _global_logical_count(self, request: RoutingRequest) -> object:
         if request.placement is None:
