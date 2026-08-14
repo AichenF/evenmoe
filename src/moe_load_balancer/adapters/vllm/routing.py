@@ -213,6 +213,7 @@ def to_routing_request(
     token_count: Optional[TensorLike] = None,
     routed_scaling_factor: float = 1.0,
     defer_dispatch: bool = False,
+    global_logical_count: Optional[TensorLike] = None,
 ) -> RoutingRequest:
     """Translate vLLM's logical TopK and live placement into MLB input.
 
@@ -220,8 +221,13 @@ def to_routing_request(
     ids. vLLM fuses replica selection with expert-load recording in one kernel,
     so applying the split itself is how it keeps the recording -- see
     ``RoutingRequest.defer_dispatch``.
-    """
 
+    ``global_logical_count`` is the pre-computed, all-reduced per-logical-expert
+    token count for this layer.  When provided, MLB skips its internal
+    count_logical_experts + EP all_reduce (which are not CUDA-graph-safe).
+    vLLM computes counts inside the graph and all_reduces them outside, then
+    passes the result here as a stable tensor so LP solve is fully capturable.
+    """
     normalized_stage = None if stage is None else RoutingStage.from_str(stage)
     return RoutingRequest(
         layer_id=layer_id,
@@ -233,6 +239,7 @@ def to_routing_request(
         token_count=token_count,
         routed_scaling_factor=routed_scaling_factor,
         defer_dispatch=defer_dispatch,
+        global_logical_count=global_logical_count,
     )
 
 
