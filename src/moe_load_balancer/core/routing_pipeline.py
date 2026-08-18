@@ -54,6 +54,20 @@ class RoutingCapabilities:
     requires_deepep: bool = False
 
     # -- inputs the pipeline consumes -------------------------------------
+    resolves_dispatch: bool = False
+    """Whether the policy turns its own decision into per-token ids.
+
+    False means the decision is a per-expert distribution the framework can
+    apply itself, which a runtime that fuses selection with load recording does
+    in one pass. True means the policy realises it -- the only option for an
+    algorithm whose choice depends on the token and not just on the expert, and
+    the reason the selection step has to be separable at all.
+
+    Both remain available: a framework keeps its built-in selection for when no
+    policy is configured, and a policy that declares this replaces only the
+    selection, never the recording.
+    """
+
     consumes_global_logical_count: bool = False
     """Whether any policy reads the EP-wide per-logical token count.
 
@@ -246,6 +260,11 @@ class RoutingPipeline:
             requires_rank_dispatch_map=replica_policy == "static",
             routes_shared_expert=waterfill_policy is not None,
             requires_deepep=waterfill_policy is not None,
+            # LPLB owns a dispatch kernel that realises its LP solution, and
+            # static and dynamic each pick one replica per token. Letting them
+            # resolve is what keeps the selection step something an algorithm
+            # can own rather than something the framework's kernel decides.
+            resolves_dispatch=replica_policy in ("lplb", "static", "dynamic"),
             consumes_global_logical_count=consumes_count,
             # LPLB's LP is a per-batch decision, but the distribution it tracks
             # moves slowly; one step of age is acceptable and is what lets the

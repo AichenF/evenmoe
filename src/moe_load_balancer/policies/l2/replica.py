@@ -8,6 +8,7 @@ import torch
 from torch import Tensor
 
 from moe_load_balancer.core.l2 import TokenRouter
+from moe_load_balancer.kernels.token_draw import replica_index
 from moe_load_balancer.core.types import (
     ReplicaSelection,
     RoutingDecision,
@@ -83,15 +84,13 @@ def route_dynamic_replicas(
         logical_topk_ids,
         logical_to_physical_count.shape[0],
     )
-    chosen_dispatch_index = (
-        torch.randint(
-            0,
-            65536,
-            logical_topk_ids.shape,
-            dtype=torch.int32,
-            device=logical_topk_ids.device,
-        )
-        % logical_to_physical_count[safe_ids]
+    # From the token index, not an RNG: the choice has to be reproducible and
+    # agreed upon by every rank that sees the token. See kernels.token_draw.
+    chosen_dispatch_index = replica_index(
+        logical_topk_ids.shape,
+        logical_topk_ids.shape[-1],
+        logical_to_physical_count[safe_ids],
+        logical_topk_ids.device,
     )
     physical_ids = logical_to_physical_candidates[safe_ids, chosen_dispatch_index]
     return torch.where(valid, physical_ids, logical_topk_ids)

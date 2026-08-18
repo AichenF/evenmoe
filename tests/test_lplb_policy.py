@@ -790,20 +790,20 @@ class TestTheDrawIsPartOfTheDecision:
     """
 
     def test_the_draw_is_a_pure_function_of_the_token_index(self):
-        from moe_load_balancer.kernels.lplb.cuda_solver import _uniform_draw
+        from moe_load_balancer.kernels.token_draw import uniform_draw
 
-        a = _uniform_draw(16, 4, "cpu")
-        b = _uniform_draw(16, 4, "cpu")
+        a = uniform_draw(16, 4, "cpu")
+        b = uniform_draw(16, 4, "cpu")
         assert torch.equal(a, b)
 
     def test_slots_of_one_token_share_a_draw(self):
         """The choice is per token, not per slot: a token's k routed experts are
         all decided from the same draw, as they are wherever this is applied
         inside a fused kernel."""
-        from moe_load_balancer.kernels.lplb.cuda_solver import _uniform_draw
+        from moe_load_balancer.kernels.token_draw import uniform_draw
 
         topk = 4
-        draw = _uniform_draw(3 * topk, topk, "cpu")
+        draw = uniform_draw(3 * topk, topk, "cpu")
         for token in range(3):
             row = draw[token * topk : (token + 1) * topk]
             assert torch.equal(row, row[0].expand_as(row))
@@ -812,13 +812,13 @@ class TestTheDrawIsPartOfTheDecision:
         """Same constant, same arithmetic, same result -- so the decision
         realises identically whether the policy applies it or the framework
         does."""
-        from moe_load_balancer.kernels.lplb.cuda_solver import (
-            _KNUTH_MULTIPLIER,
-            _uniform_draw,
+        from moe_load_balancer.kernels.token_draw import (
+            KNUTH_MULTIPLIER,
+            uniform_draw,
         )
 
         topk, tokens = 2, 8
-        draw = _uniform_draw(tokens * topk, topk, "cpu")
+        draw = uniform_draw(tokens * topk, topk, "cpu")
         for token in range(tokens):
-            expected = ((token * _KNUTH_MULTIPLIER) & 0xFFFFFFFF) / 4294967296.0
+            expected = ((token * KNUTH_MULTIPLIER) & 0xFFFFFFFF) / 4294967296.0
             assert abs(float(draw[token * topk]) - expected) < 1e-6

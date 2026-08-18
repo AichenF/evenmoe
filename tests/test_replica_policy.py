@@ -73,29 +73,41 @@ def test_static_policy_requires_framework_selected_default_map():
 
 
 @pytest.mark.unit
-def test_dynamic_policy_matches_sglang_random_replica_selection():
+def test_dynamic_policy_spreads_without_drawing_from_an_rng():
+    """Dynamic spreads a logical expert's traffic evenly over its replicas, and
+    decides which token takes which one from the token index.
+
+    This test used to pin the choice to torch.randint under a fixed seed, which
+    made it pass while leaving the behaviour neither reproducible in a real run
+    nor agreed upon between ranks that see the same token and hold different
+    experts. The distribution is the policy's decision; the draw that realises
+    it is part of the contract, not of whichever implementation applies it.
+    """
     logical_ids = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
     placement = _placement()
 
-    torch.manual_seed(17)
-    expected_index = (
-        torch.randint(0, 65536, logical_ids.shape, dtype=torch.int32)
-        % placement.logical_to_physical_count[logical_ids]
+    first = route_dynamic_replicas(
+        logical_ids,
+        placement.logical_to_physical_candidates,
+        placement.logical_to_physical_count,
     )
-    expected = placement.logical_to_physical_candidates[logical_ids, expected_index]
-    torch.manual_seed(17)
-
-    assert torch.equal(
-        route_dynamic_replicas(
-            logical_ids,
-            placement.logical_to_physical_candidates,
-            placement.logical_to_physical_count,
-        ),
-        expected,
+    second = route_dynamic_replicas(
+        logical_ids,
+        placement.logical_to_physical_candidates,
+        placement.logical_to_physical_count,
     )
+    assert torch.equal(first, second), "the same input must route the same way"
+
+    # Every choice is a live replica of the expert that was asked for.
+    for row in range(logical_ids.shape[0]):
+        for col in range(logical_ids.shape[1]):
+            lg = int(logical_ids[row, col])
+            live = placement.logical_to_physical_candidates[
+                lg, : int(placement.logical_to_physical_count[lg])
+            ]
+            assert int(first[row, col]) in set(live.tolist())
 
 
-@pytest.mark.unit
 def test_dynamic_policy_outputs_only_committed_candidates_and_preserves_padding():
     logical_ids = torch.tensor([[0, 2], [0, 2], [-1, 9]], dtype=torch.int32)
 

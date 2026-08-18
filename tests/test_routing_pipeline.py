@@ -194,3 +194,33 @@ class TestCapabilitiesDeclareRuntimeRequirements:
         assert st.supports_concurrent_microbatches is True
         assert st.graph_stability == "stable"
         assert st.placement_state_lifecycle == "none"
+
+
+@pytest.mark.unit
+class TestWhoRealisesTheDecision:
+    """Selection has to be separable, and both implementations have to remain.
+
+    A framework that keeps selection fused inside its own kernel can only accept
+    decisions shaped like whatever that kernel applies -- a per-expert
+    distribution. An algorithm whose choice depends on the token, which is what
+    a predictive layer needs, cannot be expressed that way at all. Declaring who
+    realises the decision is what makes the step something a policy can own.
+    """
+
+    def test_the_replica_policies_realise_their_own_decision(self):
+        for expr in ("lplb", "static", "dynamic"):
+            assert RoutingPipeline.from_value(expr).capabilities.resolves_dispatch
+
+    def test_declaring_it_replaces_selection_and_nothing_else(self):
+        """The framework keeps recording either way; only the choice moves."""
+        caps = RoutingPipeline.from_value("lplb").capabilities
+        assert caps.resolves_dispatch is True
+        # Nothing about recording, placement or graph safety changes with it.
+        assert caps.requires_post_topk_routing is True
+        assert caps.requires_placement_state is True
+
+    def test_a_pipeline_with_no_post_topk_policy_leaves_selection_alone(self):
+        """With no policy configured the framework's own selection stands."""
+        caps = RoutingPipeline.from_value("none").capabilities
+        assert caps.requires_post_topk_routing is False
+        assert caps.resolves_dispatch is False
