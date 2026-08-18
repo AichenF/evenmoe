@@ -58,6 +58,8 @@ so overlapping execution cannot overwrite another batch's LP state.
 
 from __future__ import annotations
 
+import logging
+
 from dataclasses import dataclass, replace
 from typing import Dict, Hashable, Optional, Tuple
 
@@ -74,6 +76,8 @@ from moe_load_balancer.core.types import (
     RoutingRequest,
 )
 from moe_load_balancer.kernels.lplb import LPLBKernels
+
+logger = logging.getLogger(__name__)
 
 # Sentinel preserved through the no-redundancy fallback for the
 # "-1 padded slot" convention frameworks use for invalid TopK entries.
@@ -248,17 +252,49 @@ def _build_layer_state(
     is_covered = phy2log != _PHY_UNCOVERED
 
     # Partition logicals into single-copy vs replicated.
-    log_single = torch.nonzero(log_counts == 1).flatten().to(torch.int64)
-    phy_single = log2phy[log_single, 0].to(torch.int64).contiguous()
-    log_replicated = torch.nonzero(log_counts > 1).flatten().to(torch.int64)
-    # phy_replicated: physical slots that (a) are claimed by some logical
-    # AND (b) that logical has more than one replica. Uncovered slots are
-    # masked out before the log_counts gather so the indexing stays in
-    # bounds even when ``_PHY_UNCOVERED == num_logical`` would otherwise
-    # OOB.
     safe_phy2log = phy2log.clamp(max=num_logical - 1)
+    is_replicated = log_counts > 1
+    has_redundancy = bool(is_replicated.any())
+
+    # Pad that partition so the LP has the same shape on every layer.
+    #
+    # Without this, ``num_red_log`` is however many logical experts a
+    # load-aware placement happened to give a second copy, which differs
+    # layer to layer -- a hot expert may take three copies while another
+    # takes none. Every distinct value is a distinct (nc, nv), and each of
+    # those NVRTC-compiles its own IPM, prep and post kernel: ~16 s apiece,
+    # inside the rearrangement that triggered the rebuild. Measured on
+    # DeepSeek-V3.2 at 32 redundant experts, one rearrangement compiled 17
+    # shapes and took 266 s, past vLLM's 300 s execute-model timeout; at 16
+    # it took 8 s, past DeepEP's shorter CPU-recv timeout on the peer ranks
+    # still waiting in dispatch.
+    #
+    # The padding promotes single-copy experts into the replicated set until
+    # it holds ``num_redundant`` of them. That is an identity, not an
+    # approximation: a promoted expert has exactly one replica, so its top
+    # row reads ``x_e = load_e`` and pins its own flow. Its load simply
+    # arrives at its GPU through ``B2 @ x`` instead of through the
+    # ``B1 @ t1`` base term -- same GPU, same amount, same peak. The row
+    # holds a variable no other row touches, so the constraint matrix stays
+    # full rank.
+    num_redundant = num_phy - num_logical
+    if has_redundancy and num_redundant > 0:
+        shortfall = num_redundant - int(is_replicated.sum())
+        if shortfall > 0:
+            singles = torch.nonzero(~is_replicated).flatten()
+            # Lowest ids first: every rank builds this from the same
+            # committed placement, so the rule only has to be deterministic.
+            is_replicated[singles[:shortfall]] = True
+
+    log_single = torch.nonzero(~is_replicated).flatten().to(torch.int64)
+    phy_single = log2phy[log_single, 0].to(torch.int64).contiguous()
+    log_replicated = torch.nonzero(is_replicated).flatten().to(torch.int64)
+    # phy_replicated: physical slots that (a) are claimed by some logical
+    # AND (b) that logical is in the replicated set. Uncovered slots are
+    # masked out before the gather so the indexing stays in bounds even when
+    # ``_PHY_UNCOVERED == num_logical`` would otherwise OOB.
     phy_replicated = (
-        torch.nonzero(is_covered & (log_counts[safe_phy2log] > 1))
+        torch.nonzero(is_covered & is_replicated[safe_phy2log])
         .flatten()
         .to(torch.int64)
         .contiguous()
@@ -267,7 +303,23 @@ def _build_layer_state(
     num_single = int(log_single.numel())
     num_red_log = int(log_replicated.numel())
     num_red_phy = int(phy_replicated.numel())
-    has_redundancy = num_red_log > 0
+
+    # Promotion fixes num_red_phy at 2 * num_redundant only when every
+    # physical slot is claimed by some logical. A placement that leaves
+    # redundant slots unclaimed cannot reach that target by promoting
+    # logicals, so the shape varies again and the kernels recompile. Correct,
+    # just slow -- and worth saying out loud rather than rediscovering it as
+    # another multi-minute rearrangement.
+    if has_redundancy and num_redundant > 0 and num_red_phy != 2 * num_redundant:
+        logger.warning(
+            "LPLB layer %s: %d unclaimed redundant slots leave the LP shape "
+            "at num_red_phy=%d instead of %d, so its kernels compile for this "
+            "layer alone.",
+            snapshot.layer_id,
+            2 * num_redundant - num_red_phy,
+            num_red_phy,
+            2 * num_redundant,
+        )
 
     log2phy_map_for_dispatch = log2phy.to(torch.int32).contiguous()
 
