@@ -3,7 +3,12 @@ from __future__ import annotations
 import pytest
 import torch
 
-from moe_load_balancer import MoELoadBalancer, PlacementSnapshot, RoutingPipeline
+from moe_load_balancer import (
+    DeploymentTopology,
+    MoELoadBalancer,
+    PlacementSnapshot,
+    RoutingPipeline,
+)
 
 
 def _placement() -> PlacementSnapshot:
@@ -117,3 +122,75 @@ def test_placement_commit_notifies_active_policy_without_policy_name():
 
     assert mlb.on_placement_committed(placement) is None
     assert router.seen is placement
+
+
+@pytest.mark.unit
+class TestApplicabilityIsThePolicysCall:
+    """Which deployments a policy can act on is a property of the policy.
+
+    A framework that decides it by assumption -- "L2 means replica routing, so
+    no redundant experts means nothing to do" -- switches off policies that had
+    work to do. Waterfill assigns the shared expert to a rank and does not care
+    how many replicas a routed expert has.
+    """
+
+    def test_lplb_declines_a_deployment_with_no_replicas(self):
+        pipeline = RoutingPipeline.from_value("lplb")
+        reason = pipeline.is_applicable(DeploymentTopology(num_redundant_experts=0))
+        assert reason is not None and "redundant" in reason
+
+    def test_lplb_applies_once_experts_are_replicated(self):
+        pipeline = RoutingPipeline.from_value("lplb")
+        assert pipeline.is_applicable(
+            DeploymentTopology(num_redundant_experts=16)
+        ) is None
+
+    def test_waterfill_does_not_depend_on_routed_redundancy(self):
+        pipeline = RoutingPipeline.from_value("waterfill")
+        assert pipeline.is_applicable(
+            DeploymentTopology(num_redundant_experts=0, routes_shared_expert=True)
+        ) is None
+
+    def test_waterfill_declines_a_runtime_that_cannot_dispatch_it(self):
+        pipeline = RoutingPipeline.from_value("waterfill")
+        reason = pipeline.is_applicable(
+            DeploymentTopology(num_redundant_experts=32, routes_shared_expert=False)
+        )
+        assert reason is not None and "shared expert" in reason
+
+    def test_the_reason_is_returned_not_a_bare_bool(self):
+        """A framework that disables a policy has to be able to say why."""
+        reason = RoutingPipeline.from_value("lplb").is_applicable(
+            DeploymentTopology(num_redundant_experts=0)
+        )
+        assert isinstance(reason, str) and len(reason) > 20
+
+
+@pytest.mark.unit
+class TestCapabilitiesDeclareRuntimeRequirements:
+    def test_only_the_lp_consumes_the_global_load(self):
+        assert RoutingPipeline.from_value("lplb").capabilities \
+            .consumes_global_logical_count is True
+        for expr in ("static", "dynamic"):
+            assert RoutingPipeline.from_value(expr).capabilities \
+                .consumes_global_logical_count is False
+
+    def test_staleness_tolerance_is_stated(self):
+        """The framework supplies a count one step old so the collective can
+        live outside a captured graph; a policy that could not tolerate that
+        has to be able to say so."""
+        caps = RoutingPipeline.from_value("lplb").capabilities
+        assert caps.max_input_staleness_steps == 1
+        assert RoutingPipeline.from_value("static").capabilities \
+            .max_input_staleness_steps == 0
+
+    def test_concurrency_and_graph_stability_are_per_policy(self):
+        lp = RoutingPipeline.from_value("lplb").capabilities
+        assert lp.supports_concurrent_microbatches is False
+        assert lp.graph_stability == "realloc_on_placement_change"
+        assert lp.placement_state_lifecycle == "per_placement"
+
+        st = RoutingPipeline.from_value("static").capabilities
+        assert st.supports_concurrent_microbatches is True
+        assert st.graph_stability == "stable"
+        assert st.placement_state_lifecycle == "none"

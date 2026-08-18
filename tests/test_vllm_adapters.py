@@ -252,3 +252,31 @@ def test_nearest_replica_table_ignores_padding_beyond_count():
     table = nearest_replica_table(candidates, counts, ep_rank=0, num_local_physical_experts=2)
     # Slot 1 would be "local" for rank 0, but it is past the valid count.
     assert int(table[0]) == 5
+
+
+@pytest.mark.unit
+def test_non_local_ranks_do_not_all_fall_back_to_the_same_replica():
+    """The fallback has to spread, or it concentrates what it exists to place.
+
+    vLLM keeps no per-rank dispatch table, so this one is synthesized. With 8 EP
+    ranks and 2 replicas only two ranks hold a copy; if the other six all take
+    the lowest valid slot they pile onto one replica and the result is worse
+    than the load-blind uniform choice it replaces.
+    """
+    # Logical 0 is replicated on slot 0 (rank 0) and slot 8 (rank 4).
+    candidates = torch.tensor([[0, 8, -1]])
+    counts = torch.tensor([2])
+    picks = [
+        int(nearest_replica_table(
+            candidates, counts, ep_rank=r, num_local_physical_experts=2
+        )[0])
+        for r in range(8)
+    ]
+    assert set(picks) == {0, 8}, "both replicas must be used"
+    # Neither replica may absorb everyone: a 7/1 split is the failure this
+    # guards against.
+    assert 2 <= picks.count(0) <= 6
+
+    # A rank that owns a copy still takes its own.
+    assert picks[0] == 0
+    assert picks[4] == 8

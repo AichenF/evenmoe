@@ -139,14 +139,25 @@ def nearest_replica_table(
     high = low + num_local_physical_experts
     is_local = valid & (candidates >= low) & (candidates < high)
 
-    # Rank preference: local replicas first, then any valid one, in slot order.
+    # Rank preference: a local replica first, then any valid one.
     #   local valid -> 0, non-local valid -> 1, invalid -> 2
     priority = torch.where(
         is_local,
         torch.zeros_like(candidates),
         torch.where(valid, torch.ones_like(candidates), torch.full_like(candidates, 2)),
     )
-    key = priority * (max_replicas + 1) + slot_index.unsqueeze(0)
+
+    # Among *non-local* replicas the tie is broken by a rank-rotated slot order
+    # rather than by slot 0. With 8 EP ranks and 2 replicas only two ranks hold
+    # a copy; if the other six all fall back to the lowest slot they pile onto
+    # one replica, which concentrates the very traffic this table exists to
+    # place well -- worse than the uniform choice it replaces. Rotating spreads
+    # them, and leaves the local case untouched.
+    rotated = (slot_index.unsqueeze(0) - ep_rank) % counts.clamp(min=1).unsqueeze(-1).to(
+        slot_index.dtype
+    )
+    tiebreak = torch.where(is_local, slot_index.unsqueeze(0), rotated)
+    key = priority * (max_replicas + 1) + tiebreak
     chosen = key.argmin(dim=-1, keepdim=True)
     return candidates.gather(-1, chosen).squeeze(-1)
 

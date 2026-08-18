@@ -8,6 +8,7 @@ from moe_load_balancer.core.l2 import (
 )
 from moe_load_balancer.core.orchestrator import MoELoadBalancer
 from moe_load_balancer.core.routing_pipeline import (
+    DeploymentTopology,
     RoutingCapabilities,
     RoutingPipeline,
 )
@@ -40,6 +41,7 @@ __all__ = [
     "PlacementStats",
     "PlacementTopology",
     "RoutingDecision",
+    "DeploymentTopology",
     "RoutingCapabilities",
     "RoutingCollectives",
     "RoutingLoadHistory",

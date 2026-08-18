@@ -9,6 +9,7 @@ from torch import Tensor
 
 from moe_load_balancer.core.l2 import TokenRouter
 from moe_load_balancer.core.types import (
+    ReplicaSelection,
     RoutingDecision,
     RoutingPhase,
     RoutingPolicyConfig,
@@ -135,6 +136,49 @@ def _safe_logical_ids(
     return safe_ids, valid
 
 
+
+def one_hot_replica_shares(
+    default_physical_for_logical: Tensor,
+    candidates: Tensor,
+    counts: Tensor,
+) -> Tensor:
+    """Share table putting all of each expert's traffic on its default replica.
+
+    Static routing already decides a per-expert replica; a share table is the
+    same decision written in the layout a caller can apply itself. Padding
+    columns stay zero so a consumer can walk a row without a separate count.
+    """
+
+    shares = torch.zeros(candidates.shape, dtype=torch.float32, device=candidates.device)
+    slot = torch.arange(candidates.shape[1], device=candidates.device)
+    live = slot.unsqueeze(0) < counts.unsqueeze(-1).to(slot.dtype)
+    chosen = live & (candidates == default_physical_for_logical.unsqueeze(-1))
+    shares[chosen] = 1.0
+    # An expert whose default is absent from its candidate list would otherwise
+    # get an all-zero row, which a consumer reads as "no preference" and fills
+    # with its own choice. Fall back to the first live column so the policy's
+    # answer stays deterministic.
+    missing = ~chosen.any(dim=-1) & (counts > 0)
+    if bool(missing.any()):
+        shares[missing, 0] = 1.0
+    return shares
+
+
+def uniform_replica_shares(candidates: Tensor, counts: Tensor) -> Tensor:
+    """Share table spreading each expert's traffic evenly over its replicas.
+
+    This is what dynamic routing samples per token, expressed once per expert.
+    """
+
+    slot = torch.arange(candidates.shape[1], device=candidates.device)
+    live = slot.unsqueeze(0) < counts.unsqueeze(-1).to(slot.dtype)
+    safe = counts.clamp(min=1).to(torch.float32).unsqueeze(-1)
+    return torch.where(
+        live,
+        torch.ones(candidates.shape, dtype=torch.float32, device=candidates.device) / safe,
+        torch.zeros(candidates.shape, dtype=torch.float32, device=candidates.device),
+    )
+
 class StaticL2Router(TokenRouter):
     """Deterministic routing through the framework-selected replica map."""
 
@@ -152,6 +196,27 @@ class StaticL2Router(TokenRouter):
             raise ValueError(
                 "Static replica routing requires " "PlacementSnapshot.default_physical_for_logical."
             )
+        if request.defer_dispatch:
+            # The caller applies the split itself. Runtimes that fuse replica
+            # selection with expert-load recording cannot take per-token ids
+            # without also taking over the recording, so a policy that ignores
+            # this request is simply unusable there.
+            return RoutingDecision(
+                routed_physical_topk_ids=request.logical_topk_ids,
+                topk_weights=request.topk_weights,
+                metadata={
+                    "policy": policy.name,
+                    "replica_selection": ReplicaSelection(
+                        probability=one_hot_replica_shares(
+                            default_map,
+                            request.placement.logical_to_physical_candidates,
+                            request.placement.logical_to_physical_count,
+                        ),
+                        candidates=request.placement.logical_to_physical_candidates,
+                    ),
+                },
+            )
+
         physical_ids = route_static_replicas(
             request.logical_topk_ids,
             default_map,
@@ -175,6 +240,22 @@ class DynamicL2Router(TokenRouter):
     ) -> RoutingDecision:
         if request.placement is None:
             raise ValueError("Dynamic replica routing requires a committed placement.")
+        if request.defer_dispatch:
+            return RoutingDecision(
+                routed_physical_topk_ids=request.logical_topk_ids,
+                topk_weights=request.topk_weights,
+                metadata={
+                    "policy": policy.name,
+                    "replica_selection": ReplicaSelection(
+                        probability=uniform_replica_shares(
+                            request.placement.logical_to_physical_candidates,
+                            request.placement.logical_to_physical_count,
+                        ),
+                        candidates=request.placement.logical_to_physical_candidates,
+                    ),
+                },
+            )
+
         physical_ids = route_dynamic_replicas(
             request.logical_topk_ids,
             request.placement.logical_to_physical_candidates,
