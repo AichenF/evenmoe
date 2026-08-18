@@ -242,6 +242,41 @@ def _dispatch_module(max_copies: int, block_dim: int) -> "Module":
     )
 
 
+
+# floor(2^32 / phi) -- the classic Knuth multiplicative hash constant.
+_KNUTH_MULTIPLIER = 2654435769
+
+
+_DRAW_CACHE: dict = {}
+
+
+def _uniform_draw(n: int, topk: int, device) -> torch.Tensor:
+    """One draw per slot, from the token index rather than from an RNG.
+
+    The split this samples from is the policy's decision; which token lands on
+    which replica is the mechanical step that realises it. Drawing that step
+    from `torch.rand` makes it neither reproducible nor agreed upon: ranks that
+    hold different experts but see the same tokens -- tensor-parallel peers,
+    whose router output is replicated -- each draw their own numbers and can
+    send one token to two different replicas of its expert.
+
+    A hash of the token index has neither problem and costs the same. It is
+    also the draw a fused runtime uses when it applies the share table inside
+    its own kernel, so the same decision now realises identically wherever it
+    is executed.
+    """
+    # Depends only on the shape, so it is built once per shape rather than per
+    # call: recomputing it every forward costs more than the dispatch it feeds.
+    key = (n, topk, str(device))
+    draw = _DRAW_CACHE.get(key)
+    if draw is None:
+        slot = torch.arange(n, device=device, dtype=torch.int64)
+        token_idx = slot // max(topk, 1)
+        hashed = (token_idx * _KNUTH_MULTIPLIER) & 0xFFFFFFFF
+        draw = (hashed.to(torch.float32) / 4294967296.0).contiguous()
+        _DRAW_CACHE[key] = draw
+    return draw
+
 def dispatch_probability(
     topk_ids: torch.Tensor,
     log2phy_prob: torch.Tensor,
@@ -268,7 +303,7 @@ def dispatch_probability(
     map32 = log2phy_map.contiguous().to(torch.int32)
 
     out = torch.empty(n, dtype=torch.int32, device=topk_ids.device)
-    random_vals = torch.rand(n, dtype=torch.float32, device=topk_ids.device)
+    random_vals = _uniform_draw(n, original_shape[-1], topk_ids.device)
     module = _dispatch_module(max_copies, DISPATCH_BLOCK_DIM)
     module.dispatch_probability(out, flat_ids, log2phy_prob, map32, random_vals)
     return out.view(original_shape).to(topk_ids.dtype)

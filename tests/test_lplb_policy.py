@@ -776,3 +776,49 @@ class TestNoRedundancyNeedsNoCount:
         )
 
         assert decision.metadata["planned_rank_load"] is not None
+
+
+class TestTheDrawIsPartOfTheDecision:
+    """Which token lands on which replica must not depend on who applies it.
+
+    The share table is the policy's decision; turning it into per-token ids is
+    the mechanical step that realises it. If each runtime draws that step its
+    own way, one algorithm produces different routing on different frameworks --
+    and an RNG additionally makes it unreproducible and leaves tensor-parallel
+    peers, whose router output is replicated, free to send one token to two
+    different replicas of its expert.
+    """
+
+    def test_the_draw_is_a_pure_function_of_the_token_index(self):
+        from moe_load_balancer.kernels.lplb.cuda_solver import _uniform_draw
+
+        a = _uniform_draw(16, 4, "cpu")
+        b = _uniform_draw(16, 4, "cpu")
+        assert torch.equal(a, b)
+
+    def test_slots_of_one_token_share_a_draw(self):
+        """The choice is per token, not per slot: a token's k routed experts are
+        all decided from the same draw, as they are wherever this is applied
+        inside a fused kernel."""
+        from moe_load_balancer.kernels.lplb.cuda_solver import _uniform_draw
+
+        topk = 4
+        draw = _uniform_draw(3 * topk, topk, "cpu")
+        for token in range(3):
+            row = draw[token * topk : (token + 1) * topk]
+            assert torch.equal(row, row[0].expand_as(row))
+
+    def test_it_matches_the_hash_a_fused_runtime_uses(self):
+        """Same constant, same arithmetic, same result -- so the decision
+        realises identically whether the policy applies it or the framework
+        does."""
+        from moe_load_balancer.kernels.lplb.cuda_solver import (
+            _KNUTH_MULTIPLIER,
+            _uniform_draw,
+        )
+
+        topk, tokens = 2, 8
+        draw = _uniform_draw(tokens * topk, topk, "cpu")
+        for token in range(tokens):
+            expected = ((token * _KNUTH_MULTIPLIER) & 0xFFFFFFFF) / 4294967296.0
+            assert abs(float(draw[token * topk]) - expected) < 1e-6
