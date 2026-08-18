@@ -328,3 +328,89 @@ class TestDeferredDispatchIsHonouredByEveryReplicaPolicy:
         )
         assert "replica_selection" not in decision.metadata
         assert decision.routed_physical_topk_ids.tolist() == [[4, 1], [2, 3]]
+
+
+@pytest.mark.unit
+class TestTheReplicaPoliciesDoWhatTheyAreNamedFor:
+    """Behaviour, not capability bits: a policy can declare anything.
+
+    The fixture is 64 logical experts over 8 ranks, 16 of them replicated --
+    the shape these policies actually run in.
+    """
+
+    NL, NP, EP = 64, 80, 8
+
+    @classmethod
+    def _maps(cls):
+        l2p = torch.full((cls.NL, 2), -1, dtype=torch.int64)
+        l2p[:, 0] = torch.arange(cls.NL)
+        l2p[:16, 1] = torch.arange(cls.NL, cls.NP)
+        counts = torch.ones(cls.NL, dtype=torch.int64)
+        counts[:16] = 2
+        return l2p, counts
+
+    def test_static_sends_an_expert_to_exactly_one_replica(self):
+        from moe_load_balancer.adapters.vllm import nearest_replica_table
+
+        l2p, counts = self._maps()
+        torch.manual_seed(0)
+        topk = torch.randint(0, self.NL, (2048, 6), dtype=torch.int64)
+        defaults = nearest_replica_table(
+            l2p, counts, ep_rank=3, num_local_physical_experts=self.NP // self.EP
+        )
+        ids = route_static_replicas(topk, defaults)
+        for lg in range(self.NL):
+            m = topk == lg
+            if m.any():
+                assert ids[m].unique().numel() == 1, f"logical {lg} split"
+
+    def test_static_prefers_a_replica_the_rank_owns(self):
+        """Pinning to a remote copy when a local one exists is the opposite of
+        what this policy is for."""
+        from moe_load_balancer.adapters.vllm import nearest_replica_table
+
+        l2p, counts = self._maps()
+        per_rank = self.NP // self.EP
+        owners = {}
+        for lg in range(16):
+            for j in range(2):
+                owners.setdefault(int(l2p[lg, j]) // per_rank, []).append(lg)
+        assert owners, "fixture must place replicas on some ranks"
+        for rank, experts in owners.items():
+            d = nearest_replica_table(
+                l2p, counts, ep_rank=rank, num_local_physical_experts=per_rank
+            )
+            for lg in experts:
+                assert int(d[lg]) // per_rank == rank
+
+    def test_dynamic_spreads_and_repeats(self):
+        l2p, counts = self._maps()
+        torch.manual_seed(0)
+        topk = torch.randint(0, self.NL, (2048, 6), dtype=torch.int64)
+        ids = route_dynamic_replicas(topk, l2p, counts)
+
+        m = topk == 0
+        a = int((ids[m] == l2p[0, 0]).sum())
+        b = int((ids[m] == l2p[0, 1]).sum())
+        assert abs(a - b) / max(a + b, 1) < 0.15, f"uneven: {a} vs {b}"
+        assert torch.equal(ids, route_dynamic_replicas(topk, l2p, counts))
+        # A single-copy expert has nowhere else to go.
+        assert bool((ids[topk >= 16] == topk[topk >= 16]).all())
+
+    def test_dynamic_agrees_across_ranks_that_see_the_same_token(self):
+        """Tensor-parallel peers hold different experts and see the same
+        tokens. Disagreeing here sends one token to two replicas of its
+        expert, which is why the draw comes from the token index and not from
+        an RNG."""
+        l2p, counts = self._maps()
+        torch.manual_seed(3)
+        topk = torch.randint(0, self.NL, (512, 6), dtype=torch.int64)
+        assert torch.equal(
+            route_dynamic_replicas(topk, l2p, counts),
+            route_dynamic_replicas(topk, l2p, counts),
+        )
+        # And it is a function of position, not a constant.
+        assert not torch.equal(
+            route_dynamic_replicas(topk, l2p, counts),
+            route_dynamic_replicas(torch.roll(topk, 1, 0), l2p, counts),
+        )
