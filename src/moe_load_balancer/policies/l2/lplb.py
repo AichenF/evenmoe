@@ -79,6 +79,16 @@ from moe_load_balancer.kernels.lplb import LPLBKernels
 
 logger = logging.getLogger(__name__)
 
+# How coarsely the LP's row count is rounded. Every distinct value NVRTC-
+# compiles three kernels, and every row of padding is paid by every solve, so
+# this is the dial between compile count and solve time. 8 gives at most
+# num_redundant/8 shapes and at most 7 rows of slack.
+_SHAPE_BUCKET = 8
+
+
+def _ceil_to(value: int, multiple: int) -> int:
+    return -(-value // multiple) * multiple
+
 # Sentinel preserved through the no-redundancy fallback for the
 # "-1 padded slot" convention frameworks use for invalid TopK entries.
 _INVALID_ID = -1
@@ -279,7 +289,24 @@ def _build_layer_state(
     # full rank.
     num_redundant = num_phy - num_logical
     if has_redundancy and num_redundant > 0:
-        shortfall = num_redundant - int(is_replicated.sum())
+        # Round up to a bucket rather than all the way to num_redundant.
+        #
+        # Padding every layer to the maximum does make the shape constant, but
+        # the solve is compute-bound in nc: measured on H20 at 32 redundant
+        # experts, a layer that needed nc=16 takes 75 us and one that needs
+        # nc=40 takes 301 us. Flattening everything to 40 costs +83% on the
+        # average solve, or +8.4 ms per forward across 61 layers -- a permanent
+        # per-batch tax traded for a one-off compile, on a policy that already
+        # loses throughput to its solve.
+        #
+        # Bucketing keeps both: at most num_redundant/_SHAPE_BUCKET distinct
+        # shapes to compile, and at most _SHAPE_BUCKET-1 rows of padding on any
+        # layer instead of up to num_redundant - num_red_log.
+        target = min(
+            _ceil_to(int(is_replicated.sum()), _SHAPE_BUCKET),
+            num_redundant,
+        )
+        shortfall = target - int(is_replicated.sum())
         if shortfall > 0:
             singles = torch.nonzero(~is_replicated).flatten()
             # Lowest ids first: every rank builds this from the same

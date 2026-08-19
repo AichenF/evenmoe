@@ -33,7 +33,7 @@ import torch
 sys.path.insert(0, "/root/yuny/mlb-fixedshape/src")
 
 from moe_load_balancer.core.types import PlacementSnapshot
-from moe_load_balancer.policies.l2.lplb import _build_layer_state
+from moe_load_balancer.policies.l2.lplb import _SHAPE_BUCKET, _build_layer_state
 
 NUM_LOGICAL, NUM_GPUS = 64, 8
 
@@ -86,27 +86,56 @@ SPREADS = {
 }
 
 
-def test_shape_is_the_same_however_the_replicas_fell():
+def test_shape_count_is_bounded_by_the_bucket():
+    """The claim is a bound, not uniqueness.
+
+    Padding every layer to num_redundant would give exactly one shape, but the
+    solve is compute-bound in nc -- measured on H20, nc=16 takes 75 us and
+    nc=40 takes 301 us -- so flattening to the maximum buys one compile with a
+    permanent per-batch tax. Bucketing caps the compiles instead.
+    """
+    num_redundant = 16
     shapes = {}
     for name, spread in SPREADS.items():
-        state = _build_layer_state(make_snapshot(spread, 16), NUM_GPUS, 1e4)
+        state = _build_layer_state(make_snapshot(spread, num_redundant), NUM_GPUS, 1e4)
         shapes[name] = (
             tuple(state.A_base.shape),
             int(state.log_single.numel()),
             int(state.log_replicated.numel()),
             int(state.phy_replicated.numel()),
         )
-    distinct = set(shapes.values())
-    assert len(distinct) == 1, (
-        "one shape per placement is the whole bug; got " + repr(shapes)
-    )
-    (nc, nv_minus_1), num_single, num_red_log, num_red_phy = shapes["pairs"]
-    # nc = num_redundant + num_gpus, and the replicated physical block is
-    # 2 * num_redundant: num_redundant real extra copies plus one base copy
-    # for each of the num_redundant logicals now in the set.
-    assert (num_red_log, num_red_phy) == (16, 32)
-    assert num_single == NUM_LOGICAL - 16
-    assert nc == 16 + NUM_GPUS
+    distinct = {v[0] for v in shapes.values()}
+    ceiling = -(-num_redundant // _SHAPE_BUCKET)
+    assert len(distinct) <= ceiling, (
+        f"at most {ceiling} shapes may survive bucketing; got {shapes}")
+    # Without bucketing these four placements give four; the bound has to be
+    # doing work, not just being satisfied by a coincidence.
+    assert len(distinct) < len(SPREADS), f"bucketing collapsed nothing: {shapes}"
+
+    for name, (shape, num_single, num_red_log, num_red_phy) in shapes.items():
+        # Everything else follows from num_red_log, which is what gets bucketed.
+        assert num_red_log % _SHAPE_BUCKET == 0, (name, num_red_log)
+        assert num_red_phy == num_red_log + num_redundant, name
+        assert num_single == NUM_LOGICAL - num_red_log, name
+        assert shape[0] == num_red_log + NUM_GPUS, name
+
+
+def test_padding_per_layer_stays_under_one_bucket():
+    """The cost side of the same bound: no layer may carry more slack than a
+    bucket's worth, or the solve it pays for every batch drifts back up."""
+    for num_redundant in (8, 16, 32):
+        for name, spread in list(SPREADS.items()) + [
+            ("many", [(i, 1) for i in range(min(num_redundant, 16))]),
+        ]:
+            total = sum(n for _, n in spread)
+            if total != num_redundant:
+                continue
+            state = _build_layer_state(make_snapshot(spread, num_redundant), NUM_GPUS, 1e4)
+            replica_counts = (state.log2phy >= 0).sum(dim=1)
+            promoted = int((replica_counts[state.log_replicated] == 1).sum())
+            assert promoted < _SHAPE_BUCKET, (
+                f"num_redundant={num_redundant} {name}: padded {promoted} rows, "
+                f"more than one bucket")
 
 
 def test_shape_holds_across_redundancy_levels_within_a_level():
@@ -122,7 +151,8 @@ def test_shape_holds_across_redundancy_levels_within_a_level():
             tuple(_build_layer_state(make_snapshot(s, num_redundant), NUM_GPUS, 1e4).A_base.shape)
             for s in spreads
         }
-        assert len(shapes) == 1, f"num_redundant={num_redundant}: {shapes}"
+        ceiling = -(-num_redundant // _SHAPE_BUCKET)
+        assert len(shapes) <= ceiling, f"num_redundant={num_redundant}: {shapes}"
 
 
 def gpu_load_from_lp(state, counts_norm):
@@ -164,7 +194,7 @@ def test_promotion_moves_load_between_terms_not_between_gpus():
     # while testing nothing about promotion at all.
     replica_counts = (state.log2phy >= 0).sum(dim=1)
     promoted = int((replica_counts[state.log_replicated] == 1).sum())
-    assert promoted == 15, f"nothing was promoted, this test proves nothing ({promoted})"
+    assert promoted > 0, "nothing was promoted, so this test proves nothing"
 
     base, B2 = gpu_load_from_lp(state, counts_norm)
 
@@ -218,7 +248,7 @@ def test_promoted_expert_cannot_be_routed_anywhere():
             promoted += 1
         else:
             genuine += 1
-    assert promoted == 15 and genuine == 1, (promoted, genuine)
+    assert promoted > 0 and genuine == 1, (promoted, genuine)
 
 
 def test_constraint_matrix_stays_full_rank():
