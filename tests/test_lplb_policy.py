@@ -165,6 +165,7 @@ class _RecordingKernels:
 
     calls: List[_KernelCall] = field(default_factory=list)
     warmup_shapes: List[Tuple[int, int]] = field(default_factory=list)
+    precompiled: List[dict] = field(default_factory=list)
     # Identity tracking — verifies buffer reuse across calls.
     last_A_full_id: Optional[int] = None
     last_x_id: Optional[int] = None
@@ -177,6 +178,12 @@ class _RecordingKernels:
 
     def warmup(self, nc, nv, num_iters, device):
         self.warmup_shapes.append((nc, nv))
+
+    def warmup_shape(self, **kwargs):
+        # Deliberately not recorded in warmup_shapes: that list is what the
+        # per-layer warmup assertions count, and precompiling the set up front
+        # is a different event.
+        self.precompiled.append(kwargs)
 
     def prep_lp_inputs(
         self, A_full, b, t1, global_counts, log_single, log_replicated, B1, A_base_row_sum

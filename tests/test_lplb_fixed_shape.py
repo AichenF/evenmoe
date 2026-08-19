@@ -302,3 +302,90 @@ def test_ordinary_placements_raise_no_warning(caplog):
                 _build_layer_state(make_snapshot(spread, num_redundant), NUM_GPUS, 1e4)
             assert not caplog.records, (
                 f"num_redundant={num_redundant} {name}: {caplog.text}")
+
+
+def test_enumerated_shape_set_covers_everything_that_can_occur():
+    """Precompiling is only worth anything if the enumeration is complete.
+
+    The set is derived in closed form from num_redundant and the bucket size,
+    without looking at any load. If a placement can produce a shape outside it,
+    that shape compiles on first use -- inside whichever rearrangement first
+    produces it, which is the stall the precompile exists to remove. A missed
+    shape is therefore not a small loss of coverage; it reproduces the original
+    bug for that shape.
+    """
+    import random
+
+    from moe_load_balancer.policies.l2.lplb import bucketed_shape_set
+
+    rng = random.Random(0)
+    for num_redundant in (8, 16, 32):
+        declared = {
+            (s["nc"], s["nv"], s["num_single"], s["num_red_log"], s["num_red_phy"])
+            for s in bucketed_shape_set(NUM_LOGICAL, NUM_LOGICAL + num_redundant,
+                                        NUM_GPUS, 2)
+        }
+        seen = set()
+        for _ in range(60):
+            # Hand the redundant copies out at random, the way a load-aware L1
+            # does: a few hot experts take several, most take none.
+            left, extra = num_redundant, []
+            while left:
+                take = rng.randint(1, min(left, 4))
+                extra.append((len(extra), take))
+                left -= take
+            state = _build_layer_state(
+                make_snapshot(extra, num_redundant), NUM_GPUS, 1e4)
+            num_red_log = int(state.log_replicated.numel())
+            shape = (
+                state.A_base.shape[0],
+                state.A_base.shape[1] + 1,
+                int(state.log_single.numel()),
+                num_red_log,
+                int(state.phy_replicated.numel()),
+            )
+            seen.add(shape)
+            assert shape in declared, (
+                f"num_redundant={num_redundant}: {shape} occurs but was never "
+                f"precompiled; declared={sorted(declared)}")
+        # And the enumeration must not be bloated: a declared shape that no
+        # placement produces costs minutes of NVRTC for a kernel no forward
+        # ever launches. The set size is exactly the number of buckets.
+        assert seen, "generated no placements"
+        assert len(declared) == -(-num_redundant // _SHAPE_BUCKET), (
+            f"num_redundant={num_redundant}: declared {len(declared)} shapes, "
+            f"expected {-(-num_redundant // _SHAPE_BUCKET)}")
+        assert seen <= declared
+
+
+def test_the_whole_shape_set_is_compiled_before_the_first_solve():
+    """Precompiling has to actually happen, and happen once.
+
+    The point is to move NVRTC out of the rearrangement, so it has to fire on
+    the first layer prepared -- which the framework does after weight loading
+    and before serving -- and not again per layer afterwards.
+    """
+    import sys as _sys
+
+    _sys.path.insert(0, "/root/yuny/mlb-fixedshape/tests")
+    from test_lplb_policy import _RecordingKernels
+
+    from moe_load_balancer.policies.l2.lplb import (
+        LPLBL2Router,
+        bucketed_shape_set,
+    )
+
+    kernels = _RecordingKernels()
+    router = LPLBL2Router(kernels=kernels, num_gpus=NUM_GPUS)
+    num_redundant = 16
+    expected = bucketed_shape_set(NUM_LOGICAL, NUM_LOGICAL + num_redundant, NUM_GPUS, 2)
+
+    for layer_id in range(4):
+        router.prepare_layer(
+            make_snapshot(SPREADS["pairs"], num_redundant, layer_id=layer_id))
+
+    assert len(kernels.precompiled) == len(expected), (
+        f"expected the set compiled once ({len(expected)} shapes), "
+        f"got {len(kernels.precompiled)} calls across 4 layers")
+    assert {(s["nc"], s["nv"]) for s in kernels.precompiled} == \
+        {(s["nc"], s["nv"]) for s in expected}

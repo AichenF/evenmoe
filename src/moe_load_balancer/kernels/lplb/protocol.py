@@ -25,6 +25,11 @@ class LPLBKernels(Protocol):
         device: TensorLike,
     ) -> None: ...
 
+    # Optional. Compiles every kernel a shape needs, so a runtime can pay
+    # that cost before serving instead of inside a rearrangement. Backends
+    # that omit it simply compile lazily.
+    def warmup_shape(self, **kwargs) -> None: ...
+
     def prep_lp_inputs(
         self,
         a_full: TensorLike,

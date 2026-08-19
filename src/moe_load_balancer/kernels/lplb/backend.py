@@ -37,6 +37,9 @@ class CUDALPLBKernels:
     def warmup(self, nc: int, nv: int, num_iters: int, device: Any) -> None:
         self._cuda.warmup(nc=nc, nv=nv, num_iters=num_iters, device=device)
 
+    def warmup_shape(self, **kwargs) -> None:
+        self._cuda.warmup_shape(**kwargs)
+
     def prep_lp_inputs(
         self,
         a_full,

@@ -109,6 +109,33 @@ def warmup(
     logger.info(f"LPLB CUDA IPM solver: warmed up for (NC={nc}, NV={nv})")
 
 
+def warmup_shape(
+    *,
+    nc: int,
+    nv: int,
+    num_single: int,
+    num_red_log: int,
+    num_gpus: int,
+    num_logical: int,
+    max_copies: int,
+    num_red_phy: int,
+    num_iters: int = DEFAULT_NUM_ITERS,
+    device: str = "cuda",
+) -> None:
+    """Compile all three kernels for one LP shape.
+
+    ``warmup`` covers the IPM alone, but a shape needs three modules and the
+    other two are compiled lazily on first use -- inside a forward, on the
+    serving path. The prep module is in fact the most prolific of the three
+    (53 cached shapes against the IPM's 41 on this machine), so warming only
+    the solver leaves most of the cost exactly where it hurts.
+    """
+    warmup(nc=nc, nv=nv, num_iters=num_iters, device=device)
+    # @cache_once, so building the module is the compile; nothing to launch.
+    _prep_module(nc, nv, num_single, num_red_log, num_gpus, DEFAULT_BLOCK_DIM)
+    _post_module(num_logical, max_copies, num_single, num_red_phy, DEFAULT_BLOCK_DIM)
+
+
 def solve_ipm(
     A: torch.Tensor,
     b: torch.Tensor,

@@ -89,6 +89,41 @@ _SHAPE_BUCKET = 8
 def _ceil_to(value: int, multiple: int) -> int:
     return -(-value // multiple) * multiple
 
+
+def bucketed_shape_set(num_logical: int, num_phy: int, num_gpus: int, max_copies: int):
+    """Every LP shape this deployment can produce, in closed form.
+
+    Bucketing makes the set small, but small is not the same as absent: the
+    shapes it does contain are still NVRTC-compiled on first use, and first use
+    is inside whichever rearrangement first produces them. Since the set does
+    not depend on the observed load -- only on how many redundant slots exist
+    and how coarsely the row count is rounded -- it can be enumerated and
+    compiled before serving starts instead.
+
+    Returns dicts shaped for :func:`cuda_solver.warmup_shape`.
+    """
+    num_redundant = num_phy - num_logical
+    if num_redundant <= 0:
+        return []
+    targets = sorted(
+        {min(_ceil_to(k, _SHAPE_BUCKET), num_redundant)
+         for k in range(1, num_redundant + 1)}
+    )
+    shapes = []
+    for num_red_log in targets:
+        num_red_phy = num_red_log + num_redundant
+        shapes.append({
+            "nc": num_red_log + num_gpus,
+            "nv": num_red_phy + num_gpus + 2,
+            "num_single": num_logical - num_red_log,
+            "num_red_log": num_red_log,
+            "num_gpus": num_gpus,
+            "num_logical": num_logical,
+            "max_copies": max_copies,
+            "num_red_phy": num_red_phy,
+        })
+    return shapes
+
 # Sentinel preserved through the no-redundancy fallback for the
 # "-1 padded slot" convention frameworks use for invalid TopK entries.
 _INVALID_ID = -1
@@ -578,6 +613,8 @@ class LPLBL2Router(TokenRouter):
         self._layer_state: Dict[int, _LPLBLayerState] = {}
         # Mutable LP workspaces cannot be shared by overlapping CUDA graphs.
         self._execution_state: Dict[Tuple[int, Hashable], _LPLBLayerState] = {}
+        # The shape set is compiled once per process, on the first layer seen.
+        self._warmed_shape_set = False
 
     def prepare_layer(self, snapshot: PlacementSnapshot) -> None:
         """Install state for the framework's newly committed placement.
@@ -799,7 +836,43 @@ class LPLBL2Router(TokenRouter):
         self._layer_state[layer_id] = state
         return state
 
+    def _warmup_shape_set(self, snapshot: PlacementSnapshot) -> None:
+        """Compile the whole shape set once, on the first layer prepared.
+
+        The framework announces its initial placement after weight loading and
+        before serving, so this lands off the critical path. Leaving it lazy
+        instead puts the compiles inside a rearrangement, where a stall is
+        measured against watchdogs: 266 s of compiling once tripped vLLM's
+        300 s execute-model timeout and killed every engine core.
+        """
+        if self._warmed_shape_set:
+            return
+        self._warmed_shape_set = True
+        shapes = bucketed_shape_set(
+            snapshot.num_logical_experts,
+            snapshot.num_physical_experts,
+            self.num_gpus,
+            int(snapshot.logical_to_physical_candidates.shape[1]),
+        )
+        if not shapes:
+            return
+        # Optional on purpose: precompiling is an optimisation, and a backend
+        # that cannot do it should fall back to compiling lazily rather than
+        # fail to run at all.
+        warm = getattr(self._kernels, "warmup_shape", None)
+        if warm is None:
+            return
+        device = snapshot.logical_to_physical_candidates.device
+        for shape in shapes:
+            warm(num_iters=self.ipm_iters, device=device, **shape)
+        logger.info(
+            "LPLB: precompiled %d LP shapes (nc %s) before serving",
+            len(shapes),
+            ",".join(str(s["nc"]) for s in shapes),
+        )
+
     def _build_and_warmup_layer_state(self, snapshot: PlacementSnapshot) -> _LPLBLayerState:
+        self._warmup_shape_set(snapshot)
         state = _build_layer_state(snapshot, self.num_gpus, self.big_m_penalty)
 
         # Warmup is per-shape; only meaningful when LP is actually used.
