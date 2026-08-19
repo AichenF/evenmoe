@@ -279,3 +279,26 @@ def test_a_layer_with_no_redundancy_is_left_alone():
     snap = make_snapshot([], 0)
     state = _build_layer_state(snap, NUM_GPUS, 1e4)
     assert not state.has_redundancy
+
+
+def test_ordinary_placements_raise_no_warning(caplog):
+    """The degradation warning must stay quiet on placements that are fine.
+
+    It exists to make an unclaimed-slot placement visible instead of letting it
+    resurface as another multi-minute rearrangement. A warning that also fires
+    on ordinary placements teaches everyone to ignore it, which costs exactly
+    the visibility it was added for -- and the first version of it did, because
+    it still compared against the pad-to-maximum target after the padding moved
+    to buckets.
+    """
+    import logging
+
+    for num_redundant in (8, 16, 32):
+        for name, spread in SPREADS.items():
+            if sum(n for _, n in spread) != num_redundant:
+                continue
+            with caplog.at_level(logging.WARNING):
+                caplog.clear()
+                _build_layer_state(make_snapshot(spread, num_redundant), NUM_GPUS, 1e4)
+            assert not caplog.records, (
+                f"num_redundant={num_redundant} {name}: {caplog.text}")

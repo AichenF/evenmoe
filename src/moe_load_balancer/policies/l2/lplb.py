@@ -337,15 +337,22 @@ def _build_layer_state(
     # logicals, so the shape varies again and the kernels recompile. Correct,
     # just slow -- and worth saying out loud rather than rediscovering it as
     # another multi-minute rearrangement.
-    if has_redundancy and num_redundant > 0 and num_red_phy != 2 * num_redundant:
+    # Bucketing fixes num_red_phy only because it is determined by num_red_log:
+    # every replicated logical brings its base copy, and the redundant slots
+    # bring one extra each. A placement that leaves redundant slots unclaimed
+    # breaks that identity, so the shape varies again and the kernels recompile
+    # for that layer alone. Correct, just slow -- and worth saying out loud
+    # rather than rediscovering it as another multi-minute rearrangement.
+    expected_red_phy = num_red_log + num_redundant
+    if has_redundancy and num_redundant > 0 and num_red_phy != expected_red_phy:
         logger.warning(
             "LPLB layer %s: %d unclaimed redundant slots leave the LP shape "
             "at num_red_phy=%d instead of %d, so its kernels compile for this "
             "layer alone.",
             snapshot.layer_id,
-            2 * num_redundant - num_red_phy,
+            expected_red_phy - num_red_phy,
             num_red_phy,
-            2 * num_redundant,
+            expected_red_phy,
         )
 
     log2phy_map_for_dispatch = log2phy.to(torch.int32).contiguous()
