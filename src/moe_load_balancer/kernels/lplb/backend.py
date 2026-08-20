@@ -83,5 +83,7 @@ class CUDALPLBKernels:
             log2phy,
         )
 
-    def dispatch_probability(self, topk_ids, log2phy_prob, log2phy_map):
-        return self._cuda.dispatch_probability(topk_ids, log2phy_prob, log2phy_map)
+    def dispatch_probability(self, topk_ids, log2phy_prob, log2phy_map, **kwargs):
+        return self._cuda.dispatch_probability(
+            topk_ids, log2phy_prob, log2phy_map, **kwargs
+        )

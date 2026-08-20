@@ -37,6 +37,17 @@ __global__ void dispatch_probability_kernel(
     const float* __restrict__ log2phy_prob,   // (NUM_LOGICAL, MAX_COPIES)
     const int32_t* __restrict__ log2phy_map,  // (NUM_LOGICAL, MAX_COPIES)
     const float* __restrict__ random_vals,    // (N,)
+    // Optional load accounting. A runtime null check rather than a template
+    // parameter on purpose: every distinct template instantiation is its own
+    // NVRTC compile, and this kernel already multiplies over MAX_COPIES. One
+    // rearrangement compiling a fresh shape cost 266 s in production and tripped
+    // the framework's execute-model timeout; doubling the variant count to save
+    // a predicted-not-taken branch is a bad trade.
+    int32_t* __restrict__ expert_load,        // (out_size,) or nullptr
+    const int32_t* __restrict__ record_enabled,      // scalar or nullptr
+    const int32_t* __restrict__ num_unpadded_tokens, // scalar or nullptr
+    int out_size,
+    int topk,
     int N,
     int num_logical) {
   const int idx = blockIdx.x * BLOCK_DIM + threadIdx.x;
@@ -91,7 +102,27 @@ __global__ void dispatch_probability_kernel(
   }
   if (chosen >= MAX_COPIES) chosen = MAX_COPIES - 1;
 
-  out_topk_ids[idx] = maps[chosen];
+  const int32_t physical_id = maps[chosen];
+  out_topk_ids[idx] = physical_id;
+
+  // Record the load here rather than leaving it to a second pass. Selection
+  // moved out to the policy when the framework's fused kernel was opened, but
+  // accounting stayed behind, so every layer launched two kernels over the same
+  // elements where it used to launch one. Measured at ~45 us per layer, which
+  // is ~2.7 ms per forward across 61 layers -- larger than the entire original
+  // fused kernel.
+  //
+  // The gates mirror the framework's: an explicit enable, the unpadded-token
+  // bound, and a range check on the id, so a policy that returns a sentinel
+  // cannot scribble outside the view.
+  if (expert_load != nullptr) {
+    const bool enabled = (record_enabled == nullptr) || (*record_enabled != 0);
+    const bool unpadded =
+        (num_unpadded_tokens == nullptr) || (idx < (*num_unpadded_tokens) * topk);
+    if (enabled && unpadded && physical_id >= 0 && physical_id < out_size) {
+      atomicAdd(&expert_load[physical_id], 1);
+    }
+  }
 }
 
 template <int MAX_COPIES, int BLOCK_DIM>
@@ -100,7 +131,13 @@ void dispatch_probability(
     tvm::ffi::TensorView in_topk_ids,    // (N,) int32
     tvm::ffi::TensorView log2phy_prob,   // (NUM_LOGICAL, MAX_COPIES) float32
     tvm::ffi::TensorView log2phy_map,    // (NUM_LOGICAL, MAX_COPIES) int32
-    tvm::ffi::TensorView random_vals) {  // (N,) float32
+    tvm::ffi::TensorView random_vals,    // (N,) float32
+    // Empty views mean "do not record", which is how a framework that keeps
+    // its own accounting opts out without a second entry point.
+    tvm::ffi::TensorView expert_load,
+    tvm::ffi::TensorView record_enabled,
+    tvm::ffi::TensorView num_unpadded_tokens,
+    int64_t topk) {
   using namespace host;
 
   SymbolicSize N{"num_topk_entries"};
@@ -112,12 +149,27 @@ void dispatch_probability(
   TensorMatcher({NUM_LOGICAL, MAX_COPIES}).with_dtype<int32_t>().with_device<kDLCUDA>(device_).verify(log2phy_map);
   TensorMatcher({N}).with_dtype<float>().with_device<kDLCUDA>(device_).verify(random_vals);
 
+  int32_t* load_ptr = nullptr;
+  int out_size = 0;
+  if (expert_load.numel() > 0) {
+    load_ptr = static_cast<int32_t*>(expert_load.data_ptr());
+    out_size = static_cast<int>(expert_load.numel());
+  }
+  const int32_t* rec_ptr =
+      record_enabled.numel() > 0 ? static_cast<const int32_t*>(record_enabled.data_ptr())
+                                 : nullptr;
+  const int32_t* unpadded_ptr =
+      num_unpadded_tokens.numel() > 0
+          ? static_cast<const int32_t*>(num_unpadded_tokens.data_ptr())
+          : nullptr;
+
   const int n = static_cast<int>(N.unwrap());
   const int grid = (n + BLOCK_DIM - 1) / BLOCK_DIM;
   const DLDevice device = device_.unwrap();
 
-  using KernelT =
-      void (*)(int32_t*, const int32_t*, const float*, const int32_t*, const float*, int, int);
+  using KernelT = void (*)(int32_t*, const int32_t*, const float*, const int32_t*,
+                           const float*, int32_t*, const int32_t*, const int32_t*, int,
+                           int, int, int);
   KernelT kernel = dispatch_probability_kernel<MAX_COPIES, BLOCK_DIM>;
 
   LaunchKernel(grid, BLOCK_DIM, device)(
@@ -127,6 +179,11 @@ void dispatch_probability(
       static_cast<const float*>(log2phy_prob.data_ptr()),
       static_cast<const int32_t*>(log2phy_map.data_ptr()),
       static_cast<const float*>(random_vals.data_ptr()),
+      load_ptr,
+      rec_ptr,
+      unpadded_ptr,
+      out_size,
+      static_cast<int>(topk),
       n,
       static_cast<int>(NUM_LOGICAL.unwrap()));
 }

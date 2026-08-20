@@ -276,6 +276,9 @@ def dispatch_probability(
     topk_ids: torch.Tensor,
     log2phy_prob: torch.Tensor,
     log2phy_map: torch.Tensor,
+    expert_load_view: 'torch.Tensor | None' = None,
+    record_enabled: 'torch.Tensor | None' = None,
+    num_unpadded_tokens: 'torch.Tensor | None' = None,
 ) -> torch.Tensor:
     """Replace the 7 torch ops in `_topk_ids_logical_to_physical_probability`
     with a single per-token-per-slot CUDA kernel.
@@ -291,6 +294,7 @@ def dispatch_probability(
         Physical topk ids tensor with the same shape as ``topk_ids``.
     """
     original_shape = topk_ids.shape
+    topk = original_shape[-1]
     flat_ids = topk_ids.reshape(-1).contiguous().to(torch.int32)
     n = flat_ids.shape[0]
     num_logical, max_copies = log2phy_prob.shape
@@ -300,5 +304,19 @@ def dispatch_probability(
     out = torch.empty(n, dtype=torch.int32, device=topk_ids.device)
     random_vals = uniform_draw(n, original_shape[-1], topk_ids.device)
     module = _dispatch_module(max_copies, DISPATCH_BLOCK_DIM)
-    module.dispatch_probability(out, flat_ids, log2phy_prob, map32, random_vals)
+    empty = torch.empty(0, dtype=torch.int32, device=topk_ids.device)
+
+    module.dispatch_probability(
+
+        out, flat_ids, log2phy_prob, map32, random_vals,
+
+        expert_load_view if expert_load_view is not None else empty,
+
+        record_enabled if record_enabled is not None else empty,
+
+        num_unpadded_tokens if num_unpadded_tokens is not None else empty,
+
+        topk,
+
+    )
     return out.view(original_shape).to(topk_ids.dtype)

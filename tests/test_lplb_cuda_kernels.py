@@ -88,3 +88,55 @@ def test_lp_prep_accepts_an_all_replicated_placement():
     torch.testing.assert_close(
         state.A_full[:, -1], expected_b - state.A_base_row_sum
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_folded_recording_counts_what_a_separate_pass_would():
+    """Folding accounting into the dispatch kernel must not change the count.
+
+    Selection moved out to the policy when the framework's fused kernel was
+    opened, but accounting stayed behind, so each layer launched two kernels
+    over the same elements. Folding removes the second launch -- worth ~37 us
+    per layer, 2.2 ms per forward across 61 layers, against an original fused
+    kernel that cost 26 us in total.
+
+    The saving is only real if the load view ends up identical. A cheaper
+    accounting that counts differently would silently corrupt every placement
+    decision downstream, since the next rearrangement is planned from exactly
+    these numbers.
+    """
+    from moe_load_balancer.kernels.lplb import cuda_solver
+
+    torch.manual_seed(0)
+    NL, RED, TOKENS, TOPK = 256, 32, 4096, 8
+    num_phy = NL + RED
+    l2p = torch.full((NL, 2), -1, dtype=torch.int32, device="cuda")
+    l2p[:, 0] = torch.arange(NL, dtype=torch.int32, device="cuda")
+    l2p[:RED, 1] = torch.arange(NL, num_phy, dtype=torch.int32, device="cuda")
+    prob = torch.zeros((NL, 2), dtype=torch.float32, device="cuda")
+    prob[:, 0] = 1.0
+    prob[:RED, 0] = 0.5
+    prob[:RED, 1] = 0.5
+    topk_ids = torch.randint(0, NL, (TOKENS, TOPK), dtype=torch.int32, device="cuda")
+    rec = torch.tensor(1, dtype=torch.int32, device="cuda")
+    l2p64 = l2p.to(torch.int64)
+
+    ids_plain = cuda_solver.dispatch_probability(topk_ids, prob, l2p64)
+
+    load = torch.zeros(num_phy, dtype=torch.int32, device="cuda")
+    ids_folded = cuda_solver.dispatch_probability(
+        topk_ids, prob, l2p64, expert_load_view=load, record_enabled=rec)
+
+    assert torch.equal(ids_plain, ids_folded), "recording changed the routing"
+    # Every routed slot lands somewhere, and each bin holds exactly its ids.
+    assert int(load.sum()) == TOKENS * TOPK
+    for pid in ids_folded.unique():
+        assert int(load[int(pid)]) == int((ids_folded == pid).sum())
+
+    # The enable gate has to actually gate, or a profiling pass would pollute
+    # the counts the next placement is planned from.
+    off = torch.zeros(num_phy, dtype=torch.int32, device="cuda")
+    cuda_solver.dispatch_probability(
+        topk_ids, prob, l2p64, expert_load_view=off,
+        record_enabled=torch.tensor(0, dtype=torch.int32, device="cuda"))
+    assert int(off.sum()) == 0, "record_enabled=0 still recorded"

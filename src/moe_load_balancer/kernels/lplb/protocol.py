@@ -61,9 +61,16 @@ class LPLBKernels(Protocol):
         log2phy: TensorLike,
     ) -> None: ...
 
+    # ``expert_load_view`` / ``record_enabled`` / ``num_unpadded_tokens`` are
+    # optional. Supplying them folds the framework's load accounting into this
+    # launch instead of leaving it to a second pass over the same elements --
+    # measured at ~45 us per layer, more than the entire fused kernel this one
+    # replaced. Omitting them keeps the previous behaviour for a framework that
+    # records its own way.
     def dispatch_probability(
         self,
         topk_ids: TensorLike,
         log2phy_prob: TensorLike,
         log2phy_map: TensorLike,
+        **kwargs,
     ) -> TensorLike: ...
