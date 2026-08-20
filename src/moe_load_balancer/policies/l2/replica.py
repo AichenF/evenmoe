@@ -222,8 +222,12 @@ class StaticL2Router(TokenRouter):
         self._share_cache: dict = {}
 
     def _shares_for(self, default_map, candidates, counts):
-        key = (id(default_map), default_map.data_ptr(),
-               id(candidates), candidates.data_ptr())
+        # Storage identity, not object identity. The framework hands this in
+        # as `defaults[layer_id]`, a fresh view over the same tensor on every
+        # forward, so keying on id() misses every time and the table gets
+        # rebuilt exactly as often as if there were no cache at all.
+        key = (default_map.data_ptr(), tuple(default_map.shape),
+               candidates.data_ptr(), tuple(candidates.shape))
         cached = self._share_cache.get(key)
         if cached is None:
             cached = one_hot_replica_shares(default_map, candidates, counts)

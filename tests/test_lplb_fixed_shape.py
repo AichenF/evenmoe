@@ -494,9 +494,21 @@ def test_static_reuses_its_share_table_but_not_across_placements():
 
     first = cuda_snapshot(SPREADS["pairs"], 16, ep_rank=0)
     route(first)
-    built = router._share_cache
-    table_after_first = next(iter(built.values()))
-    route(first)
+    table_after_first = next(iter(router._share_cache.values()))
+
+    # The framework passes `defaults[layer_id]`, a fresh view over the same
+    # storage each forward, so the cache has to key on storage. Build the views
+    # up front and keep them alive: a temporary would be freed between calls
+    # and CPython can hand the next one the same id(), which makes an
+    # identity-keyed cache appear to hit by luck.
+    stacked = first.default_physical_for_logical.unsqueeze(0).expand(4, -1)
+    views = [stacked[i] for i in range(4)]
+    assert len({id(v) for v in views}) == 4, "views collapsed to one object"
+    for v in views:
+        route(type(first)(**{**first.__dict__, "default_physical_for_logical": v}))
+    assert len(router._share_cache) == 1, (
+        f"same storage produced {len(router._share_cache)} entries; "
+        "the cache is keyed on the object, not the placement")
     assert next(iter(router._share_cache.values())) is table_after_first, (
         "the table was rebuilt for an unchanged placement")
 
