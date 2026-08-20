@@ -417,7 +417,13 @@ class TestPreparedLayerState:
 
         assert second_state is first_state
         assert torch.equal(second_state.log2phy, second.logical_to_physical_candidates)
-        assert torch.equal(execution_state.A_full, second_state.A_full)
+        # Only the placement-derived columns. The last column is the Big-M
+        # auxiliary, which the prep kernel writes per batch and which is
+        # torch.empty until it does -- comparing it means comparing
+        # uninitialised memory, and torch.equal reports any NaN that lands
+        # there as a difference. That made this assertion fail roughly one run
+        # in a hundred for a reason that had nothing to do with the state copy.
+        assert torch.equal(execution_state.A_full[:, :-1], second_state.A_full[:, :-1])
         assert kernels.warmup_shapes == [(4, 8), (4, 8)]
 
     def test_shape_changing_prepare_replaces_storage_and_evicts_execution_state(self):
