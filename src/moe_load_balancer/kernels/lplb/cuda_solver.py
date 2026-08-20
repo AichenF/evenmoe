@@ -251,7 +251,13 @@ def extract_log2phy_prob(
     with one CUDA kernel. Writes into the caller-provided ``log2phy_prob``
     buffer of shape ``(num_logical, max_copies)``.
     """
-    num_logical, max_copies = log2phy_prob.shape
+    # A None share table selects the uniform/modulo mode, which is how a
+    # policy that just wants "one replica, evenly" gets the framework's own
+    # choice out of the same kernel instead of building the table for it.
+    if log2phy_prob is None:
+        num_logical, max_copies = log2phy_map.shape
+    else:
+        num_logical, max_copies = log2phy_prob.shape
     num_single = phy_single.shape[0]
     num_red_phy = phy_replicated.shape[0]
     module = _post_module(num_logical, max_copies, num_single, num_red_phy, DEFAULT_BLOCK_DIM)
@@ -297,7 +303,13 @@ def dispatch_probability(
     topk = original_shape[-1]
     flat_ids = topk_ids.reshape(-1).contiguous().to(torch.int32)
     n = flat_ids.shape[0]
-    num_logical, max_copies = log2phy_prob.shape
+    # A None share table selects the uniform/modulo mode, which is how a
+    # policy that just wants "one replica, evenly" gets the framework's own
+    # choice out of the same kernel instead of building the table for it.
+    if log2phy_prob is None:
+        num_logical, max_copies = log2phy_map.shape
+    else:
+        num_logical, max_copies = log2phy_prob.shape
     assert log2phy_map.shape == (num_logical, max_copies)
     map32 = log2phy_map.contiguous().to(torch.int32)
 
@@ -305,10 +317,13 @@ def dispatch_probability(
     random_vals = uniform_draw(n, original_shape[-1], topk_ids.device)
     module = _dispatch_module(max_copies, DISPATCH_BLOCK_DIM)
     empty = torch.empty(0, dtype=torch.int32, device=topk_ids.device)
+    empty_f32 = torch.empty(0, dtype=torch.float32, device=topk_ids.device)
 
     module.dispatch_probability(
 
-        out, flat_ids, log2phy_prob, map32, random_vals,
+        out, flat_ids,
+        log2phy_prob if log2phy_prob is not None else empty_f32,
+        map32, random_vals,
 
         expert_load_view if expert_load_view is not None else empty,
 

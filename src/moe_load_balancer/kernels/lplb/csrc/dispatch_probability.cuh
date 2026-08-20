@@ -64,15 +64,49 @@ __global__ void dispatch_probability_kernel(
     return;
   }
   const int32_t* row_map = log2phy_map + logical_id * MAX_COPIES;
+
+  int32_t maps[MAX_COPIES];
+#pragma unroll
+  for (int c = 0; c < MAX_COPIES; c++) {
+    maps[c] = row_map[c];
+  }
+
+  // A null share table means "uniform", and uniform has to be expressed the
+  // way the framework's own kernel expresses it: the replica index is the hash
+  // modulo the live count, not an inverse-CDF draw over equal shares. The two
+  // are both uniform and both deterministic, but they pick *different*
+  // replicas for the same token, and matching the framework bit for bit is
+  // what lets the opened boundary be verified against it end to end.
+  if (log2phy_prob == nullptr) {
+    int live = 0;
+#pragma unroll
+    for (int c = 0; c < MAX_COPIES; c++) {
+      if (maps[c] >= 0) live = c + 1;
+    }
+    if (live < 1) live = 1;
+    const uint32_t hashed = static_cast<uint32_t>(idx / topk) * 2654435769u;
+    const int32_t picked = maps[hashed % static_cast<uint32_t>(live)];
+    out_topk_ids[idx] = picked;
+    if (expert_load != nullptr) {
+      const bool en = (record_enabled == nullptr) || (*record_enabled != 0);
+      const bool up =
+          (num_unpadded_tokens == nullptr) || (idx < (*num_unpadded_tokens) * topk);
+      if (en && up && picked >= 0 && picked < out_size) {
+        atomicAdd(&expert_load[picked], 1);
+      }
+    }
+    return;
+  }
+
+
+  // Past here a share table exists, so it is safe to form its row pointer.
   const float* row_prob = log2phy_prob + logical_id * MAX_COPIES;
 
   float probs[MAX_COPIES];
-  int32_t maps[MAX_COPIES];
   float row_sum = 0.f;
 
 #pragma unroll
   for (int c = 0; c < MAX_COPIES; c++) {
-    maps[c] = row_map[c];
     probs[c] = row_prob[c];
     row_sum += probs[c];
   }
@@ -145,7 +179,11 @@ void dispatch_probability(
   SymbolicDevice device_;
 
   TensorMatcher({N}).with_dtype<int32_t>().with_device<kDLCUDA>(device_).verify(out_topk_ids).verify(in_topk_ids);
-  TensorMatcher({NUM_LOGICAL, MAX_COPIES}).with_dtype<float>().with_device<kDLCUDA>(device_).verify(log2phy_prob);
+  const float* prob_ptr = nullptr;
+  if (log2phy_prob.numel() > 0) {
+    TensorMatcher({NUM_LOGICAL, MAX_COPIES}).with_dtype<float>().with_device<kDLCUDA>(device_).verify(log2phy_prob);
+    prob_ptr = static_cast<const float*>(log2phy_prob.data_ptr());
+  }
   TensorMatcher({NUM_LOGICAL, MAX_COPIES}).with_dtype<int32_t>().with_device<kDLCUDA>(device_).verify(log2phy_map);
   TensorMatcher({N}).with_dtype<float>().with_device<kDLCUDA>(device_).verify(random_vals);
 
@@ -176,7 +214,7 @@ void dispatch_probability(
       kernel,
       static_cast<int32_t*>(out_topk_ids.data_ptr()),
       static_cast<const int32_t*>(in_topk_ids.data_ptr()),
-      static_cast<const float*>(log2phy_prob.data_ptr()),
+      prob_ptr,
       static_cast<const int32_t*>(log2phy_map.data_ptr()),
       static_cast<const float*>(random_vals.data_ptr()),
       load_ptr,

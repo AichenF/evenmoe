@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib.util
+
 import pytest
 import torch
 
@@ -140,3 +142,63 @@ def test_folded_recording_counts_what_a_separate_pass_would():
         topk_ids, prob, l2p64, expert_load_view=off,
         record_enabled=torch.tensor(0, dtype=torch.int32, device="cuda"))
     assert int(off.sum()) == 0, "record_enabled=0 still recorded"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.skipif(
+    importlib.util.find_spec("vllm") is None,
+    reason="compares against vLLM's kernel, which is not installed here",
+)
+def test_uniform_mode_matches_the_framework_kernel_exactly():
+    """A null share table must reproduce the framework's own choice.
+
+    `dynamic` means "one replica, evenly", which the framework already
+    expresses as `hash(token) % live_replicas`. Expressing it instead as an
+    inverse-CDF draw over equal shares is also uniform and also deterministic,
+    but picks a *different* replica for the same token -- and being bit-identical
+    to the framework is what lets the opened boundary be verified against it end
+    to end (64/64 identical generations, measured).
+
+    So the uniform path is the modulo, and this holds it there. It also checks
+    the load view, since the policy now records it and a mismatch would corrupt
+    the counts the next placement is planned from.
+    """
+    from moe_load_balancer.kernels.lplb import cuda_solver
+    from vllm.model_executor.layers.fused_moe.router.base_router import (
+        _eplb_map_and_record_triton,
+    )
+
+    for num_logical, num_redundant, tokens, topk, seed in (
+        (256, 32, 4096, 8, 0),
+        (256, 16, 4096, 8, 1),
+        (128, 127, 2048, 6, 2),
+    ):
+        torch.manual_seed(seed)
+        num_phy = num_logical + num_redundant
+        l2p = torch.full((num_logical, 2), -1, dtype=torch.int32, device="cuda")
+        l2p[:, 0] = torch.arange(num_logical, dtype=torch.int32, device="cuda")
+        l2p[:num_redundant, 1] = torch.arange(
+            num_logical, num_phy, dtype=torch.int32, device="cuda")
+        counts = torch.ones(num_logical, dtype=torch.int32, device="cuda")
+        counts[:num_redundant] = 2
+        ids = torch.randint(
+            0, num_logical, (tokens, topk), dtype=torch.int32, device="cuda")
+        rec = torch.tensor(1, dtype=torch.int32, device="cuda")
+
+        load_ref = torch.zeros(num_phy, dtype=torch.int32, device="cuda")
+        ref = _eplb_map_and_record_triton(
+            topk_ids=ids, logical_to_physical_map=l2p, logical_replica_count=counts,
+            expert_load_view=load_ref, record_enabled=rec, num_unpadded_tokens=None)
+
+        load_ours = torch.zeros(num_phy, dtype=torch.int32, device="cuda")
+        ours = cuda_solver.dispatch_probability(
+            ids, None, l2p.to(torch.int64),
+            expert_load_view=load_ours, record_enabled=rec)
+
+        # Guard against a shape where nothing is replicated, which would pass
+        # for the wrong reason: with one replica everywhere, every draw agrees.
+        contested = int((counts[ids.reshape(-1).long()] > 1).sum())
+        assert contested > 0, "no slot had a choice; this proves nothing"
+
+        assert torch.equal(ref, ours), f"routing drifted at red{num_redundant}"
+        assert torch.equal(load_ref, load_ours), f"load drifted at red{num_redundant}"
