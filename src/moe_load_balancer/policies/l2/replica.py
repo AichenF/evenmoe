@@ -210,6 +210,29 @@ class StaticL2Router(TokenRouter):
 
     phase = RoutingPhase.PHYSICAL_ROUTING
 
+    def __init__(self) -> None:
+        # The one-hot share table is placement-derived: it only changes when a
+        # rearrangement commits a new map. Rebuilding it every forward cost
+        # more than the whole dispatch -- 132 us per layer against 30 us with
+        # it cached, which is how this policy came out *slower* through the
+        # fused kernel than through the tensor-op route it replaced.
+        #
+        # Keyed by the identity of the tensors it was built from, so a
+        # committed change produces new storage and misses naturally.
+        self._share_cache: dict = {}
+
+    def _shares_for(self, default_map, candidates, counts):
+        key = (id(default_map), default_map.data_ptr(),
+               id(candidates), candidates.data_ptr())
+        cached = self._share_cache.get(key)
+        if cached is None:
+            cached = one_hot_replica_shares(default_map, candidates, counts)
+            # One layer's table at a time: holding every layer's would pin
+            # num_layers * num_logical * max_replicas floats for no gain, since
+            # each layer only routes with its own.
+            self._share_cache = {key: cached}
+        return cached
+
     def route_tokens(
         self,
         request: RoutingRequest,
@@ -245,7 +268,7 @@ class StaticL2Router(TokenRouter):
 
         candidates = request.placement.logical_to_physical_candidates
         if request.logical_topk_ids.is_cuda and request.expert_load_view is not None:
-            shares = one_hot_replica_shares(
+            shares = self._shares_for(
                 default_map, candidates, request.placement.logical_to_physical_count
             )
             physical_ids, recorded = _fused_replica_dispatch(
