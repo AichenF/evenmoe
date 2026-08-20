@@ -245,7 +245,9 @@ class StaticL2Router(TokenRouter):
 
         candidates = request.placement.logical_to_physical_candidates
         if request.logical_topk_ids.is_cuda and request.expert_load_view is not None:
-            shares = one_hot_replica_shares(default_map, candidates)
+            shares = one_hot_replica_shares(
+                default_map, candidates, request.placement.logical_to_physical_count
+            )
             physical_ids, recorded = _fused_replica_dispatch(
                 request, shares, candidates)
         else:

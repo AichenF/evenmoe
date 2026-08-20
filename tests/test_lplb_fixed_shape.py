@@ -389,3 +389,57 @@ def test_the_whole_shape_set_is_compiled_before_the_first_solve():
         f"got {len(kernels.precompiled)} calls across 4 layers")
     assert {(s["nc"], s["nv"]) for s in kernels.precompiled} == \
         {(s["nc"], s["nv"]) for s in expected}
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_every_replica_policy_survives_the_fused_path():
+    """Each policy must actually run when a load view is offered.
+
+    The fused branch only fires with CUDA tensors and a load view present, so
+    the host-only suite never enters it -- a wrong argument list there stays
+    invisible until an engine fails to start. That is exactly how `static`
+    reached a benchmark with a missing positional argument.
+    """
+    from moe_load_balancer.core.types import RoutingPolicyConfig, RoutingRequest
+    from moe_load_balancer.policies.l2.replica import (
+        DynamicL2Router,
+        StaticL2Router,
+    )
+
+    num_redundant = 16
+    snap = make_snapshot(SPREADS["pairs"], num_redundant)
+    cuda = lambda t: t.cuda() if hasattr(t, "cuda") else t  # noqa: E731
+    snap = type(snap)(**{
+        k: (cuda(v) if hasattr(v, "is_cuda") else v)
+        for k, v in snap.__dict__.items()
+    })
+    topk = torch.randint(0, NUM_LOGICAL, (512, 8), dtype=torch.int32, device="cuda")
+    num_phy = snap.num_physical_experts
+
+    # `static` routes through the framework-chosen default replica, so the
+    # snapshot has to carry one; without it the policy refuses rather than
+    # inventing a choice.
+    from moe_load_balancer.adapters.vllm import nearest_replica_table
+
+    defaults = nearest_replica_table(
+        snap.logical_to_physical_candidates.to(torch.int64),
+        snap.logical_to_physical_count.to(torch.int64),
+        ep_rank=0,
+        num_local_physical_experts=num_phy // NUM_GPUS,
+    )
+    snap = type(snap)(**{**snap.__dict__, "default_physical_for_logical": defaults})
+
+    for router, name in ((StaticL2Router(), "static"), (DynamicL2Router(), "dynamic")):
+        load = torch.zeros(num_phy, dtype=torch.int32, device="cuda")
+        req = RoutingRequest(
+            layer_id=0,
+            logical_topk_ids=topk,
+            topk_weights=torch.ones_like(topk, dtype=torch.float32),
+            placement=snap,
+            expert_load_view=load,
+            record_enabled=torch.tensor(1, dtype=torch.int32, device="cuda"),
+        )
+        decision = router.route_tokens(req, RoutingPolicyConfig.from_value(name))
+        assert decision.recorded_load, f"{name} did not take the load view"
+        assert int(load.sum()) == topk.numel(), (
+            f"{name} recorded {int(load.sum())} of {topk.numel()} routed slots")
