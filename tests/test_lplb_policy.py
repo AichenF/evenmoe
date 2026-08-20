@@ -166,6 +166,7 @@ class _RecordingKernels:
     calls: List[_KernelCall] = field(default_factory=list)
     warmup_shapes: List[Tuple[int, int]] = field(default_factory=list)
     precompiled: List[dict] = field(default_factory=list)
+    dispatch_load_views: List[object] = field(default_factory=list)
     # Identity tracking — verifies buffer reuse across calls.
     last_A_full_id: Optional[int] = None
     last_x_id: Optional[int] = None
@@ -222,7 +223,11 @@ class _RecordingKernels:
         ones = (1.0 / per_logical_count).expand_as(log2phy_prob).contiguous()
         log2phy_prob[valid] = ones[valid]
 
-    def dispatch_probability(self, topk_ids, log2phy_prob, log2phy_map):
+    def dispatch_probability(self, topk_ids, log2phy_prob, log2phy_map, **kwargs):
+        # Remember whether the policy handed the load view down, so a test can
+        # assert the accounting really moved into this launch rather than
+        # trusting the returned flag.
+        self.dispatch_load_views.append(kwargs.get("expert_load_view"))
         self._record("dispatch", topk_ids, log2phy_prob, log2phy_map)
         # Always pick column 0 of log2phy_map for each logical id.
         safe = topk_ids.to(torch.int64).clamp(min=0)

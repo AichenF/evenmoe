@@ -234,6 +234,9 @@ def to_routing_request(
     routed_scaling_factor: float = 1.0,
     defer_dispatch: bool = False,
     global_logical_count: Optional[TensorLike] = None,
+    expert_load_view: Optional[TensorLike] = None,
+    record_enabled: Optional[TensorLike] = None,
+    num_unpadded_tokens: Optional[TensorLike] = None,
 ) -> RoutingRequest:
     """Translate vLLM's logical TopK and live placement into MLB input.
 
@@ -247,6 +250,12 @@ def to_routing_request(
     count_logical_experts + EP all_reduce (which are not CUDA-graph-safe).
     vLLM computes counts inside the graph and all_reduces them outside, then
     passes the result here as a stable tensor so LP solve is fully capturable.
+
+    ``expert_load_view`` / ``record_enabled`` / ``num_unpadded_tokens`` offer
+    the framework's load accounting to the policy. vLLM fuses selection with
+    recording, so a policy that resolves ids leaves the recording behind as a
+    second launch over the same elements unless it takes the view and counts
+    while it is already there.
     """
     normalized_stage = None if stage is None else RoutingStage.from_str(stage)
     return RoutingRequest(
@@ -260,6 +269,9 @@ def to_routing_request(
         routed_scaling_factor=routed_scaling_factor,
         defer_dispatch=defer_dispatch,
         global_logical_count=global_logical_count,
+        expert_load_view=expert_load_view,
+        record_enabled=record_enabled,
+        num_unpadded_tokens=num_unpadded_tokens,
     )
 
 

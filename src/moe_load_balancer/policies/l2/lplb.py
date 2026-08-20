@@ -809,14 +809,22 @@ class LPLBL2Router(TokenRouter):
                 metadata=metadata,
             )
 
+        # Hand the framework's load view straight to the dispatch kernel when
+        # it offers one: the kernel is already visiting every routed slot, so
+        # counting there costs a predicted branch instead of a second launch.
         routed_physical = self._kernels.dispatch_probability(
             topk_ids,
             state.log2phy_prob,
             state.log2phy_map_for_dispatch,
+            expert_load_view=request.expert_load_view,
+            record_enabled=request.record_enabled,
+            num_unpadded_tokens=request.num_unpadded_tokens,
         )
+        recorded = request.expert_load_view is not None
 
         return RoutingDecision(
             routed_physical_topk_ids=routed_physical,
+            recorded_load=recorded,
             topk_weights=request.topk_weights,
             metadata=metadata,
         )
