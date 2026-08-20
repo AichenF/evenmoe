@@ -440,86 +440,20 @@ def test_every_replica_policy_survives_the_fused_path():
             record_enabled=torch.tensor(1, dtype=torch.int32, device="cuda"),
         )
         decision = router.route_tokens(req, RoutingPolicyConfig.from_value(name))
-        assert decision.recorded_load, f"{name} did not take the load view"
-        assert int(load.sum()) == topk.numel(), (
-            f"{name} recorded {int(load.sum())} of {topk.numel()} routed slots")
+        # Who takes the load view is a per-policy decision, not a blanket one.
+        # `dynamic` produces ids through the shared kernel and counts there,
+        # which took its end-to-end cost from -0.43% to -0.14%. `static` is one
+        # gather off a precomputed map and measured worse through that kernel
+        # across three attempts, so it stays on the tensor route and leaves
+        # recording to the framework. A policy that reports this wrongly either
+        # loses its counts or has them added twice.
+        expected = {"static": False, "dynamic": True}[name]
+        assert decision.recorded_load is expected, (
+            f"{name}: recorded_load={decision.recorded_load}, expected {expected}")
+        if expected:
+            assert int(load.sum()) == topk.numel(), (
+                f"{name} recorded {int(load.sum())} of {topk.numel()} slots")
+        else:
+            assert int(load.sum()) == 0, f"{name} recorded despite reporting False"
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_static_reuses_its_share_table_but_not_across_placements():
-    """The one-hot table must be built once per placement, and again after one.
-
-    Rebuilding it every forward is what made `static` slower through the fused
-    kernel than through the tensor ops it replaced: 132 us per layer against 30
-    us cached, against 109 us for the old route. The microbenchmark missed it
-    because it passed a table that was already built.
-
-    Reusing it too long is the opposite failure and a worse one -- routing
-    every token to replicas the placement no longer has -- so the second half
-    checks a committed change is picked up.
-    """
-    from moe_load_balancer.adapters.vllm import nearest_replica_table
-    from moe_load_balancer.core.types import RoutingPolicyConfig, RoutingRequest
-    from moe_load_balancer.policies.l2.replica import StaticL2Router
-
-    def cuda_snapshot(spread, num_redundant, ep_rank):
-        snap = make_snapshot(spread, num_redundant)
-        snap = type(snap)(**{
-            k: (v.cuda() if hasattr(v, "is_cuda") else v)
-            for k, v in snap.__dict__.items()
-        })
-        defaults = nearest_replica_table(
-            snap.logical_to_physical_candidates.to(torch.int64),
-            snap.logical_to_physical_count.to(torch.int64),
-            ep_rank=ep_rank,
-            num_local_physical_experts=snap.num_physical_experts // NUM_GPUS,
-        )
-        return type(snap)(**{**snap.__dict__, "default_physical_for_logical": defaults})
-
-    router = StaticL2Router()
-    topk = torch.randint(0, NUM_LOGICAL, (256, 8), dtype=torch.int32, device="cuda")
-    cfg = RoutingPolicyConfig.from_value("static")
-
-    def route(snap):
-        req = RoutingRequest(
-            layer_id=0,
-            logical_topk_ids=topk,
-            topk_weights=torch.ones_like(topk, dtype=torch.float32),
-            placement=snap,
-            expert_load_view=torch.zeros(
-                snap.num_physical_experts, dtype=torch.int32, device="cuda"),
-            record_enabled=torch.tensor(1, dtype=torch.int32, device="cuda"),
-        )
-        return router.route_tokens(req, cfg)
-
-    first = cuda_snapshot(SPREADS["pairs"], 16, ep_rank=0)
-    route(first)
-    table_after_first = next(iter(router._share_cache.values()))
-
-    # The framework passes `defaults[layer_id]`, a fresh view over the same
-    # storage each forward, so the cache has to key on storage. Build the views
-    # up front and keep them alive: a temporary would be freed between calls
-    # and CPython can hand the next one the same id(), which makes an
-    # identity-keyed cache appear to hit by luck.
-    stacked = first.default_physical_for_logical.unsqueeze(0).expand(4, -1)
-    views = [stacked[i] for i in range(4)]
-    assert len({id(v) for v in views}) == 4, "views collapsed to one object"
-    for v in views:
-        route(type(first)(**{**first.__dict__, "default_physical_for_logical": v}))
-    assert len(router._share_cache) == 1, (
-        f"same storage produced {len(router._share_cache)} entries; "
-        "the cache is keyed on the object, not the placement")
-    assert next(iter(router._share_cache.values())) is table_after_first, (
-        "the table was rebuilt for an unchanged placement")
-
-    # A rearrangement commits new tensors; the table has to follow, or every
-    # token routes against a map that no longer exists.
-    second = cuda_snapshot(SPREADS["quads"], 16, ep_rank=3)
-    decision = route(second)
-    assert next(iter(router._share_cache.values())) is not table_after_first, (
-        "a committed placement change did not invalidate the table")
-    owner = second.default_physical_for_logical
-    assert torch.equal(
-        decision.routed_physical_topk_ids.to(torch.int64),
-        owner[topk.to(torch.int64)].to(torch.int64),
-    ), "static did not route to the new placement's default replicas"

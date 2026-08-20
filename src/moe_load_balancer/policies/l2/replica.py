@@ -270,16 +270,21 @@ class StaticL2Router(TokenRouter):
                 },
             )
 
-        candidates = request.placement.logical_to_physical_candidates
-        if request.logical_topk_ids.is_cuda and request.expert_load_view is not None:
-            shares = self._shares_for(
-                default_map, candidates, request.placement.logical_to_physical_count
-            )
-            physical_ids, recorded = _fused_replica_dispatch(
-                request, shares, candidates)
-        else:
-            physical_ids = route_static_replicas(request.logical_topk_ids, default_map)
-            recorded = False
+        # Static stays on the tensor route.
+        #
+        # The fused kernel pays for itself where producing ids is expensive:
+        # `dynamic` builds a draw and gathers (108 us/layer) and improved from
+        # -0.43% to -0.14% once folded. Static is one gather off a precomputed
+        # default map, and routing it through the share-table kernel measured
+        # -3.79% against -2.03% for this path across three attempts -- rebuild
+        # the table per forward and it is worse still, cache it and the
+        # end-to-end number did not move. Cheaper in a microbenchmark, not in a
+        # run, and the microbenchmark kept omitting the table construction.
+        #
+        # So this keeps the framework's recording pass. Revisit with a kernel
+        # that takes the default map directly instead of a one-hot table.
+        physical_ids = route_static_replicas(request.logical_topk_ids, default_map)
+        recorded = False
         return RoutingDecision(
             routed_physical_topk_ids=physical_ids,
             recorded_load=recorded,
