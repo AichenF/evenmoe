@@ -108,59 +108,97 @@ def nearest_replica_table(
     *,
     ep_rank: int,
     num_local_physical_experts: int,
+    ep_size: Optional[int] = None,
+    num_gpus_per_node: Optional[int] = None,
+    seed: int = 42,
 ) -> TensorLike:
-    """Build a per-rank "nearest replica" table from vLLM's global candidates.
+    """Build the per-rank dispatch map `static` routes through.
 
-    SGLang ships such a table (``logical_to_rank_dispatch_physical_map``) and
-    additionally collapses its candidate list to the local replica when one
-    exists.  vLLM has neither: ``compute_logical_maps`` enumerates every
-    replica globally and the built-in kernel picks one by hashing the token
-    index.
+    This follows SGLang's `compute_logical_to_rank_dispatch_physical_map`
+    exactly, because `static` is meant to be the same policy on both runtimes
+    and a differently-built map is a different policy wearing the same name.
+    Four tiers, per logical expert and per rank:
 
-    Policies that need a deterministic default -- ``static`` most obviously --
-    therefore have nothing to read on vLLM unless it is synthesized.  This
-    reproduces SGLang's intent: prefer a replica owned by this rank, else fall
-    back to the first valid replica.
+      1. a single candidate is taken as-is
+      2. otherwise a replica on this rank's own GPU, if one exists
+      3. otherwise a replica on this rank's own node
+      4. ranks still unassigned share the candidates evenly -- `_fair_choices`
+         repeats the candidate list `k // len` times, samples the remainder,
+         and shuffles from a fixed seed so every rank derives the same map
+         without communicating
 
-    Returns ``[num_logical_experts]`` of physical slot ids.
+    The even share in step 4 is the part that matters and the part a
+    "nearest, else rotate" shortcut misses: without it the ranks that have no
+    local replica pile onto whichever candidate the rotation lands on.
+
+    ``ep_size`` must be passed when any rank holds no replica of any expert:
+    inferring it from the largest physical id present undercounts exactly then,
+    and the caller's own rank can fall outside the table. ``num_gpus_per_node``
+    defaults to the whole EP group, i.e. single node, in which case tiers 2 and
+    3 coincide and every rank without a local copy takes the first candidate --
+    that concentration is SGLang's behaviour, not an accident of this port.
     """
+    import random
 
     import torch
 
-    if not isinstance(candidates, torch.Tensor) or not isinstance(counts, torch.Tensor):
-        raise TypeError("nearest_replica_table requires torch.Tensor inputs.")
+    cand = candidates.to(torch.int64).cpu()
+    cnt = counts.to(torch.int64).cpu()
+    num_logical = int(cand.shape[0])
+    per_gpu = max(1, int(num_local_physical_experts))
+    ep_size = int(ep_size) if ep_size else _ep_size_from(cand, per_gpu)
+    gpus_per_node = int(num_gpus_per_node) if num_gpus_per_node else ep_size
+    per_node = per_gpu * gpus_per_node
 
-    max_replicas = candidates.shape[-1]
-    slot_index = torch.arange(max_replicas, device=candidates.device)
-    valid = slot_index.unsqueeze(0) < counts.unsqueeze(-1).to(slot_index.dtype)
-    valid = valid & (candidates >= 0)
+    rng = random.Random(seed)
+    out = [-1] * num_logical
 
-    low = ep_rank * num_local_physical_experts
-    high = low + num_local_physical_experts
-    is_local = valid & (candidates >= low) & (candidates < high)
+    for logical in range(num_logical):
+        live = int(cnt[logical].item())
+        cands = [int(cand[logical, j].item()) for j in range(live)]
+        if not cands:
+            out[logical] = logical
+            continue
 
-    # Rank preference: a local replica first, then any valid one.
-    #   local valid -> 0, non-local valid -> 1, invalid -> 2
-    priority = torch.where(
-        is_local,
-        torch.zeros_like(candidates),
-        torch.where(valid, torch.ones_like(candidates), torch.full_like(candidates, 2)),
-    )
+        # Every rank is resolved, not just ours: step 4's even share depends on
+        # how many ranks came up empty, so the whole column has to be built.
+        chosen = [-1] * ep_size
+        remaining = []
+        for r in range(ep_size):
+            if len(cands) == 1:
+                chosen[r] = cands[0]
+                continue
+            same_gpu = [c for c in cands if c // per_gpu == r]
+            if same_gpu:
+                chosen[r] = same_gpu[0]
+                continue
+            same_node = [c for c in cands if c // per_node == r // gpus_per_node]
+            if same_node:
+                chosen[r] = same_node[0]
+                continue
+            remaining.append(r)
 
-    # Among *non-local* replicas the tie is broken by a rank-rotated slot order
-    # rather than by slot 0. With 8 EP ranks and 2 replicas only two ranks hold
-    # a copy; if the other six all fall back to the lowest slot they pile onto
-    # one replica, which concentrates the very traffic this table exists to
-    # place well -- worse than the uniform choice it replaces. Rotating spreads
-    # them, and leaves the local case untouched.
-    rotated = (slot_index.unsqueeze(0) - ep_rank) % counts.clamp(min=1).unsqueeze(-1).to(
-        slot_index.dtype
-    )
-    tiebreak = torch.where(is_local, slot_index.unsqueeze(0), rotated)
-    key = priority * (max_replicas + 1) + tiebreak
-    chosen = key.argmin(dim=-1, keepdim=True)
-    return candidates.gather(-1, chosen).squeeze(-1)
+        if remaining:
+            k = len(remaining)
+            quotient, rem = divmod(k, len(cands))
+            share = cands * quotient + rng.sample(cands, k=rem)
+            rng.shuffle(share)
+            for r, c in zip(remaining, share):
+                chosen[r] = c
 
+        out[logical] = chosen[ep_rank]
+
+    return torch.tensor(out, dtype=torch.int64, device=candidates.device)
+
+
+def _ep_size_from(cand, per_gpu) -> int:
+    """Largest physical id present tells how many ranks the placement spans."""
+    import torch
+
+    valid = cand[cand >= 0]
+    if valid.numel() == 0:
+        return 1
+    return int(torch.div(valid.max(), per_gpu, rounding_mode="floor").item()) + 1
 
 def to_placement_snapshot(
     layer_state: object,

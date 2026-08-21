@@ -15,7 +15,7 @@ from moe_load_balancer.core.types import RoutingPolicyConfig
 
 
 _INPUT_TRANSFORMS = frozenset({"fake"})
-_REPLICA_POLICIES = frozenset({"static", "dynamic", "lplb"})
+_REPLICA_POLICIES = frozenset({"static", "dynamic", "dynamic_random", "lplb"})
 _WATERFILL_POLICIES = frozenset({"waterfill", "waterfill_dynamic"})
 _ALIASES = {"lp": "lplb"}
 
@@ -44,7 +44,7 @@ def _resolves_dispatch(replica_policy):
     if os.environ.get("MLB_L2_DISPATCH", "").strip().lower() == "shares":
         if replica_policy in ("lplb", "static"):
             return False
-    return replica_policy in ("lplb", "static", "dynamic")
+    return replica_policy in ("lplb", "static", "dynamic", "dynamic_random")
 
 
 

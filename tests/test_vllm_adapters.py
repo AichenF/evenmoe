@@ -254,29 +254,34 @@ def test_nearest_replica_table_ignores_padding_beyond_count():
     assert int(table[0]) == 5
 
 
-@pytest.mark.unit
-def test_non_local_ranks_do_not_all_fall_back_to_the_same_replica():
-    """The fallback has to spread, or it concentrates what it exists to place.
+def test_single_node_fallback_concentrates_exactly_as_sglang_does():
+    """On one node every rank without a local copy takes the first candidate.
 
-    vLLM keeps no per-rank dispatch table, so this one is synthesized. With 8 EP
-    ranks and 2 replicas only two ranks hold a copy; if the other six all take
-    the lowest valid slot they pile onto one replica and the result is worse
-    than the load-blind uniform choice it replaces.
+    That is a concentration, and an earlier version of this table deliberately
+    rotated by rank to avoid it -- with 8 ranks and 2 replicas, six ranks landing
+    on one replica is worse than the load-blind uniform choice it replaces.
+
+    It is still wrong to "fix" here. `static` is meant to be the same policy on
+    both runtimes, and SGLang resolves this case through its same-node tier,
+    which on a single node matches every rank and returns the first candidate.
+    Diverging makes the two runtimes' `static` rows incomparable, which costs
+    more than the imbalance does -- `static` is for locality across nodes, and
+    on one node `dynamic` is the policy that spreads.
+
+    Held here so the concentration is a recorded decision rather than something
+    rediscovered later as a bug.
     """
     # Logical 0 is replicated on slot 0 (rank 0) and slot 8 (rank 4).
     candidates = torch.tensor([[0, 8, -1]])
     counts = torch.tensor([2])
     picks = [
         int(nearest_replica_table(
-            candidates, counts, ep_rank=r, num_local_physical_experts=2
+            candidates, counts, ep_rank=r, num_local_physical_experts=2, ep_size=8
         )[0])
         for r in range(8)
     ]
-    assert set(picks) == {0, 8}, "both replicas must be used"
-    # Neither replica may absorb everyone: a 7/1 split is the failure this
-    # guards against.
-    assert 2 <= picks.count(0) <= 6
-
-    # A rank that owns a copy still takes its own.
+    # Owners still take their own copy.
     assert picks[0] == 0
     assert picks[4] == 8
+    # Everyone else falls to the first candidate, per the same-node tier.
+    assert [picks[r] for r in (1, 2, 3, 5, 6, 7)] == [0] * 6

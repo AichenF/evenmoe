@@ -205,6 +205,39 @@ def _fused_replica_dispatch(request, shares, candidates):
     return ids, request.expert_load_view is not None
 
 
+
+def route_dynamic_random_replicas(
+    logical_topk_ids: Tensor,
+    candidates: Tensor,
+    counts: Tensor,
+) -> Tensor:
+    """SGLang's `dynamic`, reproduced verbatim.
+
+    `torch.randint(0, 65536) % live_replicas`, exactly as
+    `_topk_ids_logical_to_physical_dynamic` does it. Kept as its own policy
+    rather than folded into `dynamic` because the two are not interchangeable
+    here: the draw is per-process RNG, and tensor-parallel peers see the same
+    tokens while holding different experts, so each peer draws its own numbers
+    and a token can be sent to two different replicas of its expert. That is
+    why `dynamic` uses a hash of the token index instead.
+
+    This exists so the two runtimes can be compared on the same policy, not so
+    it can be deployed under TP. `is_tp_safe` says so, and the orchestrator is
+    expected to surface that rather than let it be selected silently.
+    """
+    if not isinstance(logical_topk_ids, Tensor):
+        raise TypeError("Replica routing requires torch.Tensor logical_topk_ids.")
+    shape, dtype = logical_topk_ids.shape, logical_topk_ids.dtype
+    flat = logical_topk_ids.reshape(-1).to(torch.int64)
+    safe = flat.clamp(0, candidates.shape[0] - 1)
+    live = counts.to(torch.int64)[safe].clamp(min=1)
+    idx = torch.randint(
+        0, 65536, flat.shape, dtype=torch.int32, device=flat.device
+    ).to(torch.int64) % live
+    picked = candidates.to(torch.int64)[safe, idx]
+    return torch.where(flat >= 0, picked, flat).reshape(shape).to(dtype)
+
+
 class StaticL2Router(TokenRouter):
     """Deterministic routing through the framework-selected replica map."""
 
@@ -340,3 +373,34 @@ class DynamicL2Router(TokenRouter):
             topk_weights=request.topk_weights,
             metadata={"policy": policy.name},
         )
+
+
+class DynamicRandomL2Router(TokenRouter):
+    """`dynamic` as SGLang draws it: a per-call RNG rather than a token hash.
+
+    Provided for cross-runtime comparison. Not TP-safe -- see
+    :func:`route_dynamic_random_replicas`.
+    """
+
+    phase = RoutingPhase.PHYSICAL_ROUTING
+    is_tp_safe = False
+
+    def route_tokens(
+        self,
+        request: RoutingRequest,
+        policy: RoutingPolicyConfig,
+    ) -> RoutingDecision:
+        if request.placement is None:
+            raise ValueError("Dynamic replica routing requires a committed placement.")
+        physical_ids = route_dynamic_random_replicas(
+            request.logical_topk_ids,
+            request.placement.logical_to_physical_candidates,
+            request.placement.logical_to_physical_count,
+        )
+        return RoutingDecision(
+            routed_physical_topk_ids=physical_ids,
+            recorded_load=False,
+            topk_weights=request.topk_weights,
+            metadata={"policy": policy.name},
+        )
+

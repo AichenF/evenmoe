@@ -81,6 +81,10 @@ class MoELoadBalancer:
             from moe_load_balancer.policies.l2.replica import DynamicL2Router
 
             routers["dynamic"] = DynamicL2Router()
+        if "dynamic_random" in policy_names:
+            from moe_load_balancer.policies.l2.replica import DynamicRandomL2Router
+
+            routers["dynamic_random"] = DynamicRandomL2Router()
         if "lplb" in policy_names:
             from moe_load_balancer.policies.l2.lplb import LPLBL2Router
 
