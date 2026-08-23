@@ -1,0 +1,43 @@
+{
+  "dataset": "gpqa_2000x1024.json",
+  "mode": "eplb",
+  "tp": 2,
+  "dp": 4,
+  "ep": 8,
+  "all2all_backend": "allgather_reducescatter",
+  "num_redundant_experts": 32,
+  "max_num_batched_tokens": 4096,
+  "enforce_eager": true,
+  "prompts": 512,
+  "isl": 1024,
+  "max_tokens": 1,
+  "use_async": false,
+  "rank_imbalance": 1.4552,
+  "communicator": "pynccl",
+  "input_tokens_per_round": 524288,
+  "output_tokens_per_round": 512,
+  "startup_plus_run_s": 397.4,
+  "round_seconds": [
+    50.508,
+    57.237,
+    47.547,
+    47.53
+  ],
+  "k_tok_per_s": [
+    10.38,
+    9.16,
+    11.03,
+    11.03
+  ],
+  "k_tok_per_s_median": 10.7,
+  "out_k_tok_per_s": [
+    0.01,
+    0.009,
+    0.011,
+    0.011
+  ],
+  "out_k_tok_per_s_median": 0.01,
+  "rank_imbalance_max": 1.5074,
+  "balancedness": 0.6149,
+  "balance_samples": 4
+}

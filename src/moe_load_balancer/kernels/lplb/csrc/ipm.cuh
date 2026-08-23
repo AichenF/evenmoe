@@ -60,7 +60,13 @@ __device__ __forceinline__ void cholesky_factor(float a[N][N]) {
   const int tid = threadIdx.x;
   for (int k = 0; k < N; k++) {
     if (tid == 0) {
-      a[k][k] = sqrtf(a[k][k]);
+      // Clamp the pivot away from zero before sqrtf. Numerical drift in the
+      // IPM iterations can push a[k][k] slightly negative on otherwise-PSD
+      // matrices, which produces NaN and propagates through the rest of the
+      // solve; the convergence check then writes 0.5 for every entry, and a
+      // share table of all-0.5 normalises to a uniform split -- LPLB silently
+      // degrades to `dynamic` while still paying for the solve.
+      a[k][k] = sqrtf(fmaxf(a[k][k], 1e-12f));
     }
     __syncthreads();
     const float pivot = a[k][k];
@@ -186,13 +192,19 @@ __global__ void ipm_solve_kernel(
     if (tid < 32) {
       d_max = 0.f;
       for (int j = tid; j < NV; j += 32) {
-        d_max = d[j] = x[j] * (c[j] - r[j]);
+        float val = x[j] * (c[j] - r[j]);
+        d[j] = val;
+        d_max = fmaxf(d_max, val);
       }
       for (int offset = 16; offset > 0; offset >>= 1) {
         d_max = fmaxf(d_max, __shfl_xor_sync(0xffffffff, d_max, offset));
       }
       if (tid == 0) {
-        alpha = 0.999f / d_max;
+        // Guard against d_max <= 0 from a degenerate or numerically stuck
+        // iteration: a non-positive d_max yields inf/NaN from the division and
+        // corrupts x on the next update. The 1.0 fallback makes the step a
+        // no-op (x *= 1 - 1*0 = x), so the solver stalls rather than diverges.
+        alpha = (d_max > 1e-9f) ? (0.999f / d_max) : 1.0f;
       }
     }
     __syncthreads();

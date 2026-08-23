@@ -190,3 +190,51 @@ def test_l1_and_lplb_are_the_same_code_on_both_runtimes():
     # neither runtime can be applying the share table its own way.
     lplb_src = inspect.getsource(lplb.LPLBL2Router.route_tokens)
     assert "dispatch_probability" in lplb_src
+
+
+@pytest.mark.parametrize("num_nodes,num_groups", [(1, 8), (2, 8), (2, None)])
+def test_l1_placement_is_identical_through_both_adapters(num_nodes, num_groups):
+    """Same load, same topology, same placement -- whichever adapter asked.
+
+    The structural test above only shows neither adapter reimplements planning.
+    It cannot show they *ask the same question*: `num_nodes` and `num_groups`
+    feed the `auto` rule that picks hierarchical versus flat deepseek, so an
+    adapter passing them differently gets a different placement out of the same
+    planner, and every cross-runtime row would then be comparing two layouts.
+    """
+    from moe_load_balancer.adapters.sglang import to_placement_request as sgl_req
+    from moe_load_balancer.adapters.vllm import to_placement_request as vllm_req
+    from moe_load_balancer.core.orchestrator import MoELoadBalancer
+
+    torch.manual_seed(0)
+    num_logical, num_redundant, ep_size = 64, 16, 8
+    num_physical = num_logical + num_redundant
+    # A skewed count, so the planner has something to actually decide.
+    counts = torch.randint(1, 1000, (2, num_logical), dtype=torch.int64)
+    counts[:, :8] *= 20
+
+    # The two adapters name these differently -- vLLM counts ranks, SGLang
+    # counts experts per rank -- which is exactly the kind of mismatch that
+    # would produce two layouts from one planner without anything erroring.
+    common = dict(num_groups=num_groups, num_nodes=num_nodes, algorithm="auto")
+    a = vllm_req(
+        logical_count=counts, num_replicas=num_physical,
+        num_ranks=ep_size, **common)
+    b = sgl_req(
+        logical_count=counts, num_physical_experts=num_physical,
+        num_local_physical_experts=num_physical // ep_size, **common)
+
+    for field in ("num_physical_experts", "num_local_physical_experts",
+                  "num_groups", "num_nodes"):
+        assert getattr(a.topology, field) == getattr(b.topology, field), (
+            f"{field} differs: vLLM {getattr(a.topology, field)} vs "
+            f"SGLang {getattr(b.topology, field)}"
+        )
+    assert str(a.policy) == str(b.policy), "resolved algorithm differs"
+
+    # L1 only; no replica policy is involved in planning.
+    balancer = MoELoadBalancer()
+    pa = balancer.plan_placement(a)
+    pb = balancer.plan_placement(b)
+    assert torch.equal(pa.physical_to_logical_map, pb.physical_to_logical_map)
+    assert torch.equal(pa.logical_to_physical_count, pb.logical_to_physical_count)
