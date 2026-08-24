@@ -231,10 +231,10 @@ def test_physical_only_pipeline_returns_policy_ids_and_weights():
 def test_pipeline_hands_back_the_policy_metadata_it_produced():
     """A policy's metadata is part of its answer, not pipeline scratch space.
 
-    ``defer_dispatch`` replies with a ``replica_selection`` table carried only
-    there, so rebuilding the metadata around the pipeline's own bookkeeping
-    silently reduces deferred dispatch to a no-op: the caller sees no table and
-    keeps its built-in routing, while the policy still pays to solve.
+    LPLB's ``lp_probability`` and ``planned_rank_load`` are carried only there,
+    so rebuilding the metadata around the pipeline's own bookkeeping would
+    silently drop them: a caller diagnosing the solve offline would find
+    nothing to read, with no error to say why.
     """
 
     class _TableRouter:
@@ -245,7 +245,7 @@ def test_pipeline_hands_back_the_policy_metadata_it_produced():
             return RoutingDecision(
                 routed_physical_topk_ids=request.logical_topk_ids,
                 topk_weights=request.topk_weights,
-                metadata={"replica_selection": "TABLE", "policy": "lplb"},
+                metadata={"lp_probability": "TABLE", "policy": "lplb"},
             )
 
     mlb = MoELoadBalancer(
@@ -259,11 +259,10 @@ def test_pipeline_hands_back_the_policy_metadata_it_produced():
             placement=_placement(),
             policies=(RoutingPolicyConfig(name="lplb"),),
             global_logical_count=torch.tensor([1.0, 1.0]),
-            defer_dispatch=True,
         )
     )
 
-    assert decision.metadata["replica_selection"] == "TABLE"
+    assert decision.metadata["lp_probability"] == "TABLE"
     assert decision.metadata["policy"] == "lplb"
     # The pipeline's own bookkeeping still wins its keys.
     assert decision.metadata["executed_policies"] == ("lplb",)

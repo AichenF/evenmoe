@@ -69,7 +69,6 @@ from torch import Tensor
 from moe_load_balancer.core.l2 import TokenRouter
 from moe_load_balancer.core.types import (
     PlacementSnapshot,
-    ReplicaSelection,
     RoutingDecision,
     RoutingPhase,
     RoutingPolicyConfig,
@@ -792,22 +791,20 @@ class LPLBL2Router(TokenRouter):
                 state.log2phy_map_for_dispatch,
                 request.placement,
             ),
+            # The LP's actual solution, exposed unconditionally rather than
+            # only when a caller asks to apply it itself: MLB_DUMP_LP reads
+            # this to compute achievable headroom offline, and that diagnostic
+            # should not depend on which dispatch mechanism the run happens to
+            # use.
+            #
+            # Unlike planned_rank_load above, this is the live per-layer buffer
+            # itself, not a value computed fresh from it -- extract_log2phy_prob
+            # overwrites it in place on this layer's next forward, the same way
+            # every other CUDA-graph-safe state tensor in this module does. A
+            # consumer that needs the value later, not synchronously, must copy
+            # it (``.clone()`` / ``.cpu()``) before returning.
+            "lp_probability": state.log2phy_prob,
         }
-
-        if request.defer_dispatch:
-            # The LP solution *is* the decision; turning it into per-token ids
-            # is mechanical. Hand the table over and let the caller's own
-            # dispatch apply it, so whatever else that kernel does -- recording
-            # expert load, in vLLM's case -- keeps working unchanged.
-            metadata["replica_selection"] = ReplicaSelection(
-                probability=state.log2phy_prob,
-                candidates=state.log2phy_map_for_dispatch,
-            )
-            return RoutingDecision(
-                routed_physical_topk_ids=topk_ids,
-                topk_weights=request.topk_weights,
-                metadata=metadata,
-            )
 
         # Hand the framework's load view straight to the dispatch kernel when
         # it offers one: the kernel is already visiting every routed slot, so

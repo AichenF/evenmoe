@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pytest
 import torch
-from dataclasses import replace
 
 from moe_load_balancer import (
     MoELoadBalancer,
@@ -252,82 +251,6 @@ def test_generic_replica_dispatch_is_fullgraph_compilable(name):
     logical_ids = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
 
     assert compiled(logical_ids).shape == logical_ids.shape
-
-
-@pytest.mark.unit
-class TestDeferredDispatchIsHonouredByEveryReplicaPolicy:
-    """A runtime that fuses replica selection with expert-load recording cannot
-    accept per-token ids without also taking over the recording, so it asks for
-    a share table instead. A policy that ignores the request produces no table,
-    the caller falls back to its built-in choice, and the policy silently never
-    runs -- which is what happened to static and dynamic on vLLM."""
-
-    @staticmethod
-    def _snapshot():
-        return PlacementSnapshot(
-            layer_id=0,
-            num_logical_experts=4,
-            num_physical_experts=6,
-            ep_size=2,
-            num_local_physical_experts=3,
-            physical_to_logical_map=torch.tensor([0, 1, 2, 3, 0, 1]),
-            logical_to_physical_candidates=torch.tensor(
-                [[0, 4], [1, 5], [2, -1], [3, -1]]
-            ),
-            logical_to_physical_count=torch.tensor([2, 2, 1, 1]),
-            default_physical_for_logical=torch.tensor([4, 1, 2, 3]),
-        )
-
-    def _request(self, policy_name):
-        return RoutingRequest(
-            layer_id=0,
-            logical_topk_ids=torch.tensor([[0, 1], [2, 3]], dtype=torch.int32),
-            topk_weights=torch.ones((2, 2)),
-            placement=self._snapshot(),
-            defer_dispatch=True,
-            policies=(RoutingPolicyConfig(name=policy_name),),
-        )
-
-    def test_static_puts_all_of_an_expert_on_its_default_replica(self):
-        decision = StaticL2Router().route_tokens(
-            self._request("static"), RoutingPolicyConfig(name="static")
-        )
-        sel = decision.metadata["replica_selection"]
-        assert sel is not None
-        # logical 0's default is slot 4, which sits in candidate column 1.
-        assert sel.probability[0].tolist() == [0.0, 1.0]
-        # logical 1's default is slot 1, column 0.
-        assert sel.probability[1].tolist() == [1.0, 0.0]
-        # A single-replica expert keeps its one column and pads the rest.
-        assert sel.probability[2].tolist() == [1.0, 0.0]
-
-    def test_dynamic_spreads_an_expert_evenly_over_its_replicas(self):
-        decision = DynamicL2Router().route_tokens(
-            self._request("dynamic"), RoutingPolicyConfig(name="dynamic")
-        )
-        sel = decision.metadata["replica_selection"]
-        assert sel.probability[0].tolist() == [0.5, 0.5]
-        assert sel.probability[2].tolist() == [1.0, 0.0]
-
-    def test_padding_columns_stay_zero(self):
-        """A consumer walks a row without consulting the replica count, so a
-        column past the live ones must never carry weight."""
-        for router in (StaticL2Router(), DynamicL2Router()):
-            name = "static" if isinstance(router, StaticL2Router) else "dynamic"
-            sel = router.route_tokens(
-                self._request(name), RoutingPolicyConfig(name=name)
-            ).metadata["replica_selection"]
-            assert sel.probability[2, 1].item() == 0.0
-            assert sel.probability[3, 1].item() == 0.0
-
-    def test_per_token_ids_are_still_produced_when_not_deferring(self):
-        req = self._request("static")
-        req = replace(req, defer_dispatch=False)
-        decision = StaticL2Router().route_tokens(
-            req, RoutingPolicyConfig(name="static")
-        )
-        assert "replica_selection" not in decision.metadata
-        assert decision.routed_physical_topk_ids.tolist() == [[4, 1], [2, 3]]
 
 
 @pytest.mark.unit

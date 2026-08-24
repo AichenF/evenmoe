@@ -10,7 +10,6 @@ from torch import Tensor
 from moe_load_balancer.core.l2 import TokenRouter
 from moe_load_balancer.kernels.token_draw import replica_index
 from moe_load_balancer.core.types import (
-    ReplicaSelection,
     RoutingDecision,
     RoutingPhase,
     RoutingPolicyConfig,
@@ -135,50 +134,6 @@ def _safe_logical_ids(
     return safe_ids, valid
 
 
-
-def one_hot_replica_shares(
-    default_physical_for_logical: Tensor,
-    candidates: Tensor,
-    counts: Tensor,
-) -> Tensor:
-    """Share table putting all of each expert's traffic on its default replica.
-
-    Static routing already decides a per-expert replica; a share table is the
-    same decision written in the layout a caller can apply itself. Padding
-    columns stay zero so a consumer can walk a row without a separate count.
-    """
-
-    shares = torch.zeros(candidates.shape, dtype=torch.float32, device=candidates.device)
-    slot = torch.arange(candidates.shape[1], device=candidates.device)
-    live = slot.unsqueeze(0) < counts.unsqueeze(-1).to(slot.dtype)
-    chosen = live & (candidates == default_physical_for_logical.unsqueeze(-1))
-    shares[chosen] = 1.0
-    # An expert whose default is absent from its candidate list would otherwise
-    # get an all-zero row, which a consumer reads as "no preference" and fills
-    # with its own choice. Fall back to the first live column so the policy's
-    # answer stays deterministic.
-    missing = ~chosen.any(dim=-1) & (counts > 0)
-    if bool(missing.any()):
-        shares[missing, 0] = 1.0
-    return shares
-
-
-def uniform_replica_shares(candidates: Tensor, counts: Tensor) -> Tensor:
-    """Share table spreading each expert's traffic evenly over its replicas.
-
-    This is what dynamic routing samples per token, expressed once per expert.
-    """
-
-    slot = torch.arange(candidates.shape[1], device=candidates.device)
-    live = slot.unsqueeze(0) < counts.unsqueeze(-1).to(slot.dtype)
-    safe = counts.clamp(min=1).to(torch.float32).unsqueeze(-1)
-    return torch.where(
-        live,
-        torch.ones(candidates.shape, dtype=torch.float32, device=candidates.device) / safe,
-        torch.zeros(candidates.shape, dtype=torch.float32, device=candidates.device),
-    )
-
-
 def _fused_replica_dispatch(request, shares, candidates):
     """Route through the shared dispatch kernel, recording load in the same pass.
 
@@ -239,36 +194,19 @@ def route_dynamic_random_replicas(
 
 
 class StaticL2Router(TokenRouter):
-    """Deterministic routing through the framework-selected replica map."""
+    """Deterministic routing through the framework-selected replica map.
+
+    Always resolves ids on the tensor route below. A share-table form used to
+    exist for runtimes that fuse replica selection with load recording, but
+    vLLM -- the only caller that had such a kernel -- now bakes this policy's
+    answer into a placement-fixed map instead (see
+    ``RoutingCapabilities.dispatch_fixed_by_placement``) and never calls this
+    method at all, and routing the share table through that same fused kernel
+    had already measured worse than this tensor route in three attempts
+    (-3.79% against -2.03%). Nothing else ever asked for the share form.
+    """
 
     phase = RoutingPhase.PHYSICAL_ROUTING
-
-    def __init__(self) -> None:
-        # The one-hot share table is placement-derived: it only changes when a
-        # rearrangement commits a new map. Rebuilding it every forward cost
-        # more than the whole dispatch -- 132 us per layer against 30 us with
-        # it cached, which is how this policy came out *slower* through the
-        # fused kernel than through the tensor-op route it replaced.
-        #
-        # Keyed by the identity of the tensors it was built from, so a
-        # committed change produces new storage and misses naturally.
-        self._share_cache: dict = {}
-
-    def _shares_for(self, default_map, candidates, counts):
-        # Storage identity, not object identity. The framework hands this in
-        # as `defaults[layer_id]`, a fresh view over the same tensor on every
-        # forward, so keying on id() misses every time and the table gets
-        # rebuilt exactly as often as if there were no cache at all.
-        key = (default_map.data_ptr(), tuple(default_map.shape),
-               candidates.data_ptr(), tuple(candidates.shape))
-        cached = self._share_cache.get(key)
-        if cached is None:
-            cached = one_hot_replica_shares(default_map, candidates, counts)
-            # One layer's table at a time: holding every layer's would pin
-            # num_layers * num_logical * max_replicas floats for no gain, since
-            # each layer only routes with its own.
-            self._share_cache = {key: cached}
-        return cached
 
     def route_tokens(
         self,
@@ -282,45 +220,10 @@ class StaticL2Router(TokenRouter):
             raise ValueError(
                 "Static replica routing requires " "PlacementSnapshot.default_physical_for_logical."
             )
-        if request.defer_dispatch:
-            # The caller applies the split itself. Runtimes that fuse replica
-            # selection with expert-load recording cannot take per-token ids
-            # without also taking over the recording, so a policy that ignores
-            # this request is simply unusable there.
-            return RoutingDecision(
-                routed_physical_topk_ids=request.logical_topk_ids,
-                topk_weights=request.topk_weights,
-                metadata={
-                    "policy": policy.name,
-                    "replica_selection": ReplicaSelection(
-                        probability=one_hot_replica_shares(
-                            default_map,
-                            request.placement.logical_to_physical_candidates,
-                            request.placement.logical_to_physical_count,
-                        ),
-                        candidates=request.placement.logical_to_physical_candidates,
-                    ),
-                },
-            )
-
-        # Static stays on the tensor route.
-        #
-        # The fused kernel pays for itself where producing ids is expensive:
-        # `dynamic` builds a draw and gathers (108 us/layer) and improved from
-        # -0.43% to -0.14% once folded. Static is one gather off a precomputed
-        # default map, and routing it through the share-table kernel measured
-        # -3.79% against -2.03% for this path across three attempts -- rebuild
-        # the table per forward and it is worse still, cache it and the
-        # end-to-end number did not move. Cheaper in a microbenchmark, not in a
-        # run, and the microbenchmark kept omitting the table construction.
-        #
-        # So this keeps the framework's recording pass. Revisit with a kernel
-        # that takes the default map directly instead of a one-hot table.
         physical_ids = route_static_replicas(request.logical_topk_ids, default_map)
-        recorded = False
         return RoutingDecision(
             routed_physical_topk_ids=physical_ids,
-            recorded_load=recorded,
+            recorded_load=False,
             topk_weights=request.topk_weights,
             metadata={"policy": policy.name},
         )
@@ -338,22 +241,6 @@ class DynamicL2Router(TokenRouter):
     ) -> RoutingDecision:
         if request.placement is None:
             raise ValueError("Dynamic replica routing requires a committed placement.")
-        if request.defer_dispatch:
-            return RoutingDecision(
-                routed_physical_topk_ids=request.logical_topk_ids,
-                topk_weights=request.topk_weights,
-                metadata={
-                    "policy": policy.name,
-                    "replica_selection": ReplicaSelection(
-                        probability=uniform_replica_shares(
-                            request.placement.logical_to_physical_candidates,
-                            request.placement.logical_to_physical_count,
-                        ),
-                        candidates=request.placement.logical_to_physical_candidates,
-                    ),
-                },
-            )
-
         candidates = request.placement.logical_to_physical_candidates
         if request.logical_topk_ids.is_cuda and request.expert_load_view is not None:
             # No share table: the kernel then draws the way the framework's own

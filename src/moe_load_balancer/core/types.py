@@ -229,30 +229,6 @@ class RoutingLoadHistory:
         object.__setattr__(self, "metadata", _immutable_mapping(self.metadata))
 
 
-@dataclass(frozen=True)
-class ReplicaSelection:
-    """How a logical expert's traffic should be split across its replicas.
-
-    This is what a replica-routing policy actually decides; per-token ids are
-    one mechanical step away from it. Published under
-    ``RoutingDecision.metadata["replica_selection"]`` when the caller asked for
-    :attr:`RoutingRequest.defer_dispatch`.
-
-    Both tensors are ``[num_logical_experts, max_replicas]`` and share a layout:
-    column ``j`` of :attr:`probability` is the share of that expert's traffic
-    assigned to the physical slot in column ``j`` of :attr:`candidates`. Columns
-    past an expert's live replica count are padded -- ``candidates`` holds -1
-    there and ``probability`` holds 0 -- so a consumer can walk a row without a
-    separate count.
-
-    Rows are not guaranteed normalized: a consumer sampling from them must
-    divide by the row sum, and treat an all-zero row as "no preference".
-    """
-
-    probability: TensorLike
-    candidates: TensorLike
-
-
 @dataclass(frozen=True, kw_only=True)
 class RoutingRequest:
     """Framework-neutral input to the ordered L2 policy pipeline.
@@ -276,7 +252,6 @@ class RoutingRequest:
     token_count: Optional[TensorLike] = None
     lb_token_mask: Optional[TensorLike] = None
     routed_scaling_factor: float = 1.0
-    defer_dispatch: bool = False
     # Where to accumulate per-physical-expert load, when the framework wants
     # the policy to do that accounting rather than making a second pass of its
     # own. A runtime that fuses selection with recording -- vLLM does -- would

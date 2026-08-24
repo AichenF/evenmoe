@@ -20,34 +20,6 @@ _WATERFILL_POLICIES = frozenset({"waterfill", "waterfill_dynamic"})
 _ALIASES = {"lp": "lplb"}
 
 
-def _resolves_dispatch(replica_policy):
-    """Whether the policy realises its own per-token choice.
-
-    Resolving is not automatically the cheaper side of the boundary. A runtime
-    that fuses selection with expert-load recording -- vLLM does -- can apply a
-    share table inside the one kernel it was already going to launch, so a
-    policy expressible as shares costs nothing extra there. Handing back
-    per-token ids means the policy runs its own kernel first and the framework
-    still runs its recording pass: two launches where there was one.
-
-    SGLang has no such fusion -- its native replica step is one gather outside
-    any kernel -- which is why the same policy is free there and is not here.
-
-    ``MLB_L2_DISPATCH=shares`` forces the share-table side for the policies
-    that can express themselves that way, so the two boundaries can be measured
-    against each other instead of argued about.
-    """
-    import os
-
-    if replica_policy is None:
-        return False
-    if os.environ.get("MLB_L2_DISPATCH", "").strip().lower() == "shares":
-        if replica_policy in ("lplb", "static"):
-            return False
-    return replica_policy in ("lplb", "static", "dynamic", "dynamic_random")
-
-
-
 @dataclass(frozen=True)
 class DeploymentTopology:
     """What a framework can tell MLB about a deployment before it starts.
@@ -101,20 +73,6 @@ class RoutingCapabilities:
 
     A policy that sets this must publish its answer through
     :attr:`PlacementSnapshot.default_physical_for_logical`.
-    """
-
-    resolves_dispatch: bool = False
-    """Whether the policy turns its own decision into per-token ids.
-
-    False means the decision is a per-expert distribution the framework can
-    apply itself, which a runtime that fuses selection with load recording does
-    in one pass. True means the policy realises it -- the only option for an
-    algorithm whose choice depends on the token and not just on the expert, and
-    the reason the selection step has to be separable at all.
-
-    Both remain available: a framework keeps its built-in selection for when no
-    policy is configured, and a policy that declares this replaces only the
-    selection, never the recording.
     """
 
     consumes_global_logical_count: bool = False
@@ -313,11 +271,6 @@ class RoutingPipeline:
             dispatch_fixed_by_placement=replica_policy == "static",
             routes_shared_expert=waterfill_policy is not None,
             requires_deepep=waterfill_policy is not None,
-            # LPLB owns a dispatch kernel that realises its LP solution, and
-            # static and dynamic each pick one replica per token. Letting them
-            # resolve is what keeps the selection step something an algorithm
-            # can own rather than something the framework's kernel decides.
-            resolves_dispatch=_resolves_dispatch(replica_policy),
             consumes_global_logical_count=consumes_count,
             # LPLB's LP is a per-batch decision, but the distribution it tracks
             # moves slowly; one step of age is acceptable and is what lets the
