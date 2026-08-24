@@ -82,6 +82,27 @@ class RoutingCapabilities:
     requires_deepep: bool = False
 
     # -- inputs the pipeline consumes -------------------------------------
+    dispatch_fixed_by_placement: bool = False
+    """Whether the per-token answer is a pure function of the committed placement.
+
+    True means the policy's choice does not depend on the batch at all, so a
+    framework can materialise it once when a placement commits and never call
+    the pipeline per forward. ``static`` is the case: it resolves a replica per
+    logical expert from the placement, and re-deriving that on every forward
+    buys nothing.
+
+    This exists because crossing the routing boundary is not free. On vLLM the
+    call measured 426 us per layer per forward against a policy-free path that
+    costs nothing, which is 26 ms of a ~1 s forward -- the whole reason `static`
+    trailed the built-in selection it was supposed to reproduce. SGLang has no
+    such gap because its `static` is one tensor index inside its own TopK code;
+    declaring the property here lets a framework reach the same place without
+    the pipeline having to know which runtime it is talking to.
+
+    A policy that sets this must publish its answer through
+    :attr:`PlacementSnapshot.default_physical_for_logical`.
+    """
+
     resolves_dispatch: bool = False
     """Whether the policy turns its own decision into per-token ids.
 
@@ -286,6 +307,10 @@ class RoutingPipeline:
             requires_post_topk_routing=bool(post_topk),
             requires_placement_state=replica_policy == "lplb",
             requires_rank_dispatch_map=replica_policy == "static",
+            # static decides from placement alone, so the framework may bake
+            # its answer in at commit time instead of paying the boundary on
+            # every forward.
+            dispatch_fixed_by_placement=replica_policy == "static",
             routes_shared_expert=waterfill_policy is not None,
             requires_deepep=waterfill_policy is not None,
             # LPLB owns a dispatch kernel that realises its LP solution, and
