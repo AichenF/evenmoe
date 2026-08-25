@@ -21,7 +21,7 @@ _ALIASES = {"lp": "lplb"}
 
 
 @dataclass(frozen=True)
-class DeploymentTopology:
+class ExpertDeploymentConfig:
     """What a framework can tell MLB about a deployment before it starts.
 
     Deliberately small: this is consulted while the framework is still reading
@@ -81,14 +81,11 @@ class RoutingCapabilities:
     Distinct from ``requires_post_topk_routing``: a replica policy can run
     without ever looking at the load, and gathering the count for it costs a
     collective per layer per forward that is then discarded.
-    """
 
-    max_input_staleness_steps: int = 0
-    """How old the consumed inputs may be, in steps. 0 means current.
-
-    A framework that can only supply older data must say so rather than
-    silently substituting it; a policy that cannot tolerate the age must be
-    able to refuse.
+    This is the pipeline-level declaration a framework adapter reads once, at
+    configuration time, to decide whether to gather the count at all. The
+    orchestrator's own per-request, per-router check of the same underlying
+    fact is :class:`~moe_load_balancer.core.l2.GlobalLogicalCountConsumer`.
     """
 
     # -- runtime properties the framework has to respect -------------------
@@ -99,10 +96,6 @@ class RoutingCapabilities:
     graph_stability: str = "stable"
     """``stable``, or ``realloc_on_placement_change`` when a placement update
     can replace policy tensors and invalidate a captured graph."""
-
-    placement_state_lifecycle: str = "none"
-    """``none``, ``per_placement`` or ``per_forward`` -- how long
-    placement-derived policy state stays valid."""
 
 
 @dataclass(frozen=True)
@@ -121,7 +114,7 @@ class RoutingPipeline:
     input_transform: Optional[str]
     capabilities: RoutingCapabilities
 
-    def is_applicable(self, topology: DeploymentTopology) -> Optional[str]:
+    def is_applicable(self, topology: ExpertDeploymentConfig) -> Optional[str]:
         """Why this pipeline cannot act on a deployment, or None if it can.
 
         Returns a reason rather than a bool so a framework that disables the
@@ -272,16 +265,9 @@ class RoutingPipeline:
             routes_shared_expert=waterfill_policy is not None,
             requires_deepep=waterfill_policy is not None,
             consumes_global_logical_count=consumes_count,
-            # LPLB's LP is a per-batch decision, but the distribution it tracks
-            # moves slowly; one step of age is acceptable and is what lets the
-            # collective producing it live outside a CUDA graph.
-            max_input_staleness_steps=1 if consumes_count else 0,
             supports_concurrent_microbatches=replica_policy != "lplb",
             graph_stability=(
                 "realloc_on_placement_change" if replica_policy == "lplb" else "stable"
-            ),
-            placement_state_lifecycle=(
-                "per_placement" if replica_policy == "lplb" else "none"
             ),
         )
         return cls(

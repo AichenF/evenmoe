@@ -48,6 +48,10 @@ class GlobalLogicalCountConsumer(Protocol):
 
     Declaring the need is a capability, not a name, so the pipeline stays open
     to policies the orchestrator has never heard of.
+
+    This is the orchestrator's per-request check against one router instance.
+    The framework-facing, per-pipeline declaration of the same underlying fact
+    is :attr:`~moe_load_balancer.core.routing_pipeline.RoutingCapabilities.consumes_global_logical_count`.
     """
 
     def needs_global_logical_count(self, request: RoutingRequest) -> bool: ...

@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from moe_load_balancer import (
-    DeploymentTopology,
+    ExpertDeploymentConfig,
     MoELoadBalancer,
     PlacementSnapshot,
     RoutingPipeline,
@@ -136,32 +136,32 @@ class TestApplicabilityIsThePolicysCall:
 
     def test_lplb_declines_a_deployment_with_no_replicas(self):
         pipeline = RoutingPipeline.from_value("lplb")
-        reason = pipeline.is_applicable(DeploymentTopology(num_redundant_experts=0))
+        reason = pipeline.is_applicable(ExpertDeploymentConfig(num_redundant_experts=0))
         assert reason is not None and "redundant" in reason
 
     def test_lplb_applies_once_experts_are_replicated(self):
         pipeline = RoutingPipeline.from_value("lplb")
         assert pipeline.is_applicable(
-            DeploymentTopology(num_redundant_experts=16)
+            ExpertDeploymentConfig(num_redundant_experts=16)
         ) is None
 
     def test_waterfill_does_not_depend_on_routed_redundancy(self):
         pipeline = RoutingPipeline.from_value("waterfill")
         assert pipeline.is_applicable(
-            DeploymentTopology(num_redundant_experts=0, routes_shared_expert=True)
+            ExpertDeploymentConfig(num_redundant_experts=0, routes_shared_expert=True)
         ) is None
 
     def test_waterfill_declines_a_runtime_that_cannot_dispatch_it(self):
         pipeline = RoutingPipeline.from_value("waterfill")
         reason = pipeline.is_applicable(
-            DeploymentTopology(num_redundant_experts=32, routes_shared_expert=False)
+            ExpertDeploymentConfig(num_redundant_experts=32, routes_shared_expert=False)
         )
         assert reason is not None and "shared expert" in reason
 
     def test_the_reason_is_returned_not_a_bare_bool(self):
         """A framework that disables a policy has to be able to say why."""
         reason = RoutingPipeline.from_value("lplb").is_applicable(
-            DeploymentTopology(num_redundant_experts=0)
+            ExpertDeploymentConfig(num_redundant_experts=0)
         )
         assert isinstance(reason, str) and len(reason) > 20
 
@@ -175,22 +175,11 @@ class TestCapabilitiesDeclareRuntimeRequirements:
             assert RoutingPipeline.from_value(expr).capabilities \
                 .consumes_global_logical_count is False
 
-    def test_staleness_tolerance_is_stated(self):
-        """The framework supplies a count one step old so the collective can
-        live outside a captured graph; a policy that could not tolerate that
-        has to be able to say so."""
-        caps = RoutingPipeline.from_value("lplb").capabilities
-        assert caps.max_input_staleness_steps == 1
-        assert RoutingPipeline.from_value("static").capabilities \
-            .max_input_staleness_steps == 0
-
     def test_concurrency_and_graph_stability_are_per_policy(self):
         lp = RoutingPipeline.from_value("lplb").capabilities
         assert lp.supports_concurrent_microbatches is False
         assert lp.graph_stability == "realloc_on_placement_change"
-        assert lp.placement_state_lifecycle == "per_placement"
 
         st = RoutingPipeline.from_value("static").capabilities
         assert st.supports_concurrent_microbatches is True
         assert st.graph_stability == "stable"
-        assert st.placement_state_lifecycle == "none"
