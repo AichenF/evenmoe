@@ -25,12 +25,8 @@ The second is the one worth testing hard. Padding that quietly changed the
 objective would be worse than the stall it removes.
 """
 
-import sys
-
 import pytest
 import torch
-
-sys.path.insert(0, "/root/yuny/mlb-fixedshape/src")
 
 from moe_load_balancer.core.types import PlacementSnapshot
 from moe_load_balancer.policies.l2.lplb import _SHAPE_BUCKET, _build_layer_state
@@ -366,8 +362,9 @@ def test_the_whole_shape_set_is_compiled_before_the_first_solve():
     and before serving -- and not again per layer afterwards.
     """
     import sys as _sys
+    from pathlib import Path as _Path
 
-    _sys.path.insert(0, "/root/yuny/mlb-fixedshape/tests")
+    _sys.path.insert(0, str(_Path(__file__).resolve().parent))
     from test_lplb_policy import _RecordingKernels
 
     from moe_load_balancer.policies.l2.lplb import (
@@ -393,12 +390,12 @@ def test_the_whole_shape_set_is_compiled_before_the_first_solve():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_every_replica_policy_survives_the_fused_path():
-    """Each policy must actually run when a load view is offered.
+    """Each policy must actually run against CUDA tensors, not just host ones.
 
-    The fused branch only fires with CUDA tensors and a load view present, so
-    the host-only suite never enters it -- a wrong argument list there stays
-    invisible until an engine fails to start. That is exactly how `static`
-    reached a benchmark with a missing positional argument.
+    The fused branch only fires with CUDA tensors, so the host-only suite
+    never enters it -- a wrong argument list there stays invisible until an
+    engine fails to start. That is exactly how `static` reached a benchmark
+    with a missing positional argument.
     """
     from moe_load_balancer.core.types import RoutingPolicyConfig, RoutingRequest
     from moe_load_balancer.policies.l2.replica import (
@@ -430,30 +427,17 @@ def test_every_replica_policy_survives_the_fused_path():
     snap = type(snap)(**{**snap.__dict__, "default_physical_for_logical": defaults})
 
     for router, name in ((StaticL2Router(), "static"), (DynamicL2Router(), "dynamic")):
-        load = torch.zeros(num_phy, dtype=torch.int32, device="cuda")
         req = RoutingRequest(
             layer_id=0,
             logical_topk_ids=topk,
             topk_weights=torch.ones_like(topk, dtype=torch.float32),
             placement=snap,
-            expert_load_view=load,
-            record_enabled=torch.tensor(1, dtype=torch.int32, device="cuda"),
         )
         decision = router.route_tokens(req, RoutingPolicyConfig.from_value(name))
-        # Who takes the load view is a per-policy decision, not a blanket one.
-        # `dynamic` produces ids through the shared kernel and counts there,
-        # which took its end-to-end cost from -0.43% to -0.14%. `static` is one
-        # gather off a precomputed map and measured worse through that kernel
-        # across three attempts, so it stays on the tensor route and leaves
-        # recording to the framework. A policy that reports this wrongly either
-        # loses its counts or has them added twice.
-        expected = {"static": False, "dynamic": True}[name]
-        assert decision.recorded_load is expected, (
-            f"{name}: recorded_load={decision.recorded_load}, expected {expected}")
-        if expected:
-            assert int(load.sum()) == topk.numel(), (
-                f"{name} recorded {int(load.sum())} of {topk.numel()} slots")
-        else:
-            assert int(load.sum()) == 0, f"{name} recorded despite reporting False"
+        physical_ids = decision.routed_physical_topk_ids
+        assert physical_ids.shape == topk.shape, (
+            f"{name}: got shape {tuple(physical_ids.shape)}, expected {tuple(topk.shape)}")
+        assert bool(((physical_ids >= 0) & (physical_ids < num_phy)).all()), (
+            f"{name}: produced an out-of-range physical id")
 
 

@@ -14,12 +14,12 @@ imported, so these tests fail on drift instead of skipping.
 
 import sys
 import types
+from pathlib import Path
 
 import pytest
 import torch
 
-sys.path.insert(0, "/root/yuny/moe_load_balancer/src")
-sys.path.insert(0, "/root/yuny/moe_load_balancer/tests")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import _sglang_reference as ref  # noqa: E402
 

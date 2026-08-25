@@ -252,33 +252,6 @@ class RoutingRequest:
     token_count: Optional[TensorLike] = None
     lb_token_mask: Optional[TensorLike] = None
     routed_scaling_factor: float = 1.0
-    # Where to accumulate per-physical-expert load, when the framework wants
-    # the policy to do that accounting rather than making a second pass of its
-    # own. A runtime that fuses selection with recording -- vLLM does -- would
-    # otherwise launch one kernel to apply the policy's choice and a second one
-    # over the same elements purely to count it: measured at 7.6 ms per forward
-    # against 1.6 ms for the fused kernel that was opened.
-    #
-    # Optional on both sides. A framework that keeps its own accounting leaves
-    # these unset and nothing changes; a policy that cannot record leaves
-    # RoutingDecision.recorded_load False and the framework does its own pass.
-    expert_load_view: Optional[TensorLike] = None
-    record_enabled: Optional[TensorLike] = None
-    num_unpadded_tokens: Optional[TensorLike] = None
-    """Return the replica-selection table instead of applying it.
-
-    A replica policy decides *how much* of each logical expert's traffic each
-    physical replica should take; turning that into per-token ids is a separate,
-    purely mechanical step. Frameworks that already own a dispatch kernel can
-    keep it -- and with it whatever else that kernel does, such as recording
-    expert load -- by asking for the table and applying it themselves.
-
-    When set, a policy that supports it leaves ``routed_physical_topk_ids``
-    untouched and publishes ``RoutingDecision.metadata["replica_selection"]``.
-    Policies that cannot express their decision as a table ignore the flag and
-    dispatch as usual, so the caller must check for the key rather than assume
-    it.
-    """
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -297,9 +270,6 @@ class RoutingDecision:
     topk_weights: TensorLike
     shared_expert_rank: Optional[TensorLike] = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
-    # True when the policy already accumulated into RoutingRequest's load
-    # view, so the framework must not count the same tokens a second time.
-    recorded_load: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "metadata", _immutable_mapping(self.metadata))
