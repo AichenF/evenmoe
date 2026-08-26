@@ -165,6 +165,7 @@ class _RecordingKernels:
 
     calls: List[_KernelCall] = field(default_factory=list)
     warmup_shapes: List[Tuple[int, int]] = field(default_factory=list)
+    precompiled: List[dict] = field(default_factory=list)
     # Identity tracking — verifies buffer reuse across calls.
     last_A_full_id: Optional[int] = None
     last_x_id: Optional[int] = None
@@ -177,6 +178,12 @@ class _RecordingKernels:
 
     def warmup(self, nc, nv, num_iters, device):
         self.warmup_shapes.append((nc, nv))
+
+    def warmup_shape(self, **kwargs):
+        # Deliberately not recorded in warmup_shapes: that list is what the
+        # per-layer warmup assertions count, and precompiling the set up front
+        # is a different event.
+        self.precompiled.append(kwargs)
 
     def prep_lp_inputs(
         self, A_full, b, t1, global_counts, log_single, log_replicated, B1, A_base_row_sum
@@ -215,7 +222,7 @@ class _RecordingKernels:
         ones = (1.0 / per_logical_count).expand_as(log2phy_prob).contiguous()
         log2phy_prob[valid] = ones[valid]
 
-    def dispatch_probability(self, topk_ids, log2phy_prob, log2phy_map):
+    def dispatch_probability(self, topk_ids, log2phy_prob, log2phy_map, **kwargs):
         self._record("dispatch", topk_ids, log2phy_prob, log2phy_map)
         # Always pick column 0 of log2phy_map for each logical id.
         safe = topk_ids.to(torch.int64).clamp(min=0)
@@ -410,7 +417,13 @@ class TestPreparedLayerState:
 
         assert second_state is first_state
         assert torch.equal(second_state.log2phy, second.logical_to_physical_candidates)
-        assert torch.equal(execution_state.A_full, second_state.A_full)
+        # Only the placement-derived columns. The last column is the Big-M
+        # auxiliary, which the prep kernel writes per batch and which is
+        # torch.empty until it does -- comparing it means comparing
+        # uninitialised memory, and torch.equal reports any NaN that lands
+        # there as a difference. That made this assertion fail roughly one run
+        # in a hundred for a reason that had nothing to do with the state copy.
+        assert torch.equal(execution_state.A_full[:, :-1], second_state.A_full[:, :-1])
         assert kernels.warmup_shapes == [(4, 8), (4, 8)]
 
     def test_shape_changing_prepare_replaces_storage_and_evicts_execution_state(self):
@@ -708,3 +721,117 @@ class TestProtocolConformance:
     def test_recording_kernels_satisfies_lplb_kernels(self):
         # The mock is the reference for "minimal valid LPLBKernels impl".
         assert isinstance(_RecordingKernels(), LPLBKernels)
+
+
+class TestNoRedundancyNeedsNoCount:
+    """The zero-redundancy path exists to avoid paying for the count.
+
+    The orchestrator asks before gathering it (``GlobalLogicalCountConsumer``),
+    so LPLB has to answer honestly *and* stay callable without one -- otherwise
+    the collective it declines is still issued, or declining it raises.
+    """
+
+    def test_a_layer_without_replicas_declines_the_count(self):
+        router = LPLBL2Router(kernels=_RecordingKernels(), num_gpus=2)
+        snap = _no_redundancy_snapshot()
+        request = _toy_request(
+            snapshot=snap, topk_ids=torch.tensor([[0, 1, -1]], dtype=torch.int32)
+        )
+
+        assert router.needs_global_logical_count(request) is False
+
+    def test_a_layer_with_replicas_still_asks_for_the_count(self):
+        router = LPLBL2Router(kernels=_RecordingKernels(), num_gpus=2)
+        request = _toy_request(
+            snapshot=_toy_snapshot(), topk_ids=torch.tensor([[0, 1, -1]], dtype=torch.int32)
+        )
+
+        assert router.needs_global_logical_count(request) is True
+
+    def test_routing_without_a_count_still_dispatches_by_the_default_map(self):
+        kernels = _RecordingKernels()
+        router = LPLBL2Router(kernels=kernels, num_gpus=2)
+        snap = _no_redundancy_snapshot(
+            default_map=torch.tensor([10, 20, 30, 40], dtype=torch.int64)
+        )
+        topk = torch.tensor([[0, 1, -1], [2, 3, 0]], dtype=torch.int32)
+        request = RoutingRequest(
+            layer_id=snap.layer_id,
+            logical_topk_ids=topk,
+            topk_weights=torch.ones(topk.shape, dtype=torch.float32),
+            placement=snap,
+            stage=RoutingStage.PREFILL,
+            global_logical_count=None,
+            policies=(RoutingPolicyConfig(name="lplb"),),
+        )
+
+        decision = router.route_tokens(request)
+
+        assert torch.equal(
+            decision.routed_physical_topk_ids,
+            torch.tensor([[10, 20, -1], [30, 40, 10]], dtype=torch.int32),
+        )
+        assert decision.metadata["lp_skipped"] == "no_redundancy"
+        # Nothing to plan from without a count; the orchestrator falls back to
+        # counting the physical ids returned here, which for identity dispatch
+        # describes the same placement.
+        assert "planned_rank_load" not in decision.metadata
+        assert kernels.calls == []
+
+    def test_a_supplied_count_is_still_reported_as_planned_load(self):
+        """A caller that has the count anyway loses no diagnostics."""
+        router = LPLBL2Router(kernels=_RecordingKernels(), num_gpus=2)
+        snap = _no_redundancy_snapshot(
+            default_map=torch.tensor([0, 1, 2, 3], dtype=torch.int64)
+        )
+        decision = router.route_tokens(
+            _toy_request(snapshot=snap, topk_ids=torch.tensor([[0, 1]], dtype=torch.int32))
+        )
+
+        assert decision.metadata["planned_rank_load"] is not None
+
+
+class TestTheDrawIsPartOfTheDecision:
+    """Which token lands on which replica must not depend on who applies it.
+
+    The share table is the policy's decision; turning it into per-token ids is
+    the mechanical step that realises it. If each runtime draws that step its
+    own way, one algorithm produces different routing on different frameworks --
+    and an RNG additionally makes it unreproducible and leaves tensor-parallel
+    peers, whose router output is replicated, free to send one token to two
+    different replicas of its expert.
+    """
+
+    def test_the_draw_is_a_pure_function_of_the_token_index(self):
+        from moe_load_balancer.kernels.token_draw import uniform_draw
+
+        a = uniform_draw(16, 4, "cpu")
+        b = uniform_draw(16, 4, "cpu")
+        assert torch.equal(a, b)
+
+    def test_slots_of_one_token_share_a_draw(self):
+        """The choice is per token, not per slot: a token's k routed experts are
+        all decided from the same draw, as they are wherever this is applied
+        inside a fused kernel."""
+        from moe_load_balancer.kernels.token_draw import uniform_draw
+
+        topk = 4
+        draw = uniform_draw(3 * topk, topk, "cpu")
+        for token in range(3):
+            row = draw[token * topk : (token + 1) * topk]
+            assert torch.equal(row, row[0].expand_as(row))
+
+    def test_it_matches_the_hash_a_fused_runtime_uses(self):
+        """Same constant, same arithmetic, same result -- so the decision
+        realises identically whether the policy applies it or the framework
+        does."""
+        from moe_load_balancer.kernels.token_draw import (
+            KNUTH_MULTIPLIER,
+            uniform_draw,
+        )
+
+        topk, tokens = 2, 8
+        draw = uniform_draw(tokens * topk, topk, "cpu")
+        for token in range(tokens):
+            expected = ((token * KNUTH_MULTIPLIER) & 0xFFFFFFFF) / 4294967296.0
+            assert abs(float(draw[token * topk]) - expected) < 1e-6

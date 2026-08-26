@@ -25,6 +25,8 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from moe_load_balancer.kernels.token_draw import uniform_draw
+
 from moe_load_balancer.kernels.utils import (
     cache_once,
     get_jit_cuda_arch,
@@ -105,6 +107,33 @@ def warmup(
     result = torch.empty(nv, dtype=torch.float32, device=device)
     module.ipm_solve(A, b, c, result)
     logger.info(f"LPLB CUDA IPM solver: warmed up for (NC={nc}, NV={nv})")
+
+
+def warmup_shape(
+    *,
+    nc: int,
+    nv: int,
+    num_single: int,
+    num_red_log: int,
+    num_gpus: int,
+    num_logical: int,
+    max_copies: int,
+    num_red_phy: int,
+    num_iters: int = DEFAULT_NUM_ITERS,
+    device: str = "cuda",
+) -> None:
+    """Compile all three kernels for one LP shape.
+
+    ``warmup`` covers the IPM alone, but a shape needs three modules and the
+    other two are compiled lazily on first use -- inside a forward, on the
+    serving path. The prep module is in fact the most prolific of the three
+    (53 cached shapes against the IPM's 41 on this machine), so warming only
+    the solver leaves most of the cost exactly where it hurts.
+    """
+    warmup(nc=nc, nv=nv, num_iters=num_iters, device=device)
+    # @cache_once, so building the module is the compile; nothing to launch.
+    _prep_module(nc, nv, num_single, num_red_log, num_gpus, DEFAULT_BLOCK_DIM)
+    _post_module(num_logical, max_copies, num_single, num_red_phy, DEFAULT_BLOCK_DIM)
 
 
 def solve_ipm(
@@ -222,7 +251,13 @@ def extract_log2phy_prob(
     with one CUDA kernel. Writes into the caller-provided ``log2phy_prob``
     buffer of shape ``(num_logical, max_copies)``.
     """
-    num_logical, max_copies = log2phy_prob.shape
+    # A None share table selects the uniform/modulo mode, which is how a
+    # policy that just wants "one replica, evenly" gets the framework's own
+    # choice out of the same kernel instead of building the table for it.
+    if log2phy_prob is None:
+        num_logical, max_copies = log2phy_map.shape
+    else:
+        num_logical, max_copies = log2phy_prob.shape
     num_single = phy_single.shape[0]
     num_red_phy = phy_replicated.shape[0]
     module = _post_module(num_logical, max_copies, num_single, num_red_phy, DEFAULT_BLOCK_DIM)
@@ -242,10 +277,14 @@ def _dispatch_module(max_copies: int, block_dim: int) -> "Module":
     )
 
 
+
 def dispatch_probability(
     topk_ids: torch.Tensor,
     log2phy_prob: torch.Tensor,
     log2phy_map: torch.Tensor,
+    expert_load_view: 'torch.Tensor | None' = None,
+    record_enabled: 'torch.Tensor | None' = None,
+    num_unpadded_tokens: 'torch.Tensor | None' = None,
 ) -> torch.Tensor:
     """Replace the 7 torch ops in `_topk_ids_logical_to_physical_probability`
     with a single per-token-per-slot CUDA kernel.
@@ -261,14 +300,38 @@ def dispatch_probability(
         Physical topk ids tensor with the same shape as ``topk_ids``.
     """
     original_shape = topk_ids.shape
+    topk = original_shape[-1]
     flat_ids = topk_ids.reshape(-1).contiguous().to(torch.int32)
     n = flat_ids.shape[0]
-    num_logical, max_copies = log2phy_prob.shape
+    # A None share table selects the uniform/modulo mode, which is how a
+    # policy that just wants "one replica, evenly" gets the framework's own
+    # choice out of the same kernel instead of building the table for it.
+    if log2phy_prob is None:
+        num_logical, max_copies = log2phy_map.shape
+    else:
+        num_logical, max_copies = log2phy_prob.shape
     assert log2phy_map.shape == (num_logical, max_copies)
     map32 = log2phy_map.contiguous().to(torch.int32)
 
     out = torch.empty(n, dtype=torch.int32, device=topk_ids.device)
-    random_vals = torch.rand(n, dtype=torch.float32, device=topk_ids.device)
+    random_vals = uniform_draw(n, original_shape[-1], topk_ids.device)
     module = _dispatch_module(max_copies, DISPATCH_BLOCK_DIM)
-    module.dispatch_probability(out, flat_ids, log2phy_prob, map32, random_vals)
+    empty = torch.empty(0, dtype=torch.int32, device=topk_ids.device)
+    empty_f32 = torch.empty(0, dtype=torch.float32, device=topk_ids.device)
+
+    module.dispatch_probability(
+
+        out, flat_ids,
+        log2phy_prob if log2phy_prob is not None else empty_f32,
+        map32, random_vals,
+
+        expert_load_view if expert_load_view is not None else empty,
+
+        record_enabled if record_enabled is not None else empty,
+
+        num_unpadded_tokens if num_unpadded_tokens is not None else empty,
+
+        topk,
+
+    )
     return out.view(original_shape).to(topk_ids.dtype)

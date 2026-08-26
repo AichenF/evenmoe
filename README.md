@@ -111,6 +111,7 @@ The main source directories are:
 | `src/moe_load_balancer/policies/l2/` | Framework-independent routing policies. |
 | `src/moe_load_balancer/kernels/` | Triton and CUDA execution implementations. |
 | `src/moe_load_balancer/adapters/sglang/` | Stateless translation between SGLang and MLB values. |
+| `src/moe_load_balancer/adapters/vllm/` | Stateless translation between vLLM and MLB values. |
 | `examples/` | Executable examples used by CI. |
 | `tests/` | API, policy, adapter, orchestrator, and GPU integration tests. |
 

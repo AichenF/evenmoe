@@ -37,6 +37,9 @@ class CUDALPLBKernels:
     def warmup(self, nc: int, nv: int, num_iters: int, device: Any) -> None:
         self._cuda.warmup(nc=nc, nv=nv, num_iters=num_iters, device=device)
 
+    def warmup_shape(self, **kwargs) -> None:
+        self._cuda.warmup_shape(**kwargs)
+
     def prep_lp_inputs(
         self,
         a_full,
@@ -80,5 +83,7 @@ class CUDALPLBKernels:
             log2phy,
         )
 
-    def dispatch_probability(self, topk_ids, log2phy_prob, log2phy_map):
-        return self._cuda.dispatch_probability(topk_ids, log2phy_prob, log2phy_map)
+    def dispatch_probability(self, topk_ids, log2phy_prob, log2phy_map, **kwargs):
+        return self._cuda.dispatch_probability(
+            topk_ids, log2phy_prob, log2phy_map, **kwargs
+        )

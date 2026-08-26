@@ -58,6 +58,8 @@ so overlapping execution cannot overwrite another batch's LP state.
 
 from __future__ import annotations
 
+import logging
+
 from dataclasses import dataclass, replace
 from typing import Dict, Hashable, Optional, Tuple
 
@@ -73,6 +75,53 @@ from moe_load_balancer.core.types import (
     RoutingRequest,
 )
 from moe_load_balancer.kernels.lplb import LPLBKernels
+
+logger = logging.getLogger(__name__)
+
+# How coarsely the LP's row count is rounded. Every distinct value NVRTC-
+# compiles three kernels, and every row of padding is paid by every solve, so
+# this is the dial between compile count and solve time. 8 gives at most
+# num_redundant/8 shapes and at most 7 rows of slack.
+_SHAPE_BUCKET = 8
+
+
+def _ceil_to(value: int, multiple: int) -> int:
+    return -(-value // multiple) * multiple
+
+
+def bucketed_shape_set(num_logical: int, num_phy: int, num_gpus: int, max_copies: int):
+    """Every LP shape this deployment can produce, in closed form.
+
+    Bucketing makes the set small, but small is not the same as absent: the
+    shapes it does contain are still NVRTC-compiled on first use, and first use
+    is inside whichever rearrangement first produces them. Since the set does
+    not depend on the observed load -- only on how many redundant slots exist
+    and how coarsely the row count is rounded -- it can be enumerated and
+    compiled before serving starts instead.
+
+    Returns dicts shaped for :func:`cuda_solver.warmup_shape`.
+    """
+    num_redundant = num_phy - num_logical
+    if num_redundant <= 0:
+        return []
+    targets = sorted(
+        {min(_ceil_to(k, _SHAPE_BUCKET), num_redundant)
+         for k in range(1, num_redundant + 1)}
+    )
+    shapes = []
+    for num_red_log in targets:
+        num_red_phy = num_red_log + num_redundant
+        shapes.append({
+            "nc": num_red_log + num_gpus,
+            "nv": num_red_phy + num_gpus + 2,
+            "num_single": num_logical - num_red_log,
+            "num_red_log": num_red_log,
+            "num_gpus": num_gpus,
+            "num_logical": num_logical,
+            "max_copies": max_copies,
+            "num_red_phy": num_red_phy,
+        })
+    return shapes
 
 # Sentinel preserved through the no-redundancy fallback for the
 # "-1 padded slot" convention frameworks use for invalid TopK entries.
@@ -247,17 +296,66 @@ def _build_layer_state(
     is_covered = phy2log != _PHY_UNCOVERED
 
     # Partition logicals into single-copy vs replicated.
-    log_single = torch.nonzero(log_counts == 1).flatten().to(torch.int64)
-    phy_single = log2phy[log_single, 0].to(torch.int64).contiguous()
-    log_replicated = torch.nonzero(log_counts > 1).flatten().to(torch.int64)
-    # phy_replicated: physical slots that (a) are claimed by some logical
-    # AND (b) that logical has more than one replica. Uncovered slots are
-    # masked out before the log_counts gather so the indexing stays in
-    # bounds even when ``_PHY_UNCOVERED == num_logical`` would otherwise
-    # OOB.
     safe_phy2log = phy2log.clamp(max=num_logical - 1)
+    is_replicated = log_counts > 1
+    has_redundancy = bool(is_replicated.any())
+
+    # Pad that partition so the LP has the same shape on every layer.
+    #
+    # Without this, ``num_red_log`` is however many logical experts a
+    # load-aware placement happened to give a second copy, which differs
+    # layer to layer -- a hot expert may take three copies while another
+    # takes none. Every distinct value is a distinct (nc, nv), and each of
+    # those NVRTC-compiles its own IPM, prep and post kernel: ~16 s apiece,
+    # inside the rearrangement that triggered the rebuild. Measured on
+    # DeepSeek-V3.2 at 32 redundant experts, one rearrangement compiled 17
+    # shapes and took 266 s, past vLLM's 300 s execute-model timeout; at 16
+    # it took 8 s, past DeepEP's shorter CPU-recv timeout on the peer ranks
+    # still waiting in dispatch.
+    #
+    # The padding promotes single-copy experts into the replicated set until
+    # it holds ``num_redundant`` of them. That is an identity, not an
+    # approximation: a promoted expert has exactly one replica, so its top
+    # row reads ``x_e = load_e`` and pins its own flow. Its load simply
+    # arrives at its GPU through ``B2 @ x`` instead of through the
+    # ``B1 @ t1`` base term -- same GPU, same amount, same peak. The row
+    # holds a variable no other row touches, so the constraint matrix stays
+    # full rank.
+    num_redundant = num_phy - num_logical
+    if has_redundancy and num_redundant > 0:
+        # Round up to a bucket rather than all the way to num_redundant.
+        #
+        # Padding every layer to the maximum does make the shape constant, but
+        # the solve is compute-bound in nc: measured on H20 at 32 redundant
+        # experts, a layer that needed nc=16 takes 75 us and one that needs
+        # nc=40 takes 301 us. Flattening everything to 40 costs +83% on the
+        # average solve, or +8.4 ms per forward across 61 layers -- a permanent
+        # per-batch tax traded for a one-off compile, on a policy that already
+        # loses throughput to its solve.
+        #
+        # Bucketing keeps both: at most num_redundant/_SHAPE_BUCKET distinct
+        # shapes to compile, and at most _SHAPE_BUCKET-1 rows of padding on any
+        # layer instead of up to num_redundant - num_red_log.
+        target = min(
+            _ceil_to(int(is_replicated.sum()), _SHAPE_BUCKET),
+            num_redundant,
+        )
+        shortfall = target - int(is_replicated.sum())
+        if shortfall > 0:
+            singles = torch.nonzero(~is_replicated).flatten()
+            # Lowest ids first: every rank builds this from the same
+            # committed placement, so the rule only has to be deterministic.
+            is_replicated[singles[:shortfall]] = True
+
+    log_single = torch.nonzero(~is_replicated).flatten().to(torch.int64)
+    phy_single = log2phy[log_single, 0].to(torch.int64).contiguous()
+    log_replicated = torch.nonzero(is_replicated).flatten().to(torch.int64)
+    # phy_replicated: physical slots that (a) are claimed by some logical
+    # AND (b) that logical is in the replicated set. Uncovered slots are
+    # masked out before the gather so the indexing stays in bounds even when
+    # ``_PHY_UNCOVERED == num_logical`` would otherwise OOB.
     phy_replicated = (
-        torch.nonzero(is_covered & (log_counts[safe_phy2log] > 1))
+        torch.nonzero(is_covered & is_replicated[safe_phy2log])
         .flatten()
         .to(torch.int64)
         .contiguous()
@@ -266,7 +364,30 @@ def _build_layer_state(
     num_single = int(log_single.numel())
     num_red_log = int(log_replicated.numel())
     num_red_phy = int(phy_replicated.numel())
-    has_redundancy = num_red_log > 0
+
+    # Promotion fixes num_red_phy at 2 * num_redundant only when every
+    # physical slot is claimed by some logical. A placement that leaves
+    # redundant slots unclaimed cannot reach that target by promoting
+    # logicals, so the shape varies again and the kernels recompile. Correct,
+    # just slow -- and worth saying out loud rather than rediscovering it as
+    # another multi-minute rearrangement.
+    # Bucketing fixes num_red_phy only because it is determined by num_red_log:
+    # every replicated logical brings its base copy, and the redundant slots
+    # bring one extra each. A placement that leaves redundant slots unclaimed
+    # breaks that identity, so the shape varies again and the kernels recompile
+    # for that layer alone. Correct, just slow -- and worth saying out loud
+    # rather than rediscovering it as another multi-minute rearrangement.
+    expected_red_phy = num_red_log + num_redundant
+    if has_redundancy and num_redundant > 0 and num_red_phy != expected_red_phy:
+        logger.warning(
+            "LPLB layer %s: %d unclaimed redundant slots leave the LP shape "
+            "at num_red_phy=%d instead of %d, so its kernels compile for this "
+            "layer alone.",
+            snapshot.layer_id,
+            expected_red_phy - num_red_phy,
+            num_red_phy,
+            expected_red_phy,
+        )
 
     log2phy_map_for_dispatch = log2phy.to(torch.int32).contiguous()
 
@@ -491,6 +612,8 @@ class LPLBL2Router(TokenRouter):
         self._layer_state: Dict[int, _LPLBLayerState] = {}
         # Mutable LP workspaces cannot be shared by overlapping CUDA graphs.
         self._execution_state: Dict[Tuple[int, Hashable], _LPLBLayerState] = {}
+        # The shape set is compiled once per process, on the first layer seen.
+        self._warmed_shape_set = False
 
     def prepare_layer(self, snapshot: PlacementSnapshot) -> None:
         """Install state for the framework's newly committed placement.
@@ -517,6 +640,26 @@ class LPLBL2Router(TokenRouter):
             key: value for key, value in self._execution_state.items() if key[0] != layer_id
         }
 
+    def needs_global_logical_count(self, request: RoutingRequest) -> bool:
+        """Report whether this layer's LP actually consumes the count.
+
+        A layer whose logical experts each hold exactly one replica has no
+        traffic split to decide: :meth:`route_tokens` returns identity dispatch
+        and never reads the count. Gathering it anyway costs one EP collective
+        per layer per forward for a result that is discarded -- the whole of the
+        overhead seen on zero-redundancy configurations.
+
+        The answer is read off the cached per-layer state, so asking costs
+        nothing after the first call for a given placement.
+        """
+
+        if request.placement is None:
+            return False
+        return self._get_or_build_layer_state(
+            request.layer_id,
+            request.placement,
+        ).has_redundancy
+
     def route_tokens(
         self,
         request: RoutingRequest,
@@ -541,13 +684,6 @@ class LPLBL2Router(TokenRouter):
                 "LPLBL2Router requires RoutingRequest.placement to be a "
                 "PlacementSnapshot (logical->physical translation is non-optional)."
             )
-        if request.global_logical_count is None:
-            raise ValueError(
-                "LPLBL2Router requires RoutingRequest.global_logical_count "
-                "(the MLB orchestrator must count + all-reduce per-logical-expert "
-                "token counts before invoking the policy)."
-            )
-
         topk_ids = request.logical_topk_ids
         if not isinstance(topk_ids, Tensor):
             raise TypeError("LPLBL2Router requires torch.Tensor logical_topk_ids.")
@@ -561,22 +697,41 @@ class LPLBL2Router(TokenRouter):
         # physical slot for each logical. Still passes through empty batches
         # untouched (caller upstream is expected to short-circuit the path
         # when num_tokens == 0, but be tolerant here).
+        #
+        # This runs before the global_logical_count requirement below, because
+        # the count is what this path exists to avoid paying for: the
+        # orchestrator asks needs_global_logical_count() first and skips the EP
+        # collective when the answer is False, so arriving here without a count
+        # is the expected case, not an error.
         if not base_state.has_redundancy:
-            default_map = request.placement.default_physical_for_logical
-            if default_map is None:
-                default_map = request.placement.logical_to_physical_candidates[:, 0]
+            metadata: dict[str, object] = {
+                "policy": policy.name,
+                "lp_skipped": "no_redundancy",
+            }
+            # The planned load can only be stated when the count was gathered.
+            # Without it the orchestrator falls back to counting the physical
+            # ids returned here, which for identity dispatch describes the very
+            # same placement.
+            if request.global_logical_count is not None:
+                default_map = request.placement.default_physical_for_logical
+                if default_map is None:
+                    default_map = request.placement.logical_to_physical_candidates[:, 0]
+                metadata["planned_rank_load"] = _planned_rank_load_from_mapping(
+                    request.global_logical_count,
+                    default_map,
+                    request.placement,
+                )
             return RoutingDecision(
                 routed_physical_topk_ids=_identity_dispatch(topk_ids, request.placement),
                 topk_weights=request.topk_weights,
-                metadata={
-                    "policy": policy.name,
-                    "lp_skipped": "no_redundancy",
-                    "planned_rank_load": _planned_rank_load_from_mapping(
-                        request.global_logical_count,
-                        default_map,
-                        request.placement,
-                    ),
-                },
+                metadata=metadata,
+            )
+
+        if request.global_logical_count is None:
+            raise ValueError(
+                "LPLBL2Router requires RoutingRequest.global_logical_count "
+                "(the MLB orchestrator must count + all-reduce per-logical-expert "
+                "token counts before invoking the policy)."
             )
 
         # Empty-token fast path: the orchestrator has already participated in
@@ -628,6 +783,33 @@ class LPLBL2Router(TokenRouter):
             state.phy_replicated,
             state.log2phy,
         )
+        metadata = {
+            "policy": policy.name,
+            "planned_rank_load": _planned_rank_load_from_probability(
+                global_counts,
+                state.log2phy_prob,
+                state.log2phy_map_for_dispatch,
+                request.placement,
+            ),
+            # The LP's actual solution, exposed unconditionally rather than
+            # only when a caller asks to apply it itself: MLB_DUMP_LP reads
+            # this to compute achievable headroom offline, and that diagnostic
+            # should not depend on which dispatch mechanism the run happens to
+            # use.
+            #
+            # Unlike planned_rank_load above, this is the live per-layer buffer
+            # itself, not a value computed fresh from it -- extract_log2phy_prob
+            # overwrites it in place on this layer's next forward, the same way
+            # every other CUDA-graph-safe state tensor in this module does. A
+            # consumer that needs the value later, not synchronously, must copy
+            # it (``.clone()`` / ``.cpu()``) before returning.
+            "lp_probability": state.log2phy_prob,
+        }
+
+        # Load recording is the framework's job, not this kernel's: it always
+        # runs the load view it already owns through its own pass afterward
+        # regardless of what this call does, so handing it one here would
+        # only get every slot counted twice.
         routed_physical = self._kernels.dispatch_probability(
             topk_ids,
             state.log2phy_prob,
@@ -637,15 +819,7 @@ class LPLBL2Router(TokenRouter):
         return RoutingDecision(
             routed_physical_topk_ids=routed_physical,
             topk_weights=request.topk_weights,
-            metadata={
-                "policy": policy.name,
-                "planned_rank_load": _planned_rank_load_from_probability(
-                    global_counts,
-                    state.log2phy_prob,
-                    state.log2phy_map_for_dispatch,
-                    request.placement,
-                ),
-            },
+            metadata=metadata,
         )
 
     # -- Internal helpers --------------------------------------------------
@@ -663,7 +837,43 @@ class LPLBL2Router(TokenRouter):
         self._layer_state[layer_id] = state
         return state
 
+    def _warmup_shape_set(self, snapshot: PlacementSnapshot) -> None:
+        """Compile the whole shape set once, on the first layer prepared.
+
+        The framework announces its initial placement after weight loading and
+        before serving, so this lands off the critical path. Leaving it lazy
+        instead puts the compiles inside a rearrangement, where a stall is
+        measured against watchdogs: 266 s of compiling once tripped vLLM's
+        300 s execute-model timeout and killed every engine core.
+        """
+        if self._warmed_shape_set:
+            return
+        self._warmed_shape_set = True
+        shapes = bucketed_shape_set(
+            snapshot.num_logical_experts,
+            snapshot.num_physical_experts,
+            self.num_gpus,
+            int(snapshot.logical_to_physical_candidates.shape[1]),
+        )
+        if not shapes:
+            return
+        # Optional on purpose: precompiling is an optimisation, and a backend
+        # that cannot do it should fall back to compiling lazily rather than
+        # fail to run at all.
+        warm = getattr(self._kernels, "warmup_shape", None)
+        if warm is None:
+            return
+        device = snapshot.logical_to_physical_candidates.device
+        for shape in shapes:
+            warm(num_iters=self.ipm_iters, device=device, **shape)
+        logger.info(
+            "LPLB: precompiled %d LP shapes (nc %s) before serving",
+            len(shapes),
+            ",".join(str(s["nc"]) for s in shapes),
+        )
+
     def _build_and_warmup_layer_state(self, snapshot: PlacementSnapshot) -> _LPLBLayerState:
+        self._warmup_shape_set(snapshot)
         state = _build_layer_state(snapshot, self.num_gpus, self.big_m_penalty)
 
         # Warmup is per-shape; only meaningful when LP is actually used.

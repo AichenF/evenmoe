@@ -8,6 +8,7 @@ import torch
 from torch import Tensor
 
 from moe_load_balancer.core.l2 import TokenRouter
+from moe_load_balancer.kernels.token_draw import replica_index
 from moe_load_balancer.core.types import (
     RoutingDecision,
     RoutingPhase,
@@ -82,15 +83,13 @@ def route_dynamic_replicas(
         logical_topk_ids,
         logical_to_physical_count.shape[0],
     )
-    chosen_dispatch_index = (
-        torch.randint(
-            0,
-            65536,
-            logical_topk_ids.shape,
-            dtype=torch.int32,
-            device=logical_topk_ids.device,
-        )
-        % logical_to_physical_count[safe_ids]
+    # From the token index, not an RNG: the choice has to be reproducible and
+    # agreed upon by every rank that sees the token. See kernels.token_draw.
+    chosen_dispatch_index = replica_index(
+        logical_topk_ids.shape,
+        logical_topk_ids.shape[-1],
+        logical_to_physical_count[safe_ids],
+        logical_topk_ids.device,
     )
     physical_ids = logical_to_physical_candidates[safe_ids, chosen_dispatch_index]
     return torch.where(valid, physical_ids, logical_topk_ids)
@@ -135,8 +134,74 @@ def _safe_logical_ids(
     return safe_ids, valid
 
 
+def _fused_replica_dispatch(request, shares, candidates):
+    """Route through the shared dispatch kernel.
+
+    All three replica policies differ only in the share table they hand over --
+    None for a uniform draw, one-hot for a pinned replica, an LP solution for
+    LPLB -- so they can share one launch instead of each assembling ids from
+    tensor ops. Measured on H20 at 29.6 us per layer against 151.9 us for the
+    tensor-op route.
+
+    Load recording is the framework's job, not this kernel's: it always runs
+    the load view it already owns through its own pass afterward, so handing
+    it one here would only get counted twice.
+    """
+    from moe_load_balancer.kernels.lplb import CUDALPLBKernels
+
+    kernels = getattr(request, "_kernels", None) or CUDALPLBKernels()
+    return kernels.dispatch_probability(
+        request.logical_topk_ids,
+        shares,
+        candidates,
+    )
+
+
+
+def route_dynamic_random_replicas(
+    logical_topk_ids: Tensor,
+    candidates: Tensor,
+    counts: Tensor,
+) -> Tensor:
+    """SGLang's `dynamic`, reproduced verbatim.
+
+    `torch.randint(0, 65536) % live_replicas`, exactly as
+    `_topk_ids_logical_to_physical_dynamic` does it. Kept as its own policy
+    rather than folded into `dynamic` because the two are not interchangeable
+    here: the draw is per-process RNG, and tensor-parallel peers see the same
+    tokens while holding different experts, so each peer draws its own numbers
+    and a token can be sent to two different replicas of its expert. That is
+    why `dynamic` uses a hash of the token index instead.
+
+    This exists so the two runtimes can be compared on the same policy, not so
+    it can be deployed under TP. `is_tp_safe` says so, and the orchestrator is
+    expected to surface that rather than let it be selected silently.
+    """
+    if not isinstance(logical_topk_ids, Tensor):
+        raise TypeError("Replica routing requires torch.Tensor logical_topk_ids.")
+    shape, dtype = logical_topk_ids.shape, logical_topk_ids.dtype
+    flat = logical_topk_ids.reshape(-1).to(torch.int64)
+    safe = flat.clamp(0, candidates.shape[0] - 1)
+    live = counts.to(torch.int64)[safe].clamp(min=1)
+    idx = torch.randint(
+        0, 65536, flat.shape, dtype=torch.int32, device=flat.device
+    ).to(torch.int64) % live
+    picked = candidates.to(torch.int64)[safe, idx]
+    return torch.where(flat >= 0, picked, flat).reshape(shape).to(dtype)
+
+
 class StaticL2Router(TokenRouter):
-    """Deterministic routing through the framework-selected replica map."""
+    """Deterministic routing through the framework-selected replica map.
+
+    Always resolves ids on the tensor route below. A share-table form used to
+    exist for runtimes that fuse replica selection with load recording, but
+    vLLM -- the only caller that had such a kernel -- now bakes this policy's
+    answer into a placement-fixed map instead (see
+    ``RoutingCapabilities.dispatch_fixed_by_placement``) and never calls this
+    method at all, and routing the share table through that same fused kernel
+    had already measured worse than this tensor route in three attempts
+    (-3.79% against -2.03%). Nothing else ever asked for the share form.
+    """
 
     phase = RoutingPhase.PHYSICAL_ROUTING
 
@@ -152,10 +217,7 @@ class StaticL2Router(TokenRouter):
             raise ValueError(
                 "Static replica routing requires " "PlacementSnapshot.default_physical_for_logical."
             )
-        physical_ids = route_static_replicas(
-            request.logical_topk_ids,
-            default_map,
-        )
+        physical_ids = route_static_replicas(request.logical_topk_ids, default_map)
         return RoutingDecision(
             routed_physical_topk_ids=physical_ids,
             topk_weights=request.topk_weights,
@@ -175,7 +237,43 @@ class DynamicL2Router(TokenRouter):
     ) -> RoutingDecision:
         if request.placement is None:
             raise ValueError("Dynamic replica routing requires a committed placement.")
-        physical_ids = route_dynamic_replicas(
+        candidates = request.placement.logical_to_physical_candidates
+        if request.logical_topk_ids.is_cuda:
+            # No share table: the kernel then draws the way the framework's own
+            # does, hash modulo live replicas, which is what keeps this policy
+            # bit-identical to the built-in path it is the control for.
+            physical_ids = _fused_replica_dispatch(request, None, candidates)
+        else:
+            physical_ids = route_dynamic_replicas(
+                request.logical_topk_ids,
+                candidates,
+                request.placement.logical_to_physical_count,
+            )
+        return RoutingDecision(
+            routed_physical_topk_ids=physical_ids,
+            topk_weights=request.topk_weights,
+            metadata={"policy": policy.name},
+        )
+
+
+class DynamicRandomL2Router(TokenRouter):
+    """`dynamic` as SGLang draws it: a per-call RNG rather than a token hash.
+
+    Provided for cross-runtime comparison. Not TP-safe -- see
+    :func:`route_dynamic_random_replicas`.
+    """
+
+    phase = RoutingPhase.PHYSICAL_ROUTING
+    is_tp_safe = False
+
+    def route_tokens(
+        self,
+        request: RoutingRequest,
+        policy: RoutingPolicyConfig,
+    ) -> RoutingDecision:
+        if request.placement is None:
+            raise ValueError("Dynamic replica routing requires a committed placement.")
+        physical_ids = route_dynamic_random_replicas(
             request.logical_topk_ids,
             request.placement.logical_to_physical_candidates,
             request.placement.logical_to_physical_count,
@@ -185,3 +283,4 @@ class DynamicL2Router(TokenRouter):
             topk_weights=request.topk_weights,
             metadata={"policy": policy.name},
         )
+

@@ -15,20 +15,87 @@ from moe_load_balancer.core.types import RoutingPolicyConfig
 
 
 _INPUT_TRANSFORMS = frozenset({"fake"})
-_REPLICA_POLICIES = frozenset({"static", "dynamic", "lplb"})
+_REPLICA_POLICIES = frozenset({"static", "dynamic", "dynamic_random", "lplb"})
 _WATERFILL_POLICIES = frozenset({"waterfill", "waterfill_dynamic"})
 _ALIASES = {"lp": "lplb"}
 
 
 @dataclass(frozen=True)
+class ExpertDeploymentConfig:
+    """What a framework can tell MLB about a deployment before it starts.
+
+    Deliberately small: this is consulted while the framework is still reading
+    its configuration, so it may only contain what is known that early.
+    """
+
+    num_redundant_experts: int = 0
+    routes_shared_expert: bool = False
+    """Whether the framework can dispatch the shared expert to a chosen rank.
+
+    False on runtimes that replicate it per rank, where there is no such
+    decision to hand back.
+    """
+
+
+@dataclass(frozen=True)
 class RoutingCapabilities:
-    """Framework-visible requirements of a configured routing pipeline."""
+    """Framework-visible requirements of a configured routing pipeline.
+
+    Every field exists so the framework can act on a *declaration* instead of
+    on an assumption about what a policy is. A framework that keys behaviour off
+    a policy name both taxes policies that do not need the behaviour and leaves
+    policies that do need it unable to ask.
+    """
 
     requires_post_topk_routing: bool = False
     requires_placement_state: bool = False
     requires_rank_dispatch_map: bool = False
     routes_shared_expert: bool = False
     requires_deepep: bool = False
+
+    # -- inputs the pipeline consumes -------------------------------------
+    dispatch_fixed_by_placement: bool = False
+    """Whether the per-token answer is a pure function of the committed placement.
+
+    True means the policy's choice does not depend on the batch at all, so a
+    framework can materialise it once when a placement commits and never call
+    the pipeline per forward. ``static`` is the case: it resolves a replica per
+    logical expert from the placement, and re-deriving that on every forward
+    buys nothing.
+
+    This exists because crossing the routing boundary is not free. On vLLM the
+    call measured 426 us per layer per forward against a policy-free path that
+    costs nothing, which is 26 ms of a ~1 s forward -- the whole reason `static`
+    trailed the built-in selection it was supposed to reproduce. SGLang has no
+    such gap because its `static` is one tensor index inside its own TopK code;
+    declaring the property here lets a framework reach the same place without
+    the pipeline having to know which runtime it is talking to.
+
+    A policy that sets this must publish its answer through
+    :attr:`PlacementSnapshot.default_physical_for_logical`.
+    """
+
+    consumes_global_logical_count: bool = False
+    """Whether any policy reads the EP-wide per-logical token count.
+
+    Distinct from ``requires_post_topk_routing``: a replica policy can run
+    without ever looking at the load, and gathering the count for it costs a
+    collective per layer per forward that is then discarded.
+
+    This is the pipeline-level declaration a framework adapter reads once, at
+    configuration time, to decide whether to gather the count at all. The
+    orchestrator's own per-request, per-router check of the same underlying
+    fact is :class:`~moe_load_balancer.core.l2.GlobalLogicalCountConsumer`.
+    """
+
+    # -- runtime properties the framework has to respect -------------------
+    supports_concurrent_microbatches: bool = True
+    """False when policies keep per-layer state that concurrent micro-batches
+    would clobber."""
+
+    graph_stability: str = "stable"
+    """``stable``, or ``realloc_on_placement_change`` when a placement update
+    can replace policy tensors and invalidate a captured graph."""
 
 
 @dataclass(frozen=True)
@@ -46,6 +113,32 @@ class RoutingPipeline:
     post_topk_policies: tuple[RoutingPolicyConfig, ...]
     input_transform: Optional[str]
     capabilities: RoutingCapabilities
+
+    def is_applicable(self, topology: ExpertDeploymentConfig) -> Optional[str]:
+        """Why this pipeline cannot act on a deployment, or None if it can.
+
+        Returns a reason rather than a bool so a framework that disables the
+        pipeline can tell the operator *what* it disabled and why. A silent
+        bool would turn a diagnosable configuration into a mystery.
+
+        Applicability is per policy, not per layer: LPLB needs replicated
+        experts to have a split to decide, Waterfill needs the framework to
+        dispatch the shared expert at all, and neither condition follows from
+        the other. Deciding both from one framework-side assumption is how a
+        policy that had work to do gets switched off.
+        """
+
+        if "lplb" in self.policies and topology.num_redundant_experts == 0:
+            return (
+                "lplb divides a logical expert's traffic among its replicas, "
+                "and this deployment has no redundant experts"
+            )
+        if self.capabilities.routes_shared_expert and not topology.routes_shared_expert:
+            return (
+                "waterfill assigns the shared expert to a rank, and this "
+                "runtime does not dispatch the shared expert"
+            )
+        return None
 
     @classmethod
     def default_replica_routing(cls) -> RoutingPipeline:
@@ -156,12 +249,26 @@ class RoutingPipeline:
                 )
             )
 
+        # Only LPLB solves against the EP-wide load; the other replica policies
+        # decide from placement alone. Declaring that here is what lets a
+        # framework skip the collective rather than gather it for every
+        # post-TopK policy.
+        consumes_count = replica_policy == "lplb" or waterfill_policy is not None
         capabilities = RoutingCapabilities(
             requires_post_topk_routing=bool(post_topk),
             requires_placement_state=replica_policy == "lplb",
             requires_rank_dispatch_map=replica_policy == "static",
+            # static decides from placement alone, so the framework may bake
+            # its answer in at commit time instead of paying the boundary on
+            # every forward.
+            dispatch_fixed_by_placement=replica_policy == "static",
             routes_shared_expert=waterfill_policy is not None,
             requires_deepep=waterfill_policy is not None,
+            consumes_global_logical_count=consumes_count,
+            supports_concurrent_microbatches=replica_policy != "lplb",
+            graph_stability=(
+                "realloc_on_placement_change" if replica_policy == "lplb" else "stable"
+            ),
         )
         return cls(
             name=canonical,
