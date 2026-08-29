@@ -163,6 +163,32 @@ class MoELoadBalancer:
             if prepare is not None:
                 prepare(placement)
 
+    def prepare_routing_layer(
+        self,
+        policy_name: str,
+        placement: PlacementSnapshot,
+    ) -> None:
+        """Prepare one router's per-layer state for a freshly staged placement.
+
+        A single-policy form of on_placement_committed: a framework driving
+        exactly one policy through the route_prepared_tokens fast path needs
+        that policy's prepare_layer called before the fast path is, but has
+        no reason to also notify every other registered policy the way
+        on_placement_committed does for a framework driving the full
+        route_tokens pipeline.
+        """
+
+        try:
+            router = self._routing_policies[policy_name]
+        except KeyError as exc:
+            raise ValueError(
+                f"Unknown routing policy {policy_name!r}; registered policies are "
+                f"{sorted(self._routing_policies)}."
+            ) from exc
+        prepare = getattr(router, "prepare_layer", None)
+        if prepare is not None:
+            prepare(placement)
+
     def route_prepared_tokens(
         self,
         policy_name: str,
