@@ -9,6 +9,7 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+*.so
 .coverage
 htmlcov/
 .mypy_cache/

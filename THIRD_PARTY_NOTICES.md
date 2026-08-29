@@ -59,3 +59,16 @@ The MIT-licensed components above are distributed under the following terms:
   `src/moe_load_balancer/policies/l1/eplb/algorithms/elasticity_aware.py`.
 
 The Apache License 2.0 text is provided in the repository's `LICENSE` file.
+
+## UltraEP
+
+- Source: <https://github.com/Dots-Infra/UltraEP>
+- Version: v1.0.0, commit `94cab099b44fffa99a82fea99e7c12d89cf65e4f`
+- License: MIT
+- Copyright: Copyright (c) 2026 PKU-DASYS and Dots-Infra
+- Local code: placement and sparse quota-rerouting sources under
+  `src/moe_load_balancer/kernels/ultraep/`; the UltraEP communication runtime
+  is not copied into MLB.
+
+The original MIT license is retained at
+`src/moe_load_balancer/kernels/ultraep/LICENSE.ultraep`.

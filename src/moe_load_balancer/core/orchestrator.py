@@ -43,10 +43,12 @@ class MoELoadBalancer:
                 EPLBPlacementPlanner,
                 SUPPORTED_PLACEMENT_POLICIES,
             )
+            from moe_load_balancer.policies.l3.ultraep import UltraEPL3Policy
 
             placement_planners = {
                 name: EPLBPlacementPlanner(name) for name in SUPPORTED_PLACEMENT_POLICIES
             }
+            placement_planners["ultraep"] = UltraEPL3Policy()
         if rank_load_counter is None:
             from moe_load_balancer.kernels.rank_count import count_routed_per_rank
 
@@ -104,6 +106,10 @@ class MoELoadBalancer:
                 world_size=ep_size,
                 experts_per_rank=experts_per_rank,
             )
+        if "ultraep" in policy_names:
+            from moe_load_balancer.policies.l2.ultraep import UltraEPL2Router
+
+            routers["ultraep"] = UltraEPL2Router()
         return cls(
             routing_policies=routers,
             routing_pipeline=pipeline,
@@ -117,6 +123,26 @@ class MoELoadBalancer:
     @property
     def routing_capabilities(self) -> RoutingCapabilities:
         return self._routing_pipeline.capabilities
+
+    @property
+    def placement_policy(self) -> Optional[str]:
+        """Return the L1 policy coupled to this routing pipeline, if any."""
+
+        return self._routing_pipeline.placement_policy
+
+    def build_initial_physical_to_logical_map(self, **kwargs):
+        """Build policy-owned bootstrap placement without exposing its type."""
+
+        policy_name = self.placement_policy
+        if policy_name is None:
+            return None
+        planner = self._placement_planners[policy_name]
+        builder = getattr(planner, "build_initial_physical_to_logical_map", None)
+        if builder is None:
+            raise ValueError(
+                f"Placement policy {policy_name!r} has no bootstrap placement builder."
+            )
+        return builder(**kwargs)
 
     def on_placement_committed(self, placement: PlacementSnapshot) -> None:
         """Notify active policies that a framework placement was committed.
@@ -136,6 +162,28 @@ class MoELoadBalancer:
             prepare = getattr(router, "prepare_layer", None)
             if prepare is not None:
                 prepare(placement)
+
+    def route_prepared_tokens(
+        self,
+        policy_name: str,
+        layer_id: int,
+        logical_topk_ids: TensorLike,
+    ) -> TensorLike:
+        """Run one prepared physical router without rebuilding an L2 request."""
+
+        try:
+            router = self._routing_policies[policy_name]
+        except KeyError as exc:
+            raise ValueError(
+                f"Unknown routing policy {policy_name!r}; registered policies are "
+                f"{sorted(self._routing_policies)}."
+            ) from exc
+        route_prepared = getattr(router, "route_prepared_tokens", None)
+        if route_prepared is None:
+            raise ValueError(
+                f"Routing policy {policy_name!r} has no prepared-token fast path."
+            )
+        return route_prepared(layer_id, logical_topk_ids)
 
     def plan_placement(self, request: PlacementRequest) -> PlacementPlan:
         """Run the selected L1 policy and return an uncommitted candidate."""

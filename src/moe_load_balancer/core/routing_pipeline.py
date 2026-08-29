@@ -15,7 +15,7 @@ from moe_load_balancer.core.types import RoutingPolicyConfig
 
 
 _INPUT_TRANSFORMS = frozenset({"fake"})
-_REPLICA_POLICIES = frozenset({"static", "dynamic", "dynamic_random", "lplb"})
+_REPLICA_POLICIES = frozenset({"static", "dynamic", "dynamic_random", "lplb", "ultraep"})
 _WATERFILL_POLICIES = frozenset({"waterfill", "waterfill_dynamic"})
 _ALIASES = {"lp": "lplb"}
 
@@ -113,6 +113,14 @@ class RoutingPipeline:
     post_topk_policies: tuple[RoutingPolicyConfig, ...]
     input_transform: Optional[str]
     capabilities: RoutingCapabilities
+    placement_policy: Optional[str] = None
+    """The L1 placement policy this L2 selection requires, if any.
+
+    Set only when a replica policy's dispatch decision is meaningless without
+    a specific placement algorithm's output -- ``ultraep``'s L2 router reads a
+    quota table that only its own L3 policy produces. ``None`` for policies
+    that work with whatever placement the framework already committed.
+    """
 
     def is_applicable(self, topology: ExpertDeploymentConfig) -> Optional[str]:
         """Why this pipeline cannot act on a deployment, or None if it can.
@@ -132,6 +140,11 @@ class RoutingPipeline:
             return (
                 "lplb divides a logical expert's traffic among its replicas, "
                 "and this deployment has no redundant experts"
+            )
+        if "ultraep" in self.policies and topology.num_redundant_experts == 0:
+            return (
+                "ultraep places redundant replicas by quota, and this "
+                "deployment has no redundant experts"
             )
         if self.capabilities.routes_shared_expert and not topology.routes_shared_expert:
             return (
@@ -263,11 +276,13 @@ class RoutingPipeline:
             # every forward.
             dispatch_fixed_by_placement=replica_policy == "static",
             routes_shared_expert=waterfill_policy is not None,
-            requires_deepep=waterfill_policy is not None,
+            requires_deepep=waterfill_policy is not None or replica_policy == "ultraep",
             consumes_global_logical_count=consumes_count,
-            supports_concurrent_microbatches=replica_policy != "lplb",
+            supports_concurrent_microbatches=replica_policy not in ("lplb", "ultraep"),
             graph_stability=(
-                "realloc_on_placement_change" if replica_policy == "lplb" else "stable"
+                "realloc_on_placement_change"
+                if replica_policy in ("lplb", "ultraep")
+                else "stable"
             ),
         )
         return cls(
@@ -276,4 +291,5 @@ class RoutingPipeline:
             post_topk_policies=tuple(post_topk),
             input_transform=input_transform,
             capabilities=capabilities,
+            placement_policy="ultraep" if replica_policy == "ultraep" else None,
         )
