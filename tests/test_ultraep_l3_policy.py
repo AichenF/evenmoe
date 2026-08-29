@@ -65,6 +65,68 @@ def test_ultraep_l3_uses_existing_placement_plan_contract():
     assert plan.metadata["rank_quota_prefix"].shape == (2, 4, 2)
 
 
+@pytest.mark.integration
+def test_ultraep_l3_plan_handles_multiple_layers():
+    """plan() slices per_rank_loads[:, layer_id] -- the middle dimension of a
+    [ep_size, num_layers, num_logical_experts] tensor -- which is only
+    non-contiguous once num_layers > 1. The mock-backend tests above never
+    exercise this against the real kernel, which is the only thing that
+    enforces contiguity; a mock happily accepts any stride.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required")
+    pytest.importorskip("moe_load_balancer.kernels.ultraep._C")
+
+    from moe_load_balancer.kernels.ultraep import UltraEPPlacementBackend
+
+    ep_size, local_masters, local_redundant = 8, 8, 2
+    num_logical = ep_size * local_masters
+    num_physical = ep_size * (local_masters + local_redundant)
+    num_layers = 2
+    device = torch.device("cuda")
+
+    generator = torch.Generator().manual_seed(0)
+    # The two layers get independently-shuffled loads so a layer-1 solve that
+    # silently reused layer-0's (or garbage) memory would very likely produce
+    # a different, and likely invalid, placement instead of coincidentally
+    # matching this one.
+    logical_count = torch.stack(
+        [
+            torch.randint(1, 50, (ep_size, num_logical), generator=generator)
+            for _ in range(num_layers)
+        ],
+        dim=1,
+    ).to(device=device, dtype=torch.float32)
+
+    request = PlacementRequest(
+        stats=PlacementStats(logical_count=logical_count),
+        topology=PlacementTopology(
+            num_physical_experts=num_physical,
+            num_local_physical_experts=local_masters + local_redundant,
+            num_groups=1,
+            num_nodes=1,
+        ),
+        policy=PlacementPolicyConfig(
+            name="ultraep", metadata={"rank": 0, "num_nvl_ranks": ep_size}
+        ),
+    )
+    plan = UltraEPL3Policy(backend=UltraEPPlacementBackend()).plan(request)
+
+    assert plan.physical_to_logical_map.shape == (num_layers, num_physical)
+    assert int(plan.physical_to_logical_map.min()) >= 0
+    assert int(plan.physical_to_logical_map.max()) < num_logical
+    for layer_id in range(num_layers):
+        # Every logical expert must own at least one physical slot in every
+        # layer, independently -- what the contiguous() fix protects.
+        assert (
+            len(torch.unique(plan.physical_to_logical_map[layer_id]))
+            == num_logical
+        )
+    assert not torch.equal(
+        plan.physical_to_logical_map[0], plan.physical_to_logical_map[1]
+    )
+
+
 @pytest.mark.unit
 def test_ultraep_initial_layout_keeps_master_slots_fixed():
     mapping = build_ultraep_initial_physical_to_logical_map(

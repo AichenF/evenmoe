@@ -95,25 +95,34 @@ class UltraEPL3Policy:
         per_rank_loads = logical_count.to(torch.int32).contiguous()
         global_loads = per_rank_loads.sum(dim=0, dtype=torch.int32).contiguous()
         max_replicas = ep_size
-        physical_to_logical = torch.empty(
+        # The initial value here does not matter: the kernel memsets all four
+        # of these itself on every call (physical_to_logical_map and
+        # logical_to_physical_map to -1, the rest to 0) before it solves.
+        # zeros rather than empty only avoids handing the kernel whatever
+        # garbage this process's allocator last left behind, on the off
+        # chance a future kernel revision reads before it solves.
+        physical_to_logical = torch.zeros(
             (num_layers, topology.num_physical_experts),
             dtype=torch.int32,
             device=global_loads.device,
         )
-        logical_to_physical = torch.empty(
+        logical_to_physical = torch.zeros(
             (num_layers, num_logical_experts, max_replicas),
             dtype=torch.int32,
             device=global_loads.device,
         )
-        replica_counts = torch.empty(
+        replica_counts = torch.zeros(
             (num_layers, num_logical_experts),
             dtype=torch.int32,
             device=global_loads.device,
         )
-        rank_quota_prefix = torch.empty_like(logical_to_physical)
+        rank_quota_prefix = torch.zeros_like(logical_to_physical)
 
         for layer_id in range(num_layers):
-            per_rank = per_rank_loads[:, layer_id]
+            # Non-contiguous whenever num_layers > 1: this slices the middle
+            # dimension of a [ep_size, num_layers, num_logical_experts]
+            # tensor, and the kernel reads it by raw pointer.
+            per_rank = per_rank_loads[:, layer_id].contiguous()
             if per_rank.shape[0] != ep_size:
                 raise ValueError("UltraEP placement requires one logical-load sample per EP rank.")
             logical_quota = torch.empty_like(logical_to_physical[layer_id])
@@ -134,6 +143,33 @@ class UltraEPL3Policy:
                 rank=rank,
                 tuning=self._tuning,
             )
+
+        # The kernel memsets physical_to_logical_map to -1 before it solves,
+        # then only overwrites the slots it actually assigns a replica to: a
+        # redundant slot whose would-be replica falls below the tuning's
+        # token floor is deliberately left at -1, UltraEP's "not worth
+        # materializing" signal. Every physical slot in a PlacementPlan is
+        # otherwise guaranteed to name a real logical expert -- the
+        # framework's load-history scatter and weight table both index by it
+        # unconditionally -- so a slot the solve declined is filled with this
+        # rank's own master experts, round-robin, the same fallback the
+        # initial bootstrap layout already uses for a redundant slot with no
+        # information yet. It is a harmless duplicate, never a wrong answer:
+        # nothing routes tokens there unless logical_to_all_physical_map also
+        # lists it as a candidate, which this fallback deliberately leaves
+        # untouched -- the solve's decision not to route here stands.
+        unassigned = physical_to_logical < 0
+        if unassigned.any():
+            physical_ids = torch.arange(
+                topology.num_physical_experts, device=physical_to_logical.device
+            )
+            local_idx = physical_ids % topology.num_local_physical_experts
+            rank_of_slot = physical_ids // topology.num_local_physical_experts
+            fallback = (
+                rank_of_slot * num_local_master_experts
+                + local_idx % num_local_master_experts
+            ).to(torch.int32)
+            physical_to_logical = torch.where(unassigned, fallback, physical_to_logical)
 
         return PlacementPlan(
             physical_to_logical_map=physical_to_logical,

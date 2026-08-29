@@ -51,6 +51,36 @@ def test_l1_request_is_a_plain_translation():
 
 
 @pytest.mark.unit
+def test_l1_request_carries_caller_rank_for_ultraep():
+    # ultraep's placement kernel solves once per EP rank and validates the
+    # value is in range, so the request must carry which rank is calling --
+    # every other MLB policy ignores it.
+    request = to_placement_request(
+        torch.tensor([[1.0, 1.0, 1.0, 1.0]]),
+        num_replicas=8,
+        num_ranks=2,
+        num_groups=1,
+        num_nodes=1,
+        algorithm="ultraep",
+        ep_rank=1,
+    )
+    assert request.policy.metadata["rank"] == 1
+
+
+@pytest.mark.unit
+def test_l1_request_omits_rank_metadata_when_not_given():
+    request = to_placement_request(
+        torch.tensor([[1.0, 1.0, 1.0, 1.0]]),
+        num_replicas=8,
+        num_ranks=2,
+        num_groups=1,
+        num_nodes=1,
+        algorithm="deepseek",
+    )
+    assert "rank" not in request.policy.metadata
+
+
+@pytest.mark.unit
 def test_l1_request_carries_old_placement_for_glue():
     old = torch.tensor([[0, 1, 2, 3]])
     request = to_placement_request(

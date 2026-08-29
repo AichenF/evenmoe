@@ -38,13 +38,17 @@ def to_placement_request(
     algorithm: str = "auto",
     old_physical_to_logical_map: Optional[TensorLike] = None,
     active_ranks: Optional[TensorLike] = None,
+    ep_rank: Optional[int] = None,
 ) -> PlacementRequest:
     """Translate vLLM's ``AbstractEplbPolicy.rebalance_experts`` arguments.
 
     vLLM completes recording, physical-to-logical aggregation, window
     summation and the EP all-reduce before invoking its placement policy, so
     ``logical_count`` arrives already in the shape MLB wants:
-    ``[num_moe_layers, num_logical_experts]``.
+    ``[num_moe_layers, num_logical_experts]`` -- except for a policy that
+    declares ``wants_per_rank_weight`` (currently only ``ultraep``), which
+    gets the pre-reduction per-rank breakdown instead:
+    ``[num_ranks, num_moe_layers, num_logical_experts]``.
 
     ``num_replicas`` is vLLM's name for the total physical expert slot count;
     ``num_ranks`` is the EP world size.  MLB's topology is expressed in terms
@@ -56,6 +60,12 @@ def to_placement_request(
     building per-layer ``PlacementSnapshot`` objects that nothing reads would
     cost real time on a 58-layer model.  Glue is responsible for slot
     preservation until an MLB policy claims this input.
+
+    ``ep_rank`` is the caller's own EP rank -- vLLM runs one process per rank,
+    so this call happens independently on each of them.  Only ``ultraep``
+    reads it (as ``policy.metadata["rank"]``: its placement kernel solves
+    once per rank rather than once globally, and rejects an out-of-range
+    value).  Every other MLB policy ignores it, so it is safe to leave unset.
     """
 
     if num_ranks <= 0:
@@ -70,6 +80,10 @@ def to_placement_request(
     if old_physical_to_logical_map is not None:
         metadata["old_physical_to_logical_map"] = old_physical_to_logical_map
 
+    policy_metadata: dict[str, Any] = {}
+    if ep_rank is not None:
+        policy_metadata["rank"] = ep_rank
+
     return PlacementRequest(
         stats=PlacementStats(logical_count=logical_count),
         topology=PlacementTopology(
@@ -79,7 +93,7 @@ def to_placement_request(
             num_nodes=num_nodes,
             active_ranks=active_ranks,
         ),
-        policy=PlacementPolicyConfig(name=algorithm),
+        policy=PlacementPolicyConfig(name=algorithm, metadata=policy_metadata),
         metadata=metadata,
     )
 

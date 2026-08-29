@@ -63,12 +63,19 @@ class UltraEPL2Router(TokenRouter):
                 device=logical_ids.device,
             )
             self._counters[key] = counters
+        # reroute_sparse's CUDA binding requires int32 for these three. The
+        # framework's own placement tensors follow its own convention
+        # (typically int64) and stay that way in self._placements -- the
+        # fallback branch above indexes with them directly and must keep
+        # seeing whatever dtype the framework gave it. MLB's own quota is
+        # already int32 by construction; cast defensively rather than trust
+        # that forever. .to() is a no-op when the dtype already matches.
         self._backend.reroute_sparse(
             logical_topk_ids=logical_ids,
             routed_topk_ids=physical_ids,
-            logical_to_physical_map=logical_to_physical,
-            logical_replica_counts=replica_counts,
-            rank_quota_prefix=rank_quota_prefix,
+            logical_to_physical_map=logical_to_physical.to(torch.int32),
+            logical_replica_counts=replica_counts.to(torch.int32),
+            rank_quota_prefix=rank_quota_prefix.to(torch.int32),
             counters=counters,
         )
         return physical_ids
