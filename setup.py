@@ -92,6 +92,21 @@ def _extension_config():
     include_dirs = [str(_ULTRAEP_ROOT / "csrc")]
     if torch.version.cuda.startswith("13."):
         include_dirs.append("/usr/local/cuda/include/cccl/")
+        # cusparse.h and friends: on some CUDA 13 images the math libraries
+        # ship only as the pip nvidia-cu13 packages, not under the system
+        # CUDA toolkit include path torch.utils.cpp_extension searches. That
+        # same package directory also ships its own cuda_runtime.h /
+        # crt/host_runtime.h, which must NOT shadow the system nvcc's
+        # matching versions -- an -I (searched before system paths) picking
+        # those up instead breaks nvcc's stub codegen (__cudaLaunch
+        # macro-arity errors). -idirafter searches it only as a fallback for
+        # headers the system toolkit is genuinely missing.
+        site_packages = Path(torch.__file__).resolve().parent.parent
+        cu13_include = site_packages / "nvidia" / "cu13" / "include"
+        if cu13_include.is_dir():
+            fallback_flag = f"-idirafter{cu13_include}"
+            cxx_flags.append(fallback_flag)
+            nvcc_flags.extend(["-Xcompiler", fallback_flag])
 
     sources = [
         _ULTRAEP_ROOT / "csrc" / "python_api.cpp",
