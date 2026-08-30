@@ -43,7 +43,7 @@ class MoELoadBalancer:
                 EPLBPlacementPlanner,
                 SUPPORTED_PLACEMENT_POLICIES,
             )
-            from moe_load_balancer.policies.l3.ultraep import UltraEPL3Policy
+            from moe_load_balancer.policies.fused.ultraep import UltraEPL3Policy
 
             placement_planners = {
                 name: EPLBPlacementPlanner(name) for name in SUPPORTED_PLACEMENT_POLICIES
