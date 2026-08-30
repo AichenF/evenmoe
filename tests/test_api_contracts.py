@@ -3,7 +3,6 @@ from dataclasses import FrozenInstanceError
 import pytest
 
 from moe_load_balancer import (
-    ExpertWeightTransfer,
     PlacementPlan,
     PlacementSnapshot,
     RoutingDecision,
@@ -12,7 +11,6 @@ from moe_load_balancer import (
     RoutingRequest,
     RoutingStage,
     TokenRouter,
-    WeightTransferRequest,
 )
 
 
@@ -25,18 +23,6 @@ class _PassthroughRouter:
             routed_physical_topk_ids=request.logical_topk_ids,
             topk_weights=request.topk_weights,
         )
-
-
-class _RecordingTransfer:
-    def __init__(self):
-        self.registered = None
-        self.transferred = []
-
-    def register_weights(self, expert_weights, **topology):
-        self.registered = (expert_weights, topology)
-
-    def transfer(self, request):
-        self.transferred.append(request)
 
 
 def _placement() -> PlacementSnapshot:
@@ -108,10 +94,6 @@ def test_core_dataclasses_are_frozen():
     with pytest.raises(FrozenInstanceError):
         plan.physical_to_logical_map = [[1, 0]]  # type: ignore[misc]
 
-    transfer_request = WeightTransferRequest(layer_id=0, routing_signal=[[0]])
-    with pytest.raises(FrozenInstanceError):
-        transfer_request.layer_id = 1  # type: ignore[misc]
-
 
 @pytest.mark.unit
 def test_token_router_protocol_requires_phase_and_policy_argument():
@@ -124,39 +106,6 @@ def test_token_router_protocol_requires_phase_and_policy_argument():
     )
     decision = router.route_tokens(request, RoutingPolicyConfig(name="test"))
     assert decision.routed_physical_topk_ids == [[0]]
-
-
-@pytest.mark.unit
-def test_weight_transfer_request_rejects_negative_layer_id():
-    with pytest.raises(ValueError, match="non-negative"):
-        WeightTransferRequest(layer_id=-1, routing_signal=[[0]])
-
-
-@pytest.mark.unit
-def test_expert_weight_transfer_protocol_is_satisfied_by_duck_typing():
-    transfer = _RecordingTransfer()
-    assert isinstance(transfer, ExpertWeightTransfer)
-
-    transfer.register_weights(
-        ["layer0_weights"],
-        ep_size=2,
-        num_local_master_experts=4,
-        num_local_redundant_experts=1,
-        process_group="fake-group",
-    )
-    request = WeightTransferRequest(layer_id=0, routing_signal=[[0]])
-    transfer.transfer(request)
-
-    assert transfer.registered == (
-        ["layer0_weights"],
-        {
-            "ep_size": 2,
-            "num_local_master_experts": 4,
-            "num_local_redundant_experts": 1,
-            "process_group": "fake-group",
-        },
-    )
-    assert transfer.transferred == [request]
 
 
 @pytest.mark.unit

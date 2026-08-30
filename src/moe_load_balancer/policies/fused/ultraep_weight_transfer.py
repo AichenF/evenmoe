@@ -1,12 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
-"""UltraEP's real, traffic-driven expert weight transfer -- MLB's L3.
+"""UltraEP's real, traffic-driven expert weight transfer.
 
 Wraps ``ultra_ep.Manager``: a third-party library that owns one-sided
 NVSHMEM weight movement between ranks, driven by the same per-token routing
 signal UltraEP's own L1 solve (``policies/fused/ultraep.py``) and L2 router
-(``policies/l2/ultraep.py``) already agree on. This class's only job is
-physically moving weight data to match a placement L1 already decided --
-see ``core/l3.py`` for what that boundary means and why it exists at all.
+(``policies/l2/ultraep.py``) already agree on.
+
+This is UltraEP's own execution detail for making memory match a placement
+its L1 policy (:class:`~moe_load_balancer.policies.fused.ultraep.UltraEPPlacementPolicy`)
+already decided -- not a general MLB protocol. MLB has never defined one for
+that step: turning a solved ``PlacementPlan`` into memory reality has always
+been the framework adapter's job (vLLM's own point-to-point
+``rearrange_expert_weights_inplace``, for instance). UltraEP carries its own
+implementation of that same step only because its L1 solve depends on
+placement staying fresh far more often than a generic mover can afford to
+run; that need is private to UltraEP, not a capability MLB exposes to other
+policies.
 
 Optional dependency: ``ultra_ep`` is only imported inside
 :meth:`UltraEPWeightTransfer.register_weights`, not at module import time,
@@ -25,11 +34,11 @@ from typing import Any
 
 import torch
 
-from moe_load_balancer.core.types import TensorLike, WeightTransferRequest
+from moe_load_balancer.core.types import TensorLike
 
 
 class UltraEPWeightTransfer:
-    """Implements :class:`~moe_load_balancer.core.l3.ExpertWeightTransfer`."""
+    """UltraEP's private weight-commit backend for its own L1 policy."""
 
     def __init__(self) -> None:
         self._manager: Any = None
@@ -92,9 +101,7 @@ class UltraEPWeightTransfer:
                 list(w2[:num_local_master_experts]),
             )
 
-    def transfer(self, request: WeightTransferRequest) -> None:
-        layer_id = request.layer_id
-        topk_ids = request.routing_signal
+    def transfer(self, layer_id: int, topk_ids: torch.Tensor) -> None:
         manager = self._manager
 
         manager.update_placement_sparse(layer_id, topk_ids.to(torch.int64))
@@ -127,8 +134,8 @@ class UltraEPWeightTransfer:
         # The Manager's own placement is the ground truth for what
         # weight_sync actually populated -- not a caller-solved plan's
         # physical_to_logical_map, which (for the one L1 policy paired with
-        # this transfer, UltraEPL3Policy in policies/fused/ultraep.py) has
-        # already had every -1 the kernel left filled with a same-rank
+        # this transfer, UltraEPPlacementPolicy in policies/fused/ultraep.py)
+        # has already had every -1 the kernel left filled with a same-rank
         # fallback master id, so the framework's *other* dense-mapping
         # consumers never see -1. That fallback does not describe what this
         # specific transfer actually moved. A redundant slot the Manager

@@ -49,7 +49,7 @@ def build_ultraep_initial_physical_to_logical_map(
     return torch.cat(rank_maps).repeat(num_layers, 1)
 
 
-class UltraEPL3Policy:
+class UltraEPPlacementPolicy:
     """Compute replica placement from per-rank logical expert loads."""
 
     name = "ultraep"
@@ -70,7 +70,7 @@ class UltraEPL3Policy:
     def plan(self, request: PlacementRequest) -> PlacementPlan:
         policy = PlacementPolicyConfig.from_value(request.policy)
         if policy.name != self.name:
-            raise ValueError(f"UltraEPL3Policy received policy {policy.name!r}.")
+            raise ValueError(f"UltraEPPlacementPolicy received policy {policy.name!r}.")
 
         logical_count = request.stats.logical_count
         if not isinstance(logical_count, torch.Tensor):

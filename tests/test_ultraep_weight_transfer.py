@@ -4,8 +4,6 @@ import types
 import pytest
 import torch
 
-from moe_load_balancer.core.types import WeightTransferRequest
-
 
 class _FakeEventHandle:
     def __init__(self):
@@ -78,7 +76,7 @@ def no_op_distributed(monkeypatch):
 
 @pytest.mark.unit
 def test_register_weights_constructs_manager_and_master_pools(fake_ultra_ep):
-    from moe_load_balancer.policies.l3.ultraep import UltraEPWeightTransfer
+    from moe_load_balancer.policies.fused.ultraep_weight_transfer import UltraEPWeightTransfer
 
     fake_ultra_ep.ep_size = 2
     num_layers, num_local_master, num_local_redundant = 2, 3, 1
@@ -108,7 +106,7 @@ def test_register_weights_constructs_manager_and_master_pools(fake_ultra_ep):
 
 @pytest.mark.unit
 def test_register_weights_rejects_process_group_size_mismatch(fake_ultra_ep):
-    from moe_load_balancer.policies.l3.ultraep import UltraEPWeightTransfer
+    from moe_load_balancer.policies.fused.ultraep_weight_transfer import UltraEPWeightTransfer
 
     fake_ultra_ep.ep_size = 2
     expert_weights = [[torch.randn(4, 4, 4), torch.randn(4, 4, 4)]]
@@ -125,7 +123,7 @@ def test_register_weights_rejects_process_group_size_mismatch(fake_ultra_ep):
 
 @pytest.mark.unit
 def test_transfer_only_overwrites_assigned_redundant_slots(fake_ultra_ep, no_op_distributed):
-    from moe_load_balancer.policies.l3.ultraep import UltraEPWeightTransfer
+    from moe_load_balancer.policies.fused.ultraep_weight_transfer import UltraEPWeightTransfer
 
     num_local_master, num_local_redundant, ep_size = 2, 1, 2
     fake_ultra_ep.ep_size = ep_size
@@ -154,9 +152,7 @@ def test_transfer_only_overwrites_assigned_redundant_slots(fake_ultra_ep, no_op_
 
     original_w13_redundant = expert_weights[0][0][num_local_master:].clone()
 
-    transfer.transfer(
-        WeightTransferRequest(layer_id=0, routing_signal=torch.zeros(4, 1, dtype=torch.int64))
-    )
+    transfer.transfer(0, torch.zeros(4, 1, dtype=torch.int64))
 
     assert torch.equal(expert_weights[0][0][num_local_master:], original_w13_redundant)
     assert len(manager.update_placement_calls) == 1
@@ -168,7 +164,7 @@ def test_transfer_only_overwrites_assigned_redundant_slots(fake_ultra_ep, no_op_
 
 @pytest.mark.unit
 def test_transfer_copies_assigned_redundant_slot(fake_ultra_ep, no_op_distributed):
-    from moe_load_balancer.policies.l3.ultraep import UltraEPWeightTransfer
+    from moe_load_balancer.policies.fused.ultraep_weight_transfer import UltraEPWeightTransfer
 
     num_local_master, num_local_redundant, ep_size = 2, 1, 2
     fake_ultra_ep.ep_size = ep_size
@@ -193,9 +189,7 @@ def test_transfer_copies_assigned_redundant_slot(fake_ultra_ep, no_op_distribute
     manager.local_replica_fc1_weight_buffer = torch.full((1, 2, 2), 99.0)
     manager.local_replica_fc2_weight_buffer = torch.full((1, 2, 2), 98.0)
 
-    transfer.transfer(
-        WeightTransferRequest(layer_id=0, routing_signal=torch.zeros(4, 1, dtype=torch.int64))
-    )
+    transfer.transfer(0, torch.zeros(4, 1, dtype=torch.int64))
 
     assert torch.equal(expert_weights[0][0][num_local_master:], torch.full((1, 2, 2), 99.0))
     assert torch.equal(expert_weights[0][1][num_local_master:], torch.full((1, 2, 2), 98.0))

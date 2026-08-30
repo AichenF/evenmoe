@@ -8,7 +8,7 @@ from moe_load_balancer import (
     PlacementTopology,
 )
 from moe_load_balancer.policies.fused.ultraep import (
-    UltraEPL3Policy,
+    UltraEPPlacementPolicy,
     build_ultraep_initial_physical_to_logical_map,
 )
 
@@ -48,9 +48,9 @@ def _request():
 
 
 @pytest.mark.unit
-def test_ultraep_l3_uses_existing_placement_plan_contract():
+def test_ultraep_placement_policy_uses_existing_placement_plan_contract():
     backend = _Backend()
-    plan = UltraEPL3Policy(backend=backend).plan(_request())
+    plan = UltraEPPlacementPolicy(backend=backend).plan(_request())
 
     assert len(backend.calls) == 2
     assert backend.calls[0]["expert_loads"].tolist() == [6, 2, 8, 0]
@@ -66,7 +66,7 @@ def test_ultraep_l3_uses_existing_placement_plan_contract():
 
 
 @pytest.mark.integration
-def test_ultraep_l3_plan_handles_multiple_layers():
+def test_ultraep_placement_policy_handles_multiple_layers():
     """plan() slices per_rank_loads[:, layer_id] -- the middle dimension of a
     [ep_size, num_layers, num_logical_experts] tensor -- which is only
     non-contiguous once num_layers > 1. The mock-backend tests above never
@@ -110,7 +110,7 @@ def test_ultraep_l3_plan_handles_multiple_layers():
             name="ultraep", metadata={"rank": 0, "num_nvl_ranks": ep_size}
         ),
     )
-    plan = UltraEPL3Policy(backend=UltraEPPlacementBackend()).plan(request)
+    plan = UltraEPPlacementPolicy(backend=UltraEPPlacementBackend()).plan(request)
 
     assert plan.physical_to_logical_map.shape == (num_layers, num_physical)
     assert int(plan.physical_to_logical_map.min()) >= 0

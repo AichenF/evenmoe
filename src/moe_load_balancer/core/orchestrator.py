@@ -43,12 +43,12 @@ class MoELoadBalancer:
                 EPLBPlacementPlanner,
                 SUPPORTED_PLACEMENT_POLICIES,
             )
-            from moe_load_balancer.policies.fused.ultraep import UltraEPL3Policy
+            from moe_load_balancer.policies.fused.ultraep import UltraEPPlacementPolicy
 
             placement_planners = {
                 name: EPLBPlacementPlanner(name) for name in SUPPORTED_PLACEMENT_POLICIES
             }
-            placement_planners["ultraep"] = UltraEPL3Policy()
+            placement_planners["ultraep"] = UltraEPPlacementPolicy()
         if rank_load_counter is None:
             from moe_load_balancer.kernels.rank_count import count_routed_per_rank
 
