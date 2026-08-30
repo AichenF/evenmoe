@@ -6,6 +6,7 @@ from moe_load_balancer.core.l2 import (
     RoutingLoadHistoryProvider,
     TokenRouter,
 )
+from moe_load_balancer.core.l3 import ExpertWeightTransfer
 from moe_load_balancer.core.orchestrator import MoELoadBalancer
 from moe_load_balancer.core.refresh_gate import RefreshGate
 from moe_load_balancer.core.routing_pipeline import (
@@ -27,6 +28,7 @@ from moe_load_balancer.core.types import (
     RoutingRequest,
     RoutingStage,
     TensorLike,
+    WeightTransferRequest,
 )
 from moe_load_balancer.kernels.lplb import LPLBKernels
 
@@ -54,4 +56,6 @@ __all__ = [
     "RefreshGate",
     "TensorLike",
     "TokenRouter",
+    "ExpertWeightTransfer",
+    "WeightTransferRequest",
 ]

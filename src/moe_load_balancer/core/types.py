@@ -273,3 +273,27 @@ class RoutingDecision:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "metadata", _immutable_mapping(self.metadata))
+
+
+@dataclass(frozen=True, kw_only=True)
+class WeightTransferRequest:
+    """Framework-neutral input to one L3 :class:`~moe_load_balancer.core.l3.ExpertWeightTransfer` call.
+
+    ``routing_signal`` is deliberately not named ``topk_ids``: the only
+    implementation today (UltraEP's quota-driven transfer) re-derives its own
+    placement from raw per-token routing decisions rather than accepting an
+    externally-solved plan, so that is what it needs here -- but a future L3
+    (a predictive/prefetch mover, for instance) may key its own transfer
+    decision off something else entirely. What the tensor means is between a
+    specific L3 implementation and the L1 policy it is paired with, not a
+    contract this type enforces.
+    """
+
+    layer_id: int
+    routing_signal: TensorLike
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.layer_id < 0:
+            raise ValueError("WeightTransferRequest.layer_id must be non-negative.")
+        object.__setattr__(self, "metadata", _immutable_mapping(self.metadata))
