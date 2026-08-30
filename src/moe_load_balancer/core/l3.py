@@ -21,7 +21,14 @@ class ExpertWeightTransfer(Protocol):
     fresh far more often than a generic mover can afford to run.
     """
 
-    def register_weights(self, expert_weights: TensorLike) -> None:
+    def register_weights(
+        self,
+        expert_weights: TensorLike,
+        *,
+        ep_size: int,
+        num_local_master_experts: int,
+        num_local_redundant_experts: int,
+    ) -> None:
         """One-time setup: register this rank's own per-layer expert weight
         tensors so :meth:`transfer` has real memory to move data between.
 
@@ -29,7 +36,14 @@ class ExpertWeightTransfer(Protocol):
         shape the framework's own model representation already uses (for
         instance, vLLM's ``MixtureOfExperts.expert_weights``) -- this
         protocol does not require converting it to an MLB-owned layout
-        first.
+        first. Master vs. redundant is not derivable from that shape alone
+        (both live in the same per-layer tensor, split by convention, not
+        by anything the tensor's own shape records), so the three topology
+        keywords carry what :class:`~moe_load_balancer.core.types.PlacementTopology`
+        would if this were called with one -- named after the same
+        parameters an L1 quota policy already computes internally, not
+        reusing that type itself, because there is no placement request to
+        attach one to at registration time.
         """
         ...
 

@@ -32,8 +32,8 @@ class _RecordingTransfer:
         self.registered = None
         self.transferred = []
 
-    def register_weights(self, expert_weights):
-        self.registered = expert_weights
+    def register_weights(self, expert_weights, **topology):
+        self.registered = (expert_weights, topology)
 
     def transfer(self, request):
         self.transferred.append(request)
@@ -137,11 +137,23 @@ def test_expert_weight_transfer_protocol_is_satisfied_by_duck_typing():
     transfer = _RecordingTransfer()
     assert isinstance(transfer, ExpertWeightTransfer)
 
-    transfer.register_weights(["layer0_weights"])
+    transfer.register_weights(
+        ["layer0_weights"],
+        ep_size=2,
+        num_local_master_experts=4,
+        num_local_redundant_experts=1,
+    )
     request = WeightTransferRequest(layer_id=0, routing_signal=[[0]])
     transfer.transfer(request)
 
-    assert transfer.registered == ["layer0_weights"]
+    assert transfer.registered == (
+        ["layer0_weights"],
+        {
+            "ep_size": 2,
+            "num_local_master_experts": 4,
+            "num_local_redundant_experts": 1,
+        },
+    )
     assert transfer.transferred == [request]
 
 
