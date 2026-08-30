@@ -118,7 +118,7 @@ class RoutingPipeline:
 
     Set only when a replica policy's dispatch decision is meaningless without
     a specific placement algorithm's output -- ``ultraep``'s L2 router reads a
-    quota table that only its own L3 policy produces. ``None`` for policies
+    quota table that only its own L1 policy produces. ``None`` for policies
     that work with whatever placement the framework already committed.
     """
 
