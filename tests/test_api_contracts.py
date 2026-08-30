@@ -142,6 +142,7 @@ def test_expert_weight_transfer_protocol_is_satisfied_by_duck_typing():
         ep_size=2,
         num_local_master_experts=4,
         num_local_redundant_experts=1,
+        process_group="fake-group",
     )
     request = WeightTransferRequest(layer_id=0, routing_signal=[[0]])
     transfer.transfer(request)
@@ -152,6 +153,7 @@ def test_expert_weight_transfer_protocol_is_satisfied_by_duck_typing():
             "ep_size": 2,
             "num_local_master_experts": 4,
             "num_local_redundant_experts": 1,
+            "process_group": "fake-group",
         },
     )
     assert transfer.transferred == [request]
