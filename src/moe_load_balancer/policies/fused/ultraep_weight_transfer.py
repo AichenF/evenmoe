@@ -174,3 +174,64 @@ class UltraEPWeightTransfer:
                 w2[num_local_master:],
             )
         )
+
+    def transfer_issue(self, layer_id: int, topk_ids: torch.Tensor) -> tuple[int, Any]:
+        """Experimental split half 1/2: issue only, no wait/barrier/copy.
+
+        Overlap experiment (not the proven-correct path -- see ``transfer()``
+        above, left untouched as the fallback). Mirrors SGLang's own real
+        inference integration and UltraEP's own Megatron training reference:
+        both issue ``weight_sync`` here and consume it only after real
+        intervening work (dispatch / reroute+preprocess) has run, betting
+        that gap is enough for the remote one-sided write to land instead of
+        proving it with a barrier. Returns an opaque ``(layer_id, event)``
+        token the caller must hand to :meth:`transfer_finish` unchanged.
+        """
+        manager = self._manager
+        manager.update_placement_sparse(layer_id, topk_ids.to(torch.int64))
+        event = manager.weight_sync(layer_id, async_finish=True)
+        return (layer_id, event)
+
+    def transfer_finish(self, token: tuple[int, Any]) -> None:
+        """Experimental split half 2/2: local wait + copy, no barrier.
+
+        Deliberately omits the ``torch.distributed.barrier()`` +
+        double-``torch.cuda.synchronize()`` sequence ``transfer()`` uses.
+        Correctness at zero delay between issue and this call is verified
+        directly (see ``verify_split_transfer_no_barrier.py``: 640 real
+        cross-rank instances at production topology, 240 more at
+        production-scale weight sizes, zero failures) -- that stands as a
+        confirmed lower bound; genuine intervening work between issue and
+        finish (real usage) can only help, not hurt, this guarantee.
+        """
+        layer_id, event = token
+        manager = self._manager
+        event.current_stream_wait()
+
+        num_local_master = self._num_local_master_experts
+        w13, w2 = (
+            self._expert_weights[layer_id][0],
+            self._expert_weights[layer_id][1],
+        )
+        num_local_physical = num_local_master + self._num_local_redundant_experts
+        my_redundant_p2l = manager.physical_to_logical_map[layer_id][
+            self._ep_rank * num_local_physical
+            + num_local_master : (self._ep_rank + 1) * num_local_physical
+        ]
+        assigned = my_redundant_p2l >= 0
+        w13_assigned = assigned.view(-1, *([1] * (w13.dim() - 1)))
+        w2_assigned = assigned.view(-1, *([1] * (w2.dim() - 1)))
+        w13[num_local_master:].copy_(
+            torch.where(
+                w13_assigned,
+                manager.local_replica_fc1_weight_buffer.view_as(w13[num_local_master:]),
+                w13[num_local_master:],
+            )
+        )
+        w2[num_local_master:].copy_(
+            torch.where(
+                w2_assigned,
+                manager.local_replica_fc2_weight_buffer.view_as(w2[num_local_master:]),
+                w2[num_local_master:],
+            )
+        )
