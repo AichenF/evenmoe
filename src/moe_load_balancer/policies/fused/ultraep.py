@@ -61,7 +61,25 @@ class UltraEPPlacementPolicy:
         tuning: UltraEPPlacementTuning | None = None,
     ) -> None:
         self._backend = backend or UltraEPPlacementBackend()
-        self._tuning = tuning or load_placement_tuning_from_env()
+        self._tuning = tuning
+
+    @property
+    def _resolved_tuning(self) -> UltraEPPlacementTuning:
+        """Env-derived tuning, resolved on first use rather than in ``__init__``.
+
+        ``load_placement_tuning_from_env`` raises on a malformed ``ULTRA_EP_*``
+        value.  The orchestrator registers every L1 policy by name up front, so
+        ``__init__`` runs for every ``MoELoadBalancer`` regardless of the
+        selected algorithm -- reading the environment there let a stray
+        ``ULTRA_EP_*`` variable fail construction for a deployment that never
+        selects this policy.  Deferring the read keeps the failure where it
+        belongs: on the first solve that actually consumes the tuning.  Mirrors
+        the deferral ``UltraEPPlacementBackend.extension`` already does for
+        ``_C``.
+        """
+        if self._tuning is None:
+            self._tuning = load_placement_tuning_from_env()
+        return self._tuning
 
     @staticmethod
     def build_initial_physical_to_logical_map(**kwargs) -> torch.Tensor:
@@ -141,7 +159,7 @@ class UltraEPPlacementPolicy:
                 num_local_redundant_experts=num_local_redundant_experts,
                 num_nvl_ranks=num_nvl_ranks,
                 rank=rank,
-                tuning=self._tuning,
+                tuning=self._resolved_tuning,
             )
 
         # The kernel memsets physical_to_logical_map to -1 before it solves,
