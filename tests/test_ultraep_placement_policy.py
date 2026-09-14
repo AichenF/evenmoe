@@ -7,6 +7,7 @@ from moe_load_balancer import (
     PlacementStats,
     PlacementTopology,
 )
+from moe_load_balancer.kernels.ultraep.config import UltraEPPlacementTuning
 from moe_load_balancer.policies.fused.ultraep import (
     UltraEPPlacementPolicy,
     build_ultraep_initial_physical_to_logical_map,
@@ -141,3 +142,42 @@ def test_ultraep_initial_layout_keeps_master_slots_fixed():
         [0, 1, 2, 3, 0, 1, 4, 5, 6, 7, 4, 5],
         [0, 1, 2, 3, 0, 1, 4, 5, 6, 7, 4, 5],
     ]
+
+
+@pytest.mark.unit
+def test_constructing_the_policy_does_not_read_the_environment(monkeypatch):
+    """A malformed ULTRA_EP_* value must not fail construction.
+
+    The orchestrator registers every L1 policy by name up front, so this
+    constructor runs for every MoELoadBalancer regardless of the selected
+    algorithm.  Reading the environment here would let a stray variable break
+    a deployment that never selects ultraep.
+    """
+    monkeypatch.setenv("ULTRA_EP_QUOTA_KERNEL_STAGE", "2")  # only 0 or 1 are valid
+    UltraEPPlacementPolicy(backend=_Backend())
+
+
+@pytest.mark.unit
+def test_env_is_still_validated_on_the_first_solve(monkeypatch):
+    """Deferring the read must not discard the validation."""
+    monkeypatch.setenv("ULTRA_EP_QUOTA_KERNEL_STAGE", "2")
+    policy = UltraEPPlacementPolicy(backend=_Backend())
+    with pytest.raises(ValueError, match="ULTRA_EP_QUOTA_KERNEL_STAGE"):
+        policy.plan(_request())
+
+
+@pytest.mark.unit
+def test_explicit_tuning_still_bypasses_the_environment(monkeypatch):
+    """An explicitly supplied tuning must win over ULTRA_EP_* entirely."""
+    monkeypatch.setenv("ULTRA_EP_QUOTA_KERNEL_STAGE", "2")
+    tuning = UltraEPPlacementTuning(
+        balance_threshold=1.0,
+        locality_aware=True,
+        min_tokens_per_replica=1024,
+        allow_zero_master_quota=False,
+        oracle_eps=0.01,
+        kernel_stage=1,
+    )
+    backend = _Backend()
+    UltraEPPlacementPolicy(backend=backend, tuning=tuning).plan(_request())
+    assert backend.calls[0]["tuning"] is tuning
