@@ -26,12 +26,13 @@ class SGLangRoutingOutput:
 def count_logical_experts(
     logical_topk_ids: TensorLike,
     num_logical_experts: int,
+    dtype: Optional[object] = None,
 ) -> TensorLike:
     """Compatibility export for the MLB-owned logical count helper."""
 
     from moe_load_balancer.kernels.expert_count import count_logical_experts as count
 
-    return count(logical_topk_ids, num_logical_experts)
+    return count(logical_topk_ids, num_logical_experts, dtype=dtype)
 
 
 def to_routing_request(

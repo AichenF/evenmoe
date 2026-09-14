@@ -212,6 +212,7 @@ def to_placement_snapshot(
     counts: Optional[TensorLike] = None,
     default_physical_for_logical: Optional[TensorLike] = None,
     physical_to_rank_map: Optional[TensorLike] = None,
+    rank_quota_prefix: Optional[TensorLike] = None,
 ) -> PlacementSnapshot:
     """Translate vLLM's per-layer ``EplbLayerState`` into an L2 snapshot.
 
@@ -232,6 +233,11 @@ def to_placement_snapshot(
     ``physical_to_rank_map`` maps each physical slot to its EP rank; SGLang
     always provides this so LPLB can incorporate cross-GPU transfer cost.
     Build it with :func:`build_physical_to_rank_map`.
+
+    ``rank_quota_prefix`` is the per-replica token quota table UltraEP's L1
+    policy publishes on ``PlacementPlan.metadata``; ``UltraEPL2Router`` reads
+    it back off this snapshot's own ``metadata``. Omitted for every other
+    policy, and by ``UltraEPL2Router`` itself before the first L1 solve.
     """
 
     if candidates is None:
@@ -257,6 +263,11 @@ def to_placement_snapshot(
         logical_to_physical_count=counts,
         default_physical_for_logical=default_physical_for_logical,
         physical_to_rank_map=physical_to_rank_map,
+        metadata=(
+            {}
+            if rank_quota_prefix is None
+            else {"rank_quota_prefix": rank_quota_prefix}
+        ),
     )
 
 

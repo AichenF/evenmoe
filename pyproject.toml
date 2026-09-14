@@ -59,6 +59,13 @@ where = ["src"]
     "include/moe_lb_jit/*",
     "resources/*",
 ]
+"moe_load_balancer.kernels.ultraep" = [
+    "LICENSE.ultraep",
+    "csrc/*.cpp",
+    "csrc/kernels/*.cu",
+    "csrc/kernels/*.cuh",
+    "csrc/utils/*.cuh",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

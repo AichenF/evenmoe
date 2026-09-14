@@ -15,7 +15,7 @@ from moe_load_balancer.core.types import RoutingPolicyConfig
 
 
 _INPUT_TRANSFORMS = frozenset({"fake"})
-_REPLICA_POLICIES = frozenset({"static", "dynamic", "dynamic_random", "lplb"})
+_REPLICA_POLICIES = frozenset({"static", "dynamic", "dynamic_random", "lplb", "ultraep"})
 _WATERFILL_POLICIES = frozenset({"waterfill", "waterfill_dynamic"})
 _ALIASES = {"lp": "lplb"}
 
@@ -34,6 +34,27 @@ class ExpertDeploymentConfig:
 
     False on runtimes that replicate it per rank, where there is no such
     decision to hand back.
+    """
+
+    carries_placement_metadata: bool = False
+    """Whether the framework threads ``PlacementPlan.metadata`` into the
+    committed ``PlacementSnapshot.metadata``.
+
+    An L1 policy may publish state its own L2 half needs -- ``ultraep`` puts its
+    per-replica token quota there. Nothing forces a framework to carry it: the
+    plan and the snapshot are separate objects the framework builds at different
+    times, and a runtime whose committed placement has no room for extra fields
+    has to thread it explicitly. MLB's vLLM adapter takes the quota as an
+    argument to ``to_placement_snapshot``; its SGLang adapter has no such channel
+    today, so ``ultraep`` is not usable there yet.
+
+    Declared as a capability rather than inferred from the runtime's name so a
+    framework that gains the plumbing only has to flip this, and so a policy that
+    needs the channel can ask without knowing which runtime it is under.
+
+    Defaults False: a framework that has not considered the question cannot be
+    assumed to carry the metadata, and silently dropping it degrades the policy
+    rather than failing it.
     """
 
 
@@ -113,6 +134,14 @@ class RoutingPipeline:
     post_topk_policies: tuple[RoutingPolicyConfig, ...]
     input_transform: Optional[str]
     capabilities: RoutingCapabilities
+    placement_policy: Optional[str] = None
+    """The L1 placement policy this L2 selection requires, if any.
+
+    Set only when a replica policy's dispatch decision is meaningless without
+    a specific placement algorithm's output -- ``ultraep``'s L2 router reads a
+    quota table that only its own L1 policy produces. ``None`` for policies
+    that work with whatever placement the framework already committed.
+    """
 
     def is_applicable(self, topology: ExpertDeploymentConfig) -> Optional[str]:
         """Why this pipeline cannot act on a deployment, or None if it can.
@@ -132,6 +161,19 @@ class RoutingPipeline:
             return (
                 "lplb divides a logical expert's traffic among its replicas, "
                 "and this deployment has no redundant experts"
+            )
+        if "ultraep" in self.policies and topology.num_redundant_experts == 0:
+            return (
+                "ultraep places redundant replicas by quota, and this "
+                "deployment has no redundant experts"
+            )
+        if "ultraep" in self.policies and not topology.carries_placement_metadata:
+            return (
+                "ultraep's L2 router reads the per-replica token quota its own "
+                "L1 policy publishes on PlacementPlan.metadata, and this "
+                "framework does not thread that metadata into the committed "
+                "PlacementSnapshot -- without it every token routes to replica "
+                "0 and the policy does nothing"
             )
         if self.capabilities.routes_shared_expert and not topology.routes_shared_expert:
             return (
@@ -263,11 +305,13 @@ class RoutingPipeline:
             # every forward.
             dispatch_fixed_by_placement=replica_policy == "static",
             routes_shared_expert=waterfill_policy is not None,
-            requires_deepep=waterfill_policy is not None,
+            requires_deepep=waterfill_policy is not None or replica_policy == "ultraep",
             consumes_global_logical_count=consumes_count,
-            supports_concurrent_microbatches=replica_policy != "lplb",
+            supports_concurrent_microbatches=replica_policy not in ("lplb", "ultraep"),
             graph_stability=(
-                "realloc_on_placement_change" if replica_policy == "lplb" else "stable"
+                "realloc_on_placement_change"
+                if replica_policy in ("lplb", "ultraep")
+                else "stable"
             ),
         )
         return cls(
@@ -276,4 +320,5 @@ class RoutingPipeline:
             post_topk_policies=tuple(post_topk),
             input_transform=input_transform,
             capabilities=capabilities,
+            placement_policy="ultraep" if replica_policy == "ultraep" else None,
         )

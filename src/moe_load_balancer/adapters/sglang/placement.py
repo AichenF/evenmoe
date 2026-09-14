@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from moe_load_balancer.core.types import (
     PlacementPlan,
@@ -32,11 +32,17 @@ def to_placement_request(
     num_nodes: int,
     algorithm: str = "auto",
     active_ranks: Optional[TensorLike] = None,
+    policy_metadata: Optional[dict[str, Any]] = None,
 ) -> PlacementRequest:
     """Translate SGLang-completed EPLB statistics into an MLB request.
 
     SGLang must perform recording, dump, physical-to-logical aggregation,
     all-reduce and threshold gating before calling this function.
+
+    ``policy_metadata`` is opaque, per-policy configuration -- ``ultraep``
+    reads ``rank``/``num_nvl_ranks`` from it (its placement kernel solves
+    once per EP rank and validates the value is in range); every other MLB
+    policy ignores it, so it is safe to leave unset.
     """
 
     return PlacementRequest(
@@ -48,7 +54,7 @@ def to_placement_request(
             num_nodes=num_nodes,
             active_ranks=active_ranks,
         ),
-        policy=PlacementPolicyConfig(name=algorithm),
+        policy=PlacementPolicyConfig(name=algorithm, metadata=policy_metadata or {}),
     )
 
 
