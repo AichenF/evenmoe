@@ -45,10 +45,12 @@ def to_placement_request(
     vLLM completes recording, physical-to-logical aggregation, window
     summation and the EP all-reduce before invoking its placement policy, so
     ``logical_count`` arrives already in the shape MLB wants:
-    ``[num_moe_layers, num_logical_experts]`` -- except for a policy that
-    declares ``wants_per_rank_weight`` (currently only ``ultraep``), which
-    gets the pre-reduction per-rank breakdown instead:
-    ``[num_ranks, num_moe_layers, num_logical_experts]``.
+    ``[num_moe_layers, num_logical_experts]`` -- except for ``ultraep``, whose
+    placement kernel solves once per rank and so needs the pre-reduction
+    per-rank breakdown instead:
+    ``[num_ranks, num_moe_layers, num_logical_experts]``.  The caller selects
+    which of the two to pass by policy name; MLB declares no capability for
+    this today.
 
     ``num_replicas`` is vLLM's name for the total physical expert slot count;
     ``num_ranks`` is the EP world size.  MLB's topology is expressed in terms
