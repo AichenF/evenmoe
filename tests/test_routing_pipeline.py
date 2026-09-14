@@ -183,3 +183,38 @@ class TestCapabilitiesDeclareRuntimeRequirements:
         st = RoutingPipeline.from_value("static").capabilities
         assert st.supports_concurrent_microbatches is True
         assert st.graph_stability == "stable"
+
+
+@pytest.mark.unit
+def test_ultraep_is_rejected_when_the_framework_drops_placement_metadata():
+    """Caught while reading configuration, not silently at the first token.
+
+    ultraep's L2 half reads the quota its own L1 half publishes on
+    PlacementPlan.metadata. A framework that does not carry that metadata into
+    the committed snapshot leaves the router routing everything to replica 0 --
+    plausible-looking but unbalanced, and strictly worse than `static` while
+    still paying ultraep's cost.
+    """
+    reason = RoutingPipeline.from_value("ultraep").is_applicable(
+        ExpertDeploymentConfig(num_redundant_experts=4, carries_placement_metadata=False)
+    )
+    assert reason is not None
+    assert "PlacementSnapshot" in reason
+
+
+@pytest.mark.unit
+def test_ultraep_is_applicable_once_the_framework_carries_the_metadata():
+    assert (
+        RoutingPipeline.from_value("ultraep").is_applicable(
+            ExpertDeploymentConfig(num_redundant_experts=4, carries_placement_metadata=True)
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_other_policies_do_not_need_placement_metadata():
+    """The constraint is ultraep's, not a new requirement on every policy."""
+    config = ExpertDeploymentConfig(num_redundant_experts=4, carries_placement_metadata=False)
+    for algorithm in ("static", "dynamic", "lplb"):
+        assert RoutingPipeline.from_value(algorithm).is_applicable(config) is None
