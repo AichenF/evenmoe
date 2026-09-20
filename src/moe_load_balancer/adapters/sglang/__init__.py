@@ -3,7 +3,7 @@
 SGLang owns lifecycle, collective transport, threshold decisions, recording,
 weight movement and committed placement metadata. MLB decides when L2 needs a
 collective and invokes the injected SGLang transport adapter. This package
-contains plain data translations plus optional execution bindings.
+contains data translations and internal runtime integration.
 """
 
 from moe_load_balancer.adapters.sglang.placement import (

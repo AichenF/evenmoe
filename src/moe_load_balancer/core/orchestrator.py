@@ -58,6 +58,67 @@ class MoELoadBalancer:
         self._rank_load_counter = rank_load_counter
         self._routing_pipeline = RoutingPipeline.from_value(routing_pipeline)
         self._collectives = collectives
+        self._runtime = None
+
+    @classmethod
+    def from_sglang_context(cls, context) -> MoELoadBalancer:
+        """Create one load balancer retaining the engine's runtime context."""
+
+        from moe_load_balancer.adapters.sglang.runtime import _SGLangRuntime
+
+        runtime = _SGLangRuntime(context)
+        load_balancer = runtime.create_load_balancer(cls)
+        load_balancer._runtime = runtime
+        return load_balancer
+
+    @property
+    def runtime_context(self):
+        """The shared context, or None for a framework-neutral instance."""
+
+        return self._runtime.context if self._runtime is not None else None
+
+    def _require_runtime(self):
+        if self._runtime is None:
+            raise RuntimeError("Create this MLB with from_sglang_context() first.")
+        return self._runtime
+
+    def plan_placement_from_counts(
+        self, logical_count, *, active_ranks=None, use_flat_topology=False
+    ):
+        """Plan from runtime configuration and the current per-call counts."""
+
+        return self._require_runtime().plan_placement(
+            self, logical_count, active_ranks=active_ranks, use_flat_topology=use_flat_topology
+        )
+
+    def commit_placement(self, layer_ids):
+        """Refresh policy state from the runtime's committed placement."""
+
+        self._require_runtime().commit_placement(self, layer_ids)
+
+    def route_topk(
+        self,
+        *,
+        layer_id: int,
+        logical_topk_ids,
+        topk_weights,
+        router_logits,
+        token_count,
+        stage: str | None,
+        routed_scaling_factor: float,
+    ):
+        """Route a batch using the runtime's current placement and recorders."""
+
+        return self._require_runtime().route_topk(
+            self,
+            layer_id=layer_id,
+            logical_topk_ids=logical_topk_ids,
+            topk_weights=topk_weights,
+            router_logits=router_logits,
+            token_count=token_count,
+            stage=stage,
+            routed_scaling_factor=routed_scaling_factor,
+        )
 
     @classmethod
     def from_algorithm(
