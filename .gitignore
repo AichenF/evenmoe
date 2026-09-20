@@ -1,7 +1,4 @@
 .DS_Store
-.claude/settings.local.json
-CLAUDE.md
-task-goal-sglang-main-waterfill.md
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -13,10 +10,17 @@ dist/
 .coverage
 htmlcov/
 .mypy_cache/
-.omo/
 
-# Local proposal/PoC artifacts and working notes are not versioned here.
-poc-plan.html
-proposal-moe-load-balancer.md
+# Local agent notes, proposals, PoC artifacts, and generated documents are not
+# versioned here.
+.claude/
+.omo/
+CLAUDE.md
+AGENTS.md
+CODEX.md
+task-goal-*.md
+poc-plan.*
+proposal-*.md
 /docs/
 /outputs/
+/results/

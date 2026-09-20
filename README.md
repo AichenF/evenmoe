@@ -299,6 +299,6 @@ deployment.
 
 ## License
 
-MoE Load Balancer is licensed under Apache-2.0. Copied and adapted DeepSeek and
-SGLang components retain their original notices and licenses; see
+MoE Load Balancer is licensed under Apache-2.0. Copied and adapted DeepSeek,
+SGLang, and UltraEP components retain their original notices and licenses; see
 `THIRD_PARTY_NOTICES.md`.

@@ -7,3 +7,9 @@ the Apache License, Version 2.0.
 This product includes and adapts software developed by DeepSeek, licensed
 under the MIT License. See THIRD_PARTY_NOTICES.md for source-level details and
 the applicable copyright and permission notice.
+
+This product includes and adapts software developed by PKU-DASYS and
+Dots-Infra (UltraEP), licensed under the MIT License. See
+THIRD_PARTY_NOTICES.md for source-level details and
+src/moe_load_balancer/kernels/ultraep/LICENSE.ultraep for the applicable
+copyright and permission notice.
