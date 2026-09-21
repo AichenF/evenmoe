@@ -57,7 +57,6 @@ where = ["src"]
 "moe_load_balancer.kernels.lplb" = [
     "csrc/*.cuh",
     "include/moe_lb_jit/*",
-    "resources/*",
 ]
 "moe_load_balancer.kernels.ultraep" = [
     "LICENSE.ultraep",

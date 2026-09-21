@@ -357,13 +357,7 @@ def get_mathdx_root(*extra_bundled_paths: pathlib.Path) -> Optional[pathlib.Path
     Searches, in order:
       1. ``$MATHDX_HOME`` env var (extracted Math-DX archive root).
       2. The ``nvidia-mathdx`` PyPI package, if installed.
-      3. Any caller-supplied ``extra_bundled_paths`` — typically an
-         adapter-local ``resources/mathdx`` directory populated by the
-         bundled ``download-mathdx.sh``.
-
-    Kernel subpackages that bundle Math-DX (e.g. ``kernels/lplb``)
-    register their own dependency resolver via
-    ``make_mathdx_include_paths_resolver(<pkg_dir> / "resources" / "mathdx")``.
+      3. Any caller-supplied ``extra_bundled_paths``.
     """
     env_home = os.environ.get("MATHDX_HOME")
     if env_home:
@@ -384,7 +378,7 @@ def get_mathdx_root(*extra_bundled_paths: pathlib.Path) -> Optional[pathlib.Path
 
 def make_mathdx_include_paths_resolver(
     *bundled_search_paths: pathlib.Path,
-    bundled_hint: str = "the bundled download-mathdx.sh helper",
+    bundled_hint: Optional[str] = None,
 ) -> Callable[[], List[str]]:
     """Build an include-path resolver suitable for ``@register_dependency``.
 
@@ -399,9 +393,9 @@ def make_mathdx_include_paths_resolver(
         if root is None:
             raise RuntimeError(
                 "Cannot find NVIDIA Math-DX (cuBLASDx + cuSolverDx) headers. "
-                "Set MATHDX_HOME to the extracted Math-DX archive, install "
-                "the `nvidia-mathdx` package, or run "
-                f"{bundled_hint}."
+                "Set MATHDX_HOME to the extracted Math-DX archive or install "
+                "the `nvidia-mathdx` package."
+                + (f" Alternatively, run {bundled_hint}." if bundled_hint else "")
             )
         candidates = [root / "include"]
         cutlass = root / "external" / "cutlass" / "include"

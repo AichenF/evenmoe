@@ -10,8 +10,8 @@ Layout:
 - ``include/moe_lb_jit/``    Vendored tvm-ffi + CUDA helper headers
                               (TensorView validation chain, stream-aware
                               ``cudaLaunchKernelEx`` wrapper, etc.; ~33 KB).
-- ``resources/mathdx/``      NVIDIA Math-DX (cuBLASDx + cuSolverDx) headers,
-                              populated by ``resources/download-mathdx.sh``.
+
+NVIDIA Math-DX headers are resolved from MATHDX_HOME or nvidia-mathdx.
 
 Per-call CPU overhead is dominated by the pybind11 dispatch + four
 ``data_ptr()`` calls (~5–10 µs total).
@@ -53,17 +53,9 @@ DEFAULT_NUM_ITERS = 5
 # build's ``-I`` path so the SDK has no external C++ header dependencies.
 _HERE = pathlib.Path(__file__).parent.resolve()
 _INCLUDE = str(_HERE / "include")
-_BUNDLED_MATHDX = _HERE / "resources" / "mathdx"
 
-# Register the ``mathdx`` build-time include resolver scoped to this
-# package. Math-DX (cuBLASDx + cuSolverDx) is bundled under
-# ``kernels/lplb/resources/mathdx/`` after running the install script.
-register_dependency("mathdx")(
-    make_mathdx_include_paths_resolver(
-        _BUNDLED_MATHDX,
-        bundled_hint=("src/moe_load_balancer/kernels/lplb/resources/download-mathdx.sh"),
-    )
-)
+# Resolve Math-DX from MATHDX_HOME or the installed nvidia-mathdx package.
+register_dependency("mathdx")(make_mathdx_include_paths_resolver())
 
 
 def _sm_ver() -> int:
