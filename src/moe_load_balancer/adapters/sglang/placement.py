@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -15,6 +16,8 @@ from moe_load_balancer.core.types import (
 
 if TYPE_CHECKING:
     from sglang.srt.runtime_context import RuntimeContext
+
+    from moe_load_balancer.core.orchestrator import MoELoadBalancer
 
 
 def _expert_layout(context: RuntimeContext):
@@ -35,6 +38,17 @@ def _placement(context: RuntimeContext):
     if metadata is None:
         raise RuntimeError("MLB routing requires committed expert metadata.")
     return metadata
+
+
+def commit_placement(
+    mlb: MoELoadBalancer, context: RuntimeContext, layer_ids: Iterable[int]
+) -> None:
+    """Notify MLB after SGLang has committed the placement and weights."""
+    if not mlb.routing_capabilities.requires_placement_state:
+        return
+    metadata = _placement(context)
+    for layer_id in layer_ids:
+        mlb.on_placement_committed(to_placement_snapshot(metadata, layer_id))
 
 
 @dataclass(frozen=True)

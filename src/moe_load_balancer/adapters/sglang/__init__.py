@@ -8,6 +8,7 @@ contains data translations and stateless context integration functions.
 
 from moe_load_balancer.adapters.sglang.placement import (
     SGLangPlacementMaps,
+    commit_placement,
     to_placement_request,
     to_placement_snapshot,
     to_sglang_maps,
@@ -23,6 +24,7 @@ from moe_load_balancer.adapters.sglang.routing import (
 __all__ = [
     "SGLangPlacementMaps",
     "SGLangRoutingOutput",
+    "commit_placement",
     "count_logical_experts",
     "to_load_balancer_kwargs",
     "to_placement_request",
