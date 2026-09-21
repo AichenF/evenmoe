@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from moe_load_balancer.core.types import (
     PlacementPlan,
@@ -12,6 +13,59 @@ from moe_load_balancer.core.types import (
     PlacementTopology,
     TensorLike,
 )
+
+if TYPE_CHECKING:
+    from sglang.srt.runtime_context import RuntimeContext
+
+    from moe_load_balancer.core.orchestrator import MoELoadBalancer
+
+
+def _expert_layout(context: RuntimeContext):
+    # Model facts are available before committed placement metadata exists.
+    model_info = context.resources.mlb_model_info
+    if model_info is None:
+        raise ValueError("MLB routing requires model expert information in context.")
+    moe = context.config_bag("exec").moe
+    parallel = context.parallel
+    base_num_physical_experts = (
+        model_info["num_logical_experts"] + moe.ep_num_redundant_experts
+    )
+    ep_size = parallel.ep_size
+    initial_ep_size = parallel.elastic_ep_initial_size
+    if initial_ep_size is not None:
+        if moe.ep_join_mode == "scale":
+            ep_size = max(ep_size, parallel.ep_join_rank_offset + parallel.tp_size)
+        assert base_num_physical_experts % initial_ep_size == 0
+        num_local_physical_experts = base_num_physical_experts // initial_ep_size
+        num_physical_experts = num_local_physical_experts * ep_size
+    else:
+        assert base_num_physical_experts % ep_size == 0
+        num_physical_experts = base_num_physical_experts
+        num_local_physical_experts = num_physical_experts // ep_size
+    return {
+        "ep_size": ep_size,
+        "num_physical_experts": num_physical_experts,
+        "num_local_physical_experts": num_local_physical_experts,
+        "num_groups": model_info["num_groups"],
+    }
+
+
+def _placement(context: RuntimeContext):
+    metadata = context.resources.expert_location_metadata
+    if metadata is None:
+        raise RuntimeError("MLB routing requires committed expert metadata.")
+    return metadata
+
+
+def commit_placement(
+    mlb: MoELoadBalancer, context: RuntimeContext, layer_ids: Iterable[int]
+) -> None:
+    """Notify MLB after SGLang has committed the placement and weights."""
+    if not mlb.routing_capabilities.requires_placement_state:
+        return
+    metadata = _placement(context)
+    for layer_id in layer_ids:
+        mlb.on_placement_committed(to_placement_snapshot(metadata, layer_id))
 
 
 @dataclass(frozen=True)
@@ -26,11 +80,12 @@ class SGLangPlacementMaps:
 def to_placement_request(
     logical_count: TensorLike,
     *,
-    num_physical_experts: int,
-    num_local_physical_experts: int,
-    num_groups: int,
-    num_nodes: int,
-    algorithm: str = "auto",
+    context: Optional[RuntimeContext] = None,
+    num_physical_experts: Optional[int] = None,
+    num_local_physical_experts: Optional[int] = None,
+    num_groups: Optional[int] = None,
+    num_nodes: Optional[int] = None,
+    algorithm: Optional[str] = None,
     active_ranks: Optional[TensorLike] = None,
     policy_metadata: Optional[dict[str, Any]] = None,
 ) -> PlacementRequest:
@@ -39,11 +94,29 @@ def to_placement_request(
     SGLang must perform recording, dump, physical-to-logical aggregation,
     all-reduce and threshold gating before calling this function.
 
+    Context supplies omitted layout and policy values. Explicit arguments,
+    such as ``num_nodes=1`` for flat topology, take precedence.
+
     ``policy_metadata`` is opaque, per-policy configuration -- ``ultraep``
     reads ``rank``/``num_nvl_ranks`` from it (its placement kernel solves
     once per EP rank and validates the value is in range); every other MLB
     policy ignores it, so it is safe to leave unset.
     """
+
+    if context is not None:
+        layout = _expert_layout(context)
+        if num_physical_experts is None:
+            num_physical_experts = layout["num_physical_experts"]
+        if num_local_physical_experts is None:
+            num_local_physical_experts = layout["num_local_physical_experts"]
+        if num_groups is None:
+            num_groups = layout["num_groups"]
+        if num_nodes is None:
+            num_nodes = context.parallel.nnodes
+        if algorithm is None:
+            algorithm = context.config_bag("exec").moe.eplb_algorithm
+    if num_physical_experts is None or num_local_physical_experts is None or num_nodes is None:
+        raise ValueError("Placement requires a context or explicit expert and node counts.")
 
     return PlacementRequest(
         stats=PlacementStats(logical_count=logical_count),
@@ -54,7 +127,9 @@ def to_placement_request(
             num_nodes=num_nodes,
             active_ranks=active_ranks,
         ),
-        policy=PlacementPolicyConfig(name=algorithm, metadata=policy_metadata or {}),
+        policy=PlacementPolicyConfig(
+            name="auto" if algorithm is None else algorithm, metadata=policy_metadata or {}
+        ),
     )
 
 

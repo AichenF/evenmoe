@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import TYPE_CHECKING, Optional, Sequence
 
+from moe_load_balancer.adapters.sglang import placement as placement_adapter
 from moe_load_balancer.core.types import (
     PlacementSnapshot,
     RoutingDecision,
@@ -11,6 +12,37 @@ from moe_load_balancer.core.types import (
     RoutingStage,
     TensorLike,
 )
+
+if TYPE_CHECKING:
+    from sglang.srt.runtime_context import RuntimeContext
+
+
+class _SGLangCollectives:
+    def __init__(self, context: RuntimeContext):
+        self.context = context
+
+    @property
+    def rank(self) -> int:
+        return self.context.parallel.moe_ep_group.rank_in_group
+
+    @property
+    def world_size(self) -> int:
+        return self.context.parallel.moe_ep_group.world_size
+
+    def all_reduce_sum(self, payload):
+        return self.context.parallel.moe_ep_group.all_reduce(payload)
+
+
+def to_load_balancer_kwargs(context: RuntimeContext) -> dict:
+    """Translate engine configuration to the generic MLB constructor arguments."""
+    layout = placement_adapter._expert_layout(context)
+    return {
+        "algorithm": context.config_bag("exec").moe.moe_load_balancer_algorithm,
+        "ep_size": layout["ep_size"],
+        "source_rank": context.parallel.moe_ep_rank,
+        "experts_per_rank": layout["num_local_physical_experts"],
+        "collectives": _SGLangCollectives(context),
+    }
 
 
 @dataclass(frozen=True)
@@ -37,6 +69,7 @@ def count_logical_experts(
 
 def to_routing_request(
     *,
+    context: Optional[RuntimeContext] = None,
     layer_id: int,
     logical_topk_ids: TensorLike,
     topk_weights: TensorLike,
@@ -46,8 +79,12 @@ def to_routing_request(
     token_count: Optional[TensorLike] = None,
     routed_scaling_factor: float = 1.0,
 ) -> RoutingRequest:
-    """Translate SGLang's logical TopK and live placement into MLB input."""
+    """Translate TopK and placement, reading context when no snapshot is supplied."""
 
+    if placement is None and context is not None:
+        placement = placement_adapter.to_placement_snapshot(
+            placement_adapter._placement(context), layer_id
+        )
     normalized_stage = None if stage is None else RoutingStage.from_str(stage)
     return RoutingRequest(
         layer_id=layer_id,
@@ -64,6 +101,7 @@ def to_routing_request(
 def to_sglang_routing_output(
     decision: RoutingDecision,
     *,
+    context: Optional[RuntimeContext] = None,
     router_logits: Optional[TensorLike] = None,
     num_routed_experts: Optional[int] = None,
     world_size: Optional[int] = None,
@@ -74,6 +112,7 @@ def to_sglang_routing_output(
     The unexpanded physical IDs are returned separately for SGLang's recorder.
     If an L2 policy selected a shared rank, this function appends the shared
     expert and converts routed IDs into DeepEP's interleaved ID layout.
+    Context supplies geometry unless explicit counts are provided.
     """
 
     physical_ids = decision.routed_physical_topk_ids
@@ -86,6 +125,12 @@ def to_sglang_routing_output(
             recorded_physical_topk_ids=physical_ids,
         )
 
+    if context is not None and (num_routed_experts is None or world_size is None):
+        metadata = placement_adapter._placement(context)
+        if num_routed_experts is None:
+            num_routed_experts = metadata.num_physical_experts
+        if world_size is None:
+            world_size = metadata.ep_size
     if num_routed_experts is None or world_size is None:
         raise ValueError(
             "Shared-expert materialization requires num_routed_experts and world_size."

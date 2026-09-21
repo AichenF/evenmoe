@@ -110,7 +110,7 @@ The main source directories are:
 | `src/moe_load_balancer/policies/l1/` | Framework-independent placement algorithms. |
 | `src/moe_load_balancer/policies/l2/` | Framework-independent routing policies. |
 | `src/moe_load_balancer/kernels/` | Triton and CUDA execution implementations. |
-| `src/moe_load_balancer/adapters/sglang/` | Stateless translation between SGLang and MLB values. |
+| `src/moe_load_balancer/adapters/sglang/` | Data translations and stateless SGLang context integration. |
 | `src/moe_load_balancer/adapters/vllm/` | Stateless translation between vLLM and MLB values. |
 | `examples/` | Executable examples used by CI. |
 | `tests/` | API, policy, adapter, orchestrator, and GPU integration tests. |
@@ -214,7 +214,7 @@ framework passes its current metadata to
 placement-derived execution state is rebuilt only at this explicit framework
 lifecycle event.
 
-SGLang Glue is responsible for:
+The SGLang integration is responsible for:
 
 1. Reading TopK output and live placement metadata.
 2. Providing a generic EP sum adapter backed by SGLang's process group.
