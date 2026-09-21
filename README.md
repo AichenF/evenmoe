@@ -225,69 +225,6 @@ The SGLang integration is responsible for:
    `MoELoadBalancer.route_tokens()`.
 5. Translating the result and applying it inside SGLang.
 
-### SGLang runtime context
-
-SGLang passes its current runtime context to the adapter functions. The core
-`MoELoadBalancer` continues to accept framework-neutral requests and results:
-
-```python
-from moe_load_balancer import MoELoadBalancer
-from moe_load_balancer.adapters import sglang as mlb_sglang
-from sglang.srt.runtime_context import get_context
-
-context = get_context()
-kwargs = mlb_sglang.to_load_balancer_kwargs(context)
-mlb = MoELoadBalancer.from_algorithm(**kwargs)
-
-request = mlb_sglang.to_routing_request(
-    context=context,
-    layer_id=layer_id,
-    logical_topk_ids=topk_output.topk_ids,
-    topk_weights=topk_output.topk_weights,
-    token_count=token_count,
-    stage=stage,
-    routed_scaling_factor=routed_scaling_factor,
-)
-decision = mlb.route_tokens(request)
-output = mlb_sglang.to_sglang_routing_output(
-    decision,
-    context=context,
-    router_logits=topk_output.router_logits,
-    routed_scaling_factor=routed_scaling_factor,
-)
-```
-
-SGLang owns the three stages: adapt the input, call the core, and adapt the
-output. The data adapters read current placement metadata from the supplied
-context without executing the load balancer. Explicit values remain supported
-and take precedence over context defaults. SGLang owns recording and capture;
-the existing generic collective interface is backed by the engine's EP group.
-
-Placement planning follows the same three stages:
-
-```python
-request = mlb_sglang.to_placement_request(logical_count, context=context)
-plan = mlb.plan_placement(request)
-maps = mlb_sglang.to_sglang_maps(plan)
-```
-
-After SGLang successfully moves or loads weights and commits placement, it
-converts the committed metadata and notifies the core:
-
-```python
-if mlb.routing_capabilities.requires_placement_state:
-    metadata = context.resources.expert_location_metadata
-    for layer_id in layer_ids:
-        snapshot = mlb_sglang.to_placement_snapshot(metadata, layer_id)
-        mlb.on_placement_committed(snapshot)
-```
-
-Passing the current context observes replacement metadata, but
-does not rebuild derived solver state without this explicit commit event.
-Algorithms and topology used at construction follow the engine lifecycle;
-passing a context does not reconstruct policies or recapture CUDA graphs.
-
-
 ## Development
 
 Install development dependencies and run the local quality gates:
