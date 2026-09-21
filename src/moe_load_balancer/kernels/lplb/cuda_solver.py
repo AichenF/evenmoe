@@ -25,9 +25,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from moe_load_balancer.kernels.token_draw import uniform_draw
-
-from moe_load_balancer.kernels.utils import (
+from moe_load_balancer.kernels.jit.utils import (
     cache_once,
     get_jit_cuda_arch,
     load_jit,
@@ -35,6 +33,8 @@ from moe_load_balancer.kernels.utils import (
     make_mathdx_include_paths_resolver,
     register_dependency,
 )
+from moe_load_balancer.kernels.ops.replica_draw import uniform_draw
+
 
 if TYPE_CHECKING:
     from tvm_ffi.module import Module

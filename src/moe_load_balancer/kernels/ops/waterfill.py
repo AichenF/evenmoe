@@ -1,4 +1,4 @@
-"""Triton implementation of Waterfill shared-expert rank selection."""
+"""Triton operator for Waterfill shared-expert rank selection."""
 
 from __future__ import annotations
 

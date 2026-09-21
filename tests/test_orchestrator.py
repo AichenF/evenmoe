@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 import torch
 
@@ -12,7 +14,7 @@ from moe_load_balancer import (
     RoutingRequest,
     RoutingStage,
 )
-from moe_load_balancer.kernels.rank_count import count_routed_per_rank
+from moe_load_balancer.kernels.ops.counting import count_routed_per_rank
 
 
 def _placement() -> PlacementSnapshot:
@@ -139,6 +141,79 @@ def test_combined_pipeline_runs_lplb_then_count_then_waterfill():
         torch.tensor([[0, 2], [2, 2]]),
     )
     assert torch.equal(decision.shared_expert_rank, torch.zeros(2, dtype=torch.int64))
+
+
+@pytest.mark.unit
+def test_rank_load_counter_extension_keeps_domain_input_contract():
+    captured = {}
+    placement = _placement()
+    policy = RoutingPolicyConfig(name="waterfill")
+
+    def count_rank_load(physical_topk_ids, received_placement, received_policy):
+        captured["physical_topk_ids"] = physical_topk_ids
+        captured["placement"] = received_placement
+        captured["policy"] = received_policy
+        return torch.tensor([1, 3])
+
+    shared = _SharedRouter([])
+    mlb = MoELoadBalancer(
+        placement_planners={},
+        routing_policies={"waterfill": shared},
+        rank_load_counter=count_rank_load,
+    )
+    physical_topk_ids = torch.tensor([[0, 2], [2, 2]])
+    request = RoutingRequest(
+        layer_id=0,
+        logical_topk_ids=torch.tensor([[0, 1], [1, 0]]),
+        routed_physical_topk_ids=physical_topk_ids,
+        topk_weights=torch.ones((2, 2)),
+        placement=placement,
+        policies=(policy,),
+    )
+
+    mlb.route_tokens(request)
+
+    assert captured["physical_topk_ids"] is physical_topk_ids
+    assert captured["placement"] is placement
+    assert captured["policy"] is policy
+    assert torch.equal(shared.seen_rank_load, torch.tensor([1, 3]))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("rank_map_kind", ["contiguous", "list", "tensor", "metadata"])
+def test_default_rank_counter_resolves_routing_metadata(rank_map_kind):
+    placement = _placement()
+    metadata = {"world_size": 2, "experts_per_rank": 2}
+    expected = torch.tensor([1, 3])
+    if rank_map_kind in {"list", "tensor"}:
+        rank_map = [1, 0, 0, 1]
+        if rank_map_kind == "tensor":
+            rank_map = torch.tensor(rank_map)
+        placement = replace(placement, physical_to_rank_map=rank_map)
+        expected = torch.tensor([3, 1])
+    if rank_map_kind == "metadata":
+        placement = None
+    else:
+        # Committed placement takes precedence over policy metadata.
+        metadata = {"world_size": 1, "experts_per_rank": 4}
+
+    shared = _SharedRouter([])
+    mlb = MoELoadBalancer(
+        placement_planners={},
+        routing_policies={"waterfill": shared},
+    )
+    mlb.route_tokens(
+        RoutingRequest(
+            layer_id=0,
+            logical_topk_ids=torch.tensor([[0, 1, -1], [1, 1, -1]]),
+            routed_physical_topk_ids=torch.tensor([[0, 2, -1], [2, 2, -1]]),
+            topk_weights=torch.ones((2, 3)),
+            placement=placement,
+            policies=(RoutingPolicyConfig(name="waterfill", metadata=metadata),),
+        )
+    )
+
+    assert torch.equal(shared.seen_rank_load, expected)
 
 
 @pytest.mark.unit
@@ -302,8 +377,8 @@ def test_empty_token_input_still_runs_combined_pipeline_with_zero_rank_load():
 def test_rank_load_count_ignores_padded_slots_without_dynamic_indexing():
     counts = count_routed_per_rank(
         torch.tensor([[0, 3, -1], [2, -1, 1]]),
-        _placement(),
-        RoutingPolicyConfig(name="waterfill"),
+        world_size=2,
+        experts_per_rank=2,
     )
 
     assert counts.dtype == torch.int64

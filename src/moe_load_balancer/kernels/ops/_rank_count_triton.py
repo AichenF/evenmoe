@@ -1,4 +1,4 @@
-"""CUDA implementation of physical-expert rank counting."""
+"""Triton backend for physical-expert rank counting."""
 
 from __future__ import annotations
 

@@ -36,7 +36,7 @@ from moe_load_balancer.core.types import (
     RoutingPolicyConfig,
     RoutingRequest,
 )
-from moe_load_balancer.kernels.waterfill import waterfill_select
+from moe_load_balancer.kernels.ops.waterfill import waterfill_select
 
 
 class WaterfillL2Router(TokenRouter):

@@ -1,4 +1,4 @@
-"""CUDA materialization of a shared-expert decision into DeepEP layout."""
+"""Triton materialization of a shared-expert decision into DeepEP layout."""
 
 from __future__ import annotations
 

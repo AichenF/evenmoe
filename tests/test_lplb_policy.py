@@ -803,7 +803,7 @@ class TestTheDrawIsPartOfTheDecision:
     """
 
     def test_the_draw_is_a_pure_function_of_the_token_index(self):
-        from moe_load_balancer.kernels.token_draw import uniform_draw
+        from moe_load_balancer.kernels.ops.replica_draw import uniform_draw
 
         a = uniform_draw(16, 4, "cpu")
         b = uniform_draw(16, 4, "cpu")
@@ -813,7 +813,7 @@ class TestTheDrawIsPartOfTheDecision:
         """The choice is per token, not per slot: a token's k routed experts are
         all decided from the same draw, as they are wherever this is applied
         inside a fused kernel."""
-        from moe_load_balancer.kernels.token_draw import uniform_draw
+        from moe_load_balancer.kernels.ops.replica_draw import uniform_draw
 
         topk = 4
         draw = uniform_draw(3 * topk, topk, "cpu")
@@ -825,7 +825,7 @@ class TestTheDrawIsPartOfTheDecision:
         """Same constant, same arithmetic, same result -- so the decision
         realises identically whether the policy applies it or the framework
         does."""
-        from moe_load_balancer.kernels.token_draw import (
+        from moe_load_balancer.kernels.ops.replica_draw import (
             KNUTH_MULTIPLIER,
             uniform_draw,
         )

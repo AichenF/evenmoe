@@ -4,7 +4,7 @@ This package owns the LPLB Linear-Programming load-balancer kernels:
 
 - ``cuda_solver``           four JIT-compiled CUDA modules (IPM + LP prep /
                              post / dispatch). Build via
-                             ``moe_load_balancer.kernels.utils``.
+                             ``moe_load_balancer.kernels.jit.utils``.
 - ``protocol``              execution contract consumed by the LPLB policy.
 - ``shmem_budget``           shared-memory size calculation per (NC, NV).
 - ``csrc/``                  CUDA kernel sources (header-only ``.cuh``).

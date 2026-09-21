@@ -5,7 +5,7 @@ import pathlib
 
 import pytest
 
-from moe_load_balancer.kernels.utils import _find_package_root, get_mathdx_root
+from moe_load_balancer.kernels.jit.utils import _find_package_root, get_mathdx_root
 
 
 @pytest.mark.unit

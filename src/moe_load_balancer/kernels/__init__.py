@@ -1,7 +1,9 @@
-"""GPU kernels owned by the SDK.
+"""Framework-neutral tensor operators and accelerated kernel backends.
 
-Algorithm-specific kernels live in subpackages (e.g. ``lplb/``). Shared
-build / loader helpers live in :mod:`moe_load_balancer.kernels.utils`.
+Callable tensor operators live in :mod:`moe_load_balancer.kernels.ops`.
+Algorithm-specific backends live in subpackages such as ``lplb`` and
+``ultraep``. Shared build and loader infrastructure lives in
+:mod:`moe_load_balancer.kernels.jit`.
 
 Nothing in this package imports an inference framework. Vendored C++ /
 CUDA sources are self-contained: framework-specific glue (Protocol

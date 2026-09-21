@@ -1,4 +1,4 @@
-"""The draw that turns a replica split into a per-token assignment.
+"""Tensor operators that turn a replica split into per-token assignments.
 
 A policy decides how an expert's traffic divides across its replicas; which
 token lands on which one is the step that realises that decision. Drawing it

@@ -11,7 +11,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""JIT-kernel build helpers.
+"""Shared JIT-kernel build helpers.
 
 This module hosts the small set of helpers SDK CUDA kernels need to
 compile through ``tvm-ffi``:
@@ -390,7 +390,7 @@ def make_mathdx_include_paths_resolver(
 
     Adapters call this with their own bundled-mathdx location(s) and
     register the result. Keeps Math-DX lookup centralized in
-    ``kernels.utils`` while letting each adapter point at its own
+    ``kernels.jit.utils`` while letting each kernel package point at its own
     ``resources/mathdx`` (rather than a hard-coded SDK-relative path).
     """
 

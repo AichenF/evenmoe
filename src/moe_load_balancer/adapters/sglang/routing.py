@@ -30,7 +30,7 @@ def count_logical_experts(
 ) -> TensorLike:
     """Compatibility export for the MLB-owned logical count helper."""
 
-    from moe_load_balancer.kernels.expert_count import count_logical_experts as count
+    from moe_load_balancer.kernels.ops.counting import count_logical_experts as count
 
     return count(logical_topk_ids, num_logical_experts, dtype=dtype)
 
@@ -185,7 +185,7 @@ def _materialize_shared_expert_output(
     if num_tokens == 0:
         return expanded_ids, expanded_weights
 
-    from moe_load_balancer.kernels.shared_expert_materialization import (
+    from moe_load_balancer.kernels.ops.shared_expert import (
         materialize_shared_expert_cuda,
     )
 

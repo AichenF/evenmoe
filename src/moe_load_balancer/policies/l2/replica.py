@@ -8,13 +8,13 @@ import torch
 from torch import Tensor
 
 from moe_load_balancer.core.l2 import TokenRouter
-from moe_load_balancer.kernels.token_draw import replica_index
 from moe_load_balancer.core.types import (
     RoutingDecision,
     RoutingPhase,
     RoutingPolicyConfig,
     RoutingRequest,
 )
+from moe_load_balancer.kernels.ops.replica_draw import replica_index
 
 
 def transform_fake_routing_inputs(
@@ -84,7 +84,7 @@ def route_dynamic_replicas(
         logical_to_physical_count.shape[0],
     )
     # From the token index, not an RNG: the choice has to be reproducible and
-    # agreed upon by every rank that sees the token. See kernels.token_draw.
+    # agreed upon by every rank that sees the token. See kernels.ops.replica_draw.
     chosen_dispatch_index = replica_index(
         logical_topk_ids.shape,
         logical_topk_ids.shape[-1],
@@ -283,4 +283,3 @@ class DynamicRandomL2Router(TokenRouter):
             topk_weights=request.topk_weights,
             metadata={"policy": policy.name},
         )
-

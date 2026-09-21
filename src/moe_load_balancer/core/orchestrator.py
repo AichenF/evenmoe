@@ -50,9 +50,7 @@ class MoELoadBalancer:
             }
             placement_planners["ultraep"] = UltraEPPlacementPolicy()
         if rank_load_counter is None:
-            from moe_load_balancer.kernels.rank_count import count_routed_per_rank
-
-            rank_load_counter = count_routed_per_rank
+            rank_load_counter = _count_routed_per_rank
         self._placement_planners = dict(placement_planners)
         self._routing_policies = dict(routing_policies or {})
         self._rank_load_counter = rank_load_counter
@@ -393,7 +391,7 @@ class MoELoadBalancer:
     def _global_logical_count(self, request: RoutingRequest) -> object:
         if request.placement is None:
             raise ValueError("LPLB routing requires a committed placement.")
-        from moe_load_balancer.kernels.expert_count import count_logical_experts
+        from moe_load_balancer.kernels.ops.counting import count_logical_experts
 
         local_count = count_logical_experts(
             request.logical_topk_ids,
@@ -456,6 +454,46 @@ class MoELoadBalancer:
         if self._collectives is None:
             raise RuntimeError("RoutingCollectives is required for this routing pipeline.")
         return self._collectives.rank
+
+
+def _count_routed_per_rank(
+    physical_topk_ids: object,
+    placement: Optional[PlacementSnapshot],
+    policy: RoutingPolicyConfig,
+) -> object:
+    """Resolve routing metadata for the default rank-load counter."""
+
+    import torch
+
+    from moe_load_balancer.kernels.ops.counting import count_routed_per_rank
+
+    if not isinstance(physical_topk_ids, torch.Tensor):
+        raise TypeError("Rank-load counting requires torch.Tensor physical_topk_ids.")
+
+    rank_map = None
+    if placement is not None:
+        world_size = placement.ep_size
+        experts_per_rank = placement.num_local_physical_experts
+        if placement.physical_to_rank_map is not None:
+            rank_map = placement.physical_to_rank_map
+            if not isinstance(rank_map, torch.Tensor):
+                rank_map = torch.as_tensor(rank_map, device=physical_topk_ids.device)
+    else:
+        try:
+            world_size = int(policy.metadata["world_size"])
+            experts_per_rank = int(policy.metadata["experts_per_rank"])
+        except KeyError as exc:
+            raise ValueError(
+                "Rank-load counting without PlacementSnapshot requires "
+                "policy.metadata['world_size'] and ['experts_per_rank']."
+            ) from exc
+
+    return count_routed_per_rank(
+        physical_topk_ids,
+        world_size=world_size,
+        experts_per_rank=experts_per_rank,
+        physical_to_rank_map=rank_map,
+    )
 
 
 def _default_physical_routing(request: RoutingRequest) -> object:

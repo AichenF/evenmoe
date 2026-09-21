@@ -1,4 +1,4 @@
-"""CUDA logical-expert counting used by MLB token routing."""
+"""Triton backend for logical-expert counting."""
 
 from __future__ import annotations
 
