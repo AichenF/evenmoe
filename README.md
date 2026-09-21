@@ -231,11 +231,13 @@ SGLang passes its current runtime context to the adapter functions. The core
 `MoELoadBalancer` continues to accept framework-neutral requests and results:
 
 ```python
+from moe_load_balancer import MoELoadBalancer
 from moe_load_balancer.adapters import sglang as mlb_sglang
 from sglang.srt.runtime_context import get_context
 
 context = get_context()
-mlb = mlb_sglang.create_load_balancer(context)
+kwargs = mlb_sglang.to_load_balancer_kwargs(context)
+mlb = MoELoadBalancer.from_algorithm(**kwargs)
 
 request = mlb_sglang.to_routing_request(
     context=context,
@@ -269,9 +271,18 @@ plan = mlb.plan_placement(request)
 maps = mlb_sglang.to_sglang_maps(plan)
 ```
 
-After SGLang successfully moves or loads weights and commits placement, call
-`mlb_sglang.commit_placement(mlb, context, layer_ids)` to refresh placement-derived
-policy state. Passing the current context observes replacement metadata, but
+After SGLang successfully moves or loads weights and commits placement, it
+converts the committed metadata and notifies the core:
+
+```python
+if mlb.routing_capabilities.requires_placement_state:
+    metadata = context.resources.expert_location_metadata
+    for layer_id in layer_ids:
+        snapshot = mlb_sglang.to_placement_snapshot(metadata, layer_id)
+        mlb.on_placement_committed(snapshot)
+```
+
+Passing the current context observes replacement metadata, but
 does not rebuild derived solver state without this explicit commit event.
 Algorithms and topology used at construction follow the engine lifecycle;
 passing a context does not reconstruct policies or recapture CUDA graphs.

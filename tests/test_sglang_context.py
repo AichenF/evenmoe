@@ -4,15 +4,15 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from moe_load_balancer import MoELoadBalancer, RoutingDecision, RoutingPipeline
+from moe_load_balancer import MoELoadBalancer, RoutingDecision
 from moe_load_balancer.adapters.sglang import (
     placement,
-    runtime,
+    to_load_balancer_kwargs,
     to_placement_request,
+    to_placement_snapshot,
     to_routing_request,
     to_sglang_routing_output,
 )
-from moe_load_balancer.adapters.sglang.runtime import _SGLangCollectives
 
 pytestmark = pytest.mark.unit
 
@@ -51,7 +51,7 @@ def engine(monkeypatch):
             experts_capturer=Mock(),
         ),
     )
-    mlb = runtime.create_load_balancer(ctx)
+    mlb = MoELoadBalancer.from_algorithm(**to_load_balancer_kwargs(ctx))
     assert type(mlb) is MoELoadBalancer
     return mlb, ctx
 
@@ -97,19 +97,15 @@ def test_empty_routing_still_reaches_pipeline(engine):
 def test_missing_committed_metadata_fails_at_routing_not_construction(engine):
     mlb, ctx = engine
     ctx.resources.expert_location_metadata = None
-    new_mlb = runtime.create_load_balancer(ctx)
+    new_mlb = MoELoadBalancer.from_algorithm(**to_load_balancer_kwargs(ctx))
     with pytest.raises(RuntimeError, match="committed expert metadata"):
         route((new_mlb, ctx))
 
 
-def test_commit_refreshes_derived_state_only_on_explicit_notification(engine):
-    mlb, ctx = engine
-    mlb._routing_pipeline = RoutingPipeline.from_value("lplb")
-    mlb.on_placement_committed = Mock()
+def test_snapshot_reads_replaced_metadata_without_copying(engine):
+    _, ctx = engine
     ctx.resources.expert_location_metadata = metadata((2, 3))
-    mlb.on_placement_committed.assert_not_called()
-    runtime.commit_placement(mlb, ctx, [0])
-    snapshot = mlb.on_placement_committed.call_args.args[0]
+    snapshot = to_placement_snapshot(ctx.resources.expert_location_metadata, 0)
     assert snapshot.default_physical_for_logical.tolist() == [2, 3]
     assert (
         snapshot.physical_to_logical_map.data_ptr()
@@ -119,7 +115,7 @@ def test_commit_refreshes_derived_state_only_on_explicit_notification(engine):
 
 def test_collective_transport_reads_current_group(engine):
     mlb, ctx = engine
-    transport = _SGLangCollectives(ctx)
+    transport = to_load_balancer_kwargs(ctx)["collectives"]
     replacement = Mock(rank_in_group=1, world_size=2)
     ctx.parallel.moe_ep_group = replacement
     payload = torch.ones(2)

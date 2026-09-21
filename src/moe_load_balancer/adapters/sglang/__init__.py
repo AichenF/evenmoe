@@ -15,21 +15,16 @@ from moe_load_balancer.adapters.sglang.placement import (
 from moe_load_balancer.adapters.sglang.routing import (
     SGLangRoutingOutput,
     count_logical_experts,
+    to_load_balancer_kwargs,
     to_routing_request,
     to_sglang_routing_output,
 )
 
-from moe_load_balancer.adapters.sglang.runtime import (
-    commit_placement,
-    create_load_balancer,
-)
-
 __all__ = [
-    "commit_placement",
-    "create_load_balancer",
     "SGLangPlacementMaps",
     "SGLangRoutingOutput",
     "count_logical_experts",
+    "to_load_balancer_kwargs",
     "to_placement_request",
     "to_placement_snapshot",
     "to_routing_request",

@@ -3,8 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional, Sequence
 
-from moe_load_balancer.adapters.sglang.placement import _placement, to_placement_snapshot
-
+from moe_load_balancer.adapters.sglang import placement as placement_adapter
 from moe_load_balancer.core.types import (
     PlacementSnapshot,
     RoutingDecision,
@@ -16,6 +15,34 @@ from moe_load_balancer.core.types import (
 
 if TYPE_CHECKING:
     from sglang.srt.runtime_context import RuntimeContext
+
+
+class _SGLangCollectives:
+    def __init__(self, context: RuntimeContext):
+        self.context = context
+
+    @property
+    def rank(self) -> int:
+        return self.context.parallel.moe_ep_group.rank_in_group
+
+    @property
+    def world_size(self) -> int:
+        return self.context.parallel.moe_ep_group.world_size
+
+    def all_reduce_sum(self, payload):
+        return self.context.parallel.moe_ep_group.all_reduce(payload)
+
+
+def to_load_balancer_kwargs(context: RuntimeContext) -> dict:
+    """Translate engine configuration to the generic MLB constructor arguments."""
+    layout = placement_adapter._expert_layout(context)
+    return {
+        "algorithm": context.config_bag("exec").moe.moe_load_balancer_algorithm,
+        "ep_size": layout["ep_size"],
+        "source_rank": context.parallel.moe_ep_rank,
+        "experts_per_rank": layout["num_local_physical_experts"],
+        "collectives": _SGLangCollectives(context),
+    }
 
 
 @dataclass(frozen=True)
@@ -55,7 +82,9 @@ def to_routing_request(
     """Translate TopK and placement, reading context when no snapshot is supplied."""
 
     if placement is None and context is not None:
-        placement = to_placement_snapshot(_placement(context), layer_id)
+        placement = placement_adapter.to_placement_snapshot(
+            placement_adapter._placement(context), layer_id
+        )
     normalized_stage = None if stage is None else RoutingStage.from_str(stage)
     return RoutingRequest(
         layer_id=layer_id,
@@ -97,7 +126,7 @@ def to_sglang_routing_output(
         )
 
     if context is not None and (num_routed_experts is None or world_size is None):
-        metadata = _placement(context)
+        metadata = placement_adapter._placement(context)
         if num_routed_experts is None:
             num_routed_experts = metadata.num_physical_experts
         if world_size is None:
