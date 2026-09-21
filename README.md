@@ -110,7 +110,7 @@ The main source directories are:
 | `src/moe_load_balancer/policies/l1/` | Framework-independent placement algorithms. |
 | `src/moe_load_balancer/policies/l2/` | Framework-independent routing policies. |
 | `src/moe_load_balancer/kernels/` | Triton and CUDA execution implementations. |
-| `src/moe_load_balancer/adapters/sglang/` | Data translations and internal SGLang runtime integration. |
+| `src/moe_load_balancer/adapters/sglang/` | Data translations and stateless SGLang context integration. |
 | `src/moe_load_balancer/adapters/vllm/` | Stateless translation between vLLM and MLB values. |
 | `examples/` | Executable examples used by CI. |
 | `tests/` | API, policy, adapter, orchestrator, and GPU integration tests. |
@@ -227,39 +227,39 @@ The SGLang integration is responsible for:
 
 ### SGLang runtime context
 
-With SGLang's runtime context integration, create one load balancer per engine:
+SGLang passes its current runtime context to the adapter functions. The core
+`MoELoadBalancer` continues to accept framework-neutral requests and results:
 
 ```python
-from moe_load_balancer import MoELoadBalancer
+from moe_load_balancer.adapters import sglang as mlb_sglang
 from sglang.srt.runtime_context import get_context
 
-mlb = MoELoadBalancer.from_sglang_context(get_context())
+mlb = mlb_sglang.create_load_balancer(get_context())
+output = mlb_sglang.route_topk(
+    mlb,
+    get_context(),
+    layer_id=layer_id,
+    topk_output=topk_output,
+    token_count=token_count,
+    stage=stage,
+    routed_scaling_factor=routed_scaling_factor,
+)
 ```
 
-The returned `MoELoadBalancer` retains the context reference and reads
-resolved configuration, EP communication groups, committed expert placement,
-the recorder, and the routed-expert capturer from that context. It does not
-copy those resources into a second configuration or metadata store. Bootstrap
-geometry uses SGLang's model configuration and expert-layout helper before
-committed placement metadata exists.
+The stateless adapter reads current placement metadata from the supplied
+context, calls the core once, and returns SGLang-compatible values. SGLang
+owns recording and capture. No framework-specific MLB subclass or runtime
+binding object is required. The existing generic collective interface is
+backed by the engine's EP group.
 
-The routing algorithm and engine topology are selected at construction.
-Changing them requires a new engine and load balancer. Placement, EP groups,
-recorders, and capturers are read from the retained context when used.
+Use `mlb_sglang.plan_placement(mlb, context, logical_count, ...)` for planning.
+After SGLang successfully moves or loads weights and commits placement, call
+`mlb_sglang.commit_placement(mlb, context, layer_ids)` to refresh placement-derived
+policy state. Passing the current context observes replacement metadata, but
+does not rebuild derived solver state without this explicit commit event.
+Algorithms and topology used at construction follow the engine lifecycle;
+passing a context does not reconstruct policies or recapture CUDA graphs.
 
-Per-call inputs remain explicit: placement counts and active ranks for
-`plan_placement_from_counts()`, and logical TopK, weights, logits, token count, stage, and
-scaling factor for `route_topk()`. Tensor updates and replacement placement
-objects are visible on the next call. After weight movement and recovery
-finish, SGLang calls `mlb.commit_placement(layer_ids)` to refresh
-MLB's derived placement state. Engine teardown discards MLB with its
-solvers; a new engine creates a new MLB. SGLang-specific reads and conversions
-stay in an internal adapter; ordinary MLB construction does not import SGLang.
-
-This interface preserves the routing policy's CUDA Graph contract. For LPLB,
-placement updates that change solver-state tensor shapes require uncaptured
-execution or graph recapture. Retaining the context cannot update an already
-captured graph's tensor addresses.
 
 ## Development
 
