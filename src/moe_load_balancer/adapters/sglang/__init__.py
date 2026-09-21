@@ -22,15 +22,11 @@ from moe_load_balancer.adapters.sglang.routing import (
 from moe_load_balancer.adapters.sglang.runtime import (
     commit_placement,
     create_load_balancer,
-    plan_placement,
-    route_topk,
 )
 
 __all__ = [
     "commit_placement",
     "create_load_balancer",
-    "plan_placement",
-    "route_topk",
     "SGLangPlacementMaps",
     "SGLangRoutingOutput",
     "count_logical_experts",

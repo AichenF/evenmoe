@@ -4,8 +4,14 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from moe_load_balancer import MoELoadBalancer, RoutingPipeline
-from moe_load_balancer.adapters.sglang import runtime
+from moe_load_balancer import MoELoadBalancer, RoutingDecision, RoutingPipeline
+from moe_load_balancer.adapters.sglang import (
+    placement,
+    runtime,
+    to_placement_request,
+    to_routing_request,
+    to_sglang_routing_output,
+)
 from moe_load_balancer.adapters.sglang.runtime import _SGLangCollectives
 
 pytestmark = pytest.mark.unit
@@ -32,7 +38,7 @@ def engine(monkeypatch):
         "num_local_physical_experts": 2,
         "model_config_for_expert_location": SimpleNamespace(num_groups=1),
     }
-    monkeypatch.setattr(runtime, "_expert_layout", lambda context: layout)
+    monkeypatch.setattr(placement, "_expert_layout", lambda context: layout)
     config = SimpleNamespace(
         moe=SimpleNamespace(moe_load_balancer_algorithm="static", eplb_algorithm="deepseek")
     )
@@ -53,19 +59,17 @@ def engine(monkeypatch):
 def route(engine, ids=None):
     mlb, ctx = engine
     ids = torch.tensor([[0, 1]]) if ids is None else ids
-    return runtime.route_topk(
-        mlb,
-        ctx,
+    request = to_routing_request(
+        context=ctx,
         layer_id=0,
-        topk_output=SimpleNamespace(
-            topk_ids=ids,
-            topk_weights=torch.ones_like(ids, dtype=torch.float32),
-            router_logits=None,
-        ),
+        logical_topk_ids=ids,
+        topk_weights=torch.ones_like(ids, dtype=torch.float32),
         token_count=len(ids),
         stage="prefill",
         routed_scaling_factor=1.0,
     )
+    decision = mlb.route_tokens(request)
+    return to_sglang_routing_output(decision, context=ctx)
 
 
 def test_routing_reads_in_place_changes_and_replaced_metadata(engine):
@@ -126,16 +130,18 @@ def test_collective_transport_reads_current_group(engine):
 
 def test_planning_reads_context_and_keeps_per_call_inputs_explicit(engine):
     mlb, ctx = engine
-    mlb.plan_placement = Mock(wraps=mlb.plan_placement)
     counts = torch.tensor([[[10, 20]]])
     ctx.config_bag("exec").moe.eplb_algorithm = "deepseek_vec"
     active = torch.tensor([True, True])
-    runtime.plan_placement(mlb, ctx, counts, active_ranks=active, use_flat_topology=True)
-    request = mlb.plan_placement.call_args.args[0]
+    request = to_placement_request(counts, context=ctx, active_ranks=active, num_nodes=1)
     assert request.stats.logical_count is counts
     assert request.topology.active_ranks is active
     assert request.topology.num_nodes == 1
     assert request.policy.name == "deepseek_vec"
+    assert request.topology.num_physical_experts == 4
+    assert request.topology.num_local_physical_experts == 2
+    ctx.parallel.nnodes = 3
+    assert to_placement_request(counts, context=ctx).topology.num_nodes == 3
 
 
 def test_two_contexts_do_not_share_placement_or_mutate_topk(engine):
@@ -146,3 +152,39 @@ def test_two_contexts_do_not_share_placement_or_mutate_topk(engine):
     assert route((mlb, second), ids).topk_ids.tolist() == [[2, 3]]
     assert route((mlb, first), ids).topk_ids.tolist() == [[0, 1]]
     assert ids.tolist() == [[0, 1]]
+
+
+def test_shared_output_reads_current_context_geometry(engine):
+    _, ctx = engine
+    ids = torch.tensor([[0, 3]])
+    decision = RoutingDecision(
+        routed_physical_topk_ids=ids,
+        topk_weights=torch.tensor([[0.7, 0.3]]),
+        shared_expert_rank=torch.tensor([1]),
+    )
+    output = to_sglang_routing_output(decision, context=ctx)
+    assert output.topk_ids.tolist() == [[0, 4, 5]]
+    assert output.recorded_physical_topk_ids is ids
+
+    ctx.resources.expert_location_metadata = SimpleNamespace(num_physical_experts=6, ep_size=2)
+    output = to_sglang_routing_output(decision, context=ctx)
+    assert output.topk_ids.tolist() == [[0, 4, 7]]
+    assert output.recorded_physical_topk_ids is ids
+
+
+def test_explicit_placement_values_override_context_defaults(engine):
+    _, ctx = engine
+    request = to_placement_request(
+        torch.ones((1, 2)),
+        context=ctx,
+        num_physical_experts=8,
+        num_local_physical_experts=4,
+        num_groups=2,
+        num_nodes=1,
+        algorithm="deepseek_vec",
+    )
+    assert request.topology.num_physical_experts == 8
+    assert request.topology.num_local_physical_experts == 4
+    assert request.topology.num_groups == 2
+    assert request.topology.num_nodes == 1
+    assert request.policy.name == "deepseek_vec"

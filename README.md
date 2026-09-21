@@ -234,25 +234,41 @@ SGLang passes its current runtime context to the adapter functions. The core
 from moe_load_balancer.adapters import sglang as mlb_sglang
 from sglang.srt.runtime_context import get_context
 
-mlb = mlb_sglang.create_load_balancer(get_context())
-output = mlb_sglang.route_topk(
-    mlb,
-    get_context(),
+context = get_context()
+mlb = mlb_sglang.create_load_balancer(context)
+
+request = mlb_sglang.to_routing_request(
+    context=context,
     layer_id=layer_id,
-    topk_output=topk_output,
+    logical_topk_ids=topk_output.topk_ids,
+    topk_weights=topk_output.topk_weights,
     token_count=token_count,
     stage=stage,
     routed_scaling_factor=routed_scaling_factor,
 )
+decision = mlb.route_tokens(request)
+output = mlb_sglang.to_sglang_routing_output(
+    decision,
+    context=context,
+    router_logits=topk_output.router_logits,
+    routed_scaling_factor=routed_scaling_factor,
+)
 ```
 
-The stateless adapter reads current placement metadata from the supplied
-context, calls the core once, and returns SGLang-compatible values. SGLang
-owns recording and capture. No framework-specific MLB subclass or runtime
-binding object is required. The existing generic collective interface is
-backed by the engine's EP group.
+SGLang owns the three stages: adapt the input, call the core, and adapt the
+output. The data adapters read current placement metadata from the supplied
+context without executing the load balancer. Explicit values remain supported
+and take precedence over context defaults. SGLang owns recording and capture;
+the existing generic collective interface is backed by the engine's EP group.
 
-Use `mlb_sglang.plan_placement(mlb, context, logical_count, ...)` for planning.
+Placement planning follows the same three stages:
+
+```python
+request = mlb_sglang.to_placement_request(logical_count, context=context)
+plan = mlb.plan_placement(request)
+maps = mlb_sglang.to_sglang_maps(plan)
+```
+
 After SGLang successfully moves or loads weights and commits placement, call
 `mlb_sglang.commit_placement(mlb, context, layer_ids)` to refresh placement-derived
 policy state. Passing the current context observes replacement metadata, but

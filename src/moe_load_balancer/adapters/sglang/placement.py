@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from moe_load_balancer.core.types import (
     PlacementPlan,
@@ -12,6 +12,29 @@ from moe_load_balancer.core.types import (
     PlacementTopology,
     TensorLike,
 )
+
+if TYPE_CHECKING:
+    from sglang.srt.runtime_context import RuntimeContext
+
+
+def _expert_layout(context: RuntimeContext):
+    # Bootstrap happens before committed placement metadata exists.
+    from sglang.srt.arg_groups.model_override_base import model_config_of
+    from sglang.srt.eplb.expert_location import ExpertLocationMetadata
+
+    layout = ExpertLocationMetadata._init_common(
+        model_config_of(context.server_args), context=context
+    )
+    if layout is None:
+        raise ValueError("MLB routing requires MoE expert-location metadata.")
+    return layout
+
+
+def _placement(context: RuntimeContext):
+    metadata = context.resources.expert_location_metadata
+    if metadata is None:
+        raise RuntimeError("MLB routing requires committed expert metadata.")
+    return metadata
 
 
 @dataclass(frozen=True)
@@ -26,11 +49,12 @@ class SGLangPlacementMaps:
 def to_placement_request(
     logical_count: TensorLike,
     *,
-    num_physical_experts: int,
-    num_local_physical_experts: int,
-    num_groups: int,
-    num_nodes: int,
-    algorithm: str = "auto",
+    context: Optional[RuntimeContext] = None,
+    num_physical_experts: Optional[int] = None,
+    num_local_physical_experts: Optional[int] = None,
+    num_groups: Optional[int] = None,
+    num_nodes: Optional[int] = None,
+    algorithm: Optional[str] = None,
     active_ranks: Optional[TensorLike] = None,
     policy_metadata: Optional[dict[str, Any]] = None,
 ) -> PlacementRequest:
@@ -39,11 +63,29 @@ def to_placement_request(
     SGLang must perform recording, dump, physical-to-logical aggregation,
     all-reduce and threshold gating before calling this function.
 
+    Context supplies omitted layout and policy values. Explicit arguments,
+    such as ``num_nodes=1`` for flat topology, take precedence.
+
     ``policy_metadata`` is opaque, per-policy configuration -- ``ultraep``
     reads ``rank``/``num_nvl_ranks`` from it (its placement kernel solves
     once per EP rank and validates the value is in range); every other MLB
     policy ignores it, so it is safe to leave unset.
     """
+
+    if context is not None:
+        layout = _expert_layout(context)
+        if num_physical_experts is None:
+            num_physical_experts = layout["num_physical_experts"]
+        if num_local_physical_experts is None:
+            num_local_physical_experts = layout["num_local_physical_experts"]
+        if num_groups is None:
+            num_groups = layout["model_config_for_expert_location"].num_groups
+        if num_nodes is None:
+            num_nodes = context.parallel.nnodes
+        if algorithm is None:
+            algorithm = context.config_bag("exec").moe.eplb_algorithm
+    if num_physical_experts is None or num_local_physical_experts is None or num_nodes is None:
+        raise ValueError("Placement requires a context or explicit expert and node counts.")
 
     return PlacementRequest(
         stats=PlacementStats(logical_count=logical_count),
@@ -54,7 +96,9 @@ def to_placement_request(
             num_nodes=num_nodes,
             active_ranks=active_ranks,
         ),
-        policy=PlacementPolicyConfig(name=algorithm, metadata=policy_metadata or {}),
+        policy=PlacementPolicyConfig(
+            name="auto" if algorithm is None else algorithm, metadata=policy_metadata or {}
+        ),
     )
 
 
