@@ -31,21 +31,28 @@ def metadata(mapping=(0, 1)):
 
 
 @pytest.fixture
-def engine(monkeypatch):
-    layout = {
-        "ep_size": 2,
-        "num_physical_experts": 4,
-        "num_local_physical_experts": 2,
-        "model_config_for_expert_location": SimpleNamespace(num_groups=1),
-    }
-    monkeypatch.setattr(placement, "_expert_layout", lambda context: layout)
+def engine():
     config = SimpleNamespace(
-        moe=SimpleNamespace(moe_load_balancer_algorithm="static", eplb_algorithm="deepseek")
+        moe=SimpleNamespace(
+            moe_load_balancer_algorithm="static",
+            eplb_algorithm="deepseek",
+            ep_num_redundant_experts=2,
+            ep_join_mode=None,
+        )
     )
     ctx = SimpleNamespace(
         config_bag=lambda name: config,
-        parallel=SimpleNamespace(moe_ep_rank=0, nnodes=2, moe_ep_group=Mock()),
+        parallel=SimpleNamespace(
+            moe_ep_rank=0,
+            nnodes=2,
+            moe_ep_group=Mock(),
+            ep_size=2,
+            elastic_ep_initial_size=None,
+            ep_join_rank_offset=0,
+            tp_size=2,
+        ),
         resources=SimpleNamespace(
+            mlb_model_info={"num_logical_experts": 2, "num_groups": 1},
             expert_location_metadata=metadata(),
             expert_distribution_recorder=Mock(),
             experts_capturer=Mock(),
@@ -54,6 +61,67 @@ def engine(monkeypatch):
     mlb = MoELoadBalancer.from_algorithm(**to_load_balancer_kwargs(ctx))
     assert type(mlb) is MoELoadBalancer
     return mlb, ctx
+
+
+@pytest.mark.parametrize(
+    "ep_size, initial_ep_size, join_mode, offset, expected",
+    [
+        (2, None, None, 0, (2, 4, 2)),
+        (4, 2, None, 0, (4, 8, 2)),
+        (2, 2, "scale", 4, (6, 12, 2)),
+        (8, 2, "scale", 4, (8, 16, 2)),
+        (4, 4, None, 0, (4, 4, 1)),
+    ],
+)
+def test_layout_from_context(engine, ep_size, initial_ep_size, join_mode, offset, expected):
+    _, ctx = engine
+    ctx.parallel.ep_size = ep_size
+    ctx.parallel.elastic_ep_initial_size = initial_ep_size
+    ctx.parallel.ep_join_rank_offset = offset
+    ctx.config_bag("exec").moe.ep_join_mode = join_mode
+    layout = placement._expert_layout(ctx)
+    assert (
+        layout["ep_size"],
+        layout["num_physical_experts"],
+        layout["num_local_physical_experts"],
+    ) == expected
+    assert layout["num_groups"] == 1
+
+
+def test_bootstrap_and_planning_do_not_import_sglang(engine, monkeypatch):
+    import builtins
+
+    _, ctx = engine
+    original_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "sglang" or name.startswith("sglang."):
+            raise AssertionError(f"Unexpected SGLang import: {name}")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    ctx.resources.expert_location_metadata = None
+    kwargs = to_load_balancer_kwargs(ctx)
+    assert kwargs["ep_size"] == 2 and kwargs["experts_per_rank"] == 2
+    request = to_placement_request(torch.ones((1, 2)), context=ctx)
+    assert request.topology.num_groups == 1
+
+
+def test_layout_requires_published_model_info(engine):
+    _, ctx = engine
+    ctx.resources.mlb_model_info = None
+    with pytest.raises(ValueError, match="model expert information"):
+        to_load_balancer_kwargs(ctx)
+
+
+def test_layout_rejects_indivisible_experts(engine):
+    _, ctx = engine
+    ctx.resources.mlb_model_info["num_logical_experts"] = 3
+    with pytest.raises(AssertionError):
+        placement._expert_layout(ctx)
+    ctx.parallel.elastic_ep_initial_size = 2
+    with pytest.raises(AssertionError):
+        placement._expert_layout(ctx)
 
 
 def route(engine, ids=None):

@@ -21,16 +21,33 @@ if TYPE_CHECKING:
 
 
 def _expert_layout(context: RuntimeContext):
-    # Bootstrap happens before committed placement metadata exists.
-    from sglang.srt.arg_groups.model_override_base import model_config_of
-    from sglang.srt.eplb.expert_location import ExpertLocationMetadata
-
-    layout = ExpertLocationMetadata._init_common(
-        model_config_of(context.server_args), context=context
+    # Model facts are available before committed placement metadata exists.
+    model_info = context.resources.mlb_model_info
+    if model_info is None:
+        raise ValueError("MLB routing requires model expert information in context.")
+    moe = context.config_bag("exec").moe
+    parallel = context.parallel
+    base_num_physical_experts = (
+        model_info["num_logical_experts"] + moe.ep_num_redundant_experts
     )
-    if layout is None:
-        raise ValueError("MLB routing requires MoE expert-location metadata.")
-    return layout
+    ep_size = parallel.ep_size
+    initial_ep_size = parallel.elastic_ep_initial_size
+    if initial_ep_size is not None:
+        if moe.ep_join_mode == "scale":
+            ep_size = max(ep_size, parallel.ep_join_rank_offset + parallel.tp_size)
+        assert base_num_physical_experts % initial_ep_size == 0
+        num_local_physical_experts = base_num_physical_experts // initial_ep_size
+        num_physical_experts = num_local_physical_experts * ep_size
+    else:
+        assert base_num_physical_experts % ep_size == 0
+        num_physical_experts = base_num_physical_experts
+        num_local_physical_experts = num_physical_experts // ep_size
+    return {
+        "ep_size": ep_size,
+        "num_physical_experts": num_physical_experts,
+        "num_local_physical_experts": num_local_physical_experts,
+        "num_groups": model_info["num_groups"],
+    }
 
 
 def _placement(context: RuntimeContext):
@@ -93,7 +110,7 @@ def to_placement_request(
         if num_local_physical_experts is None:
             num_local_physical_experts = layout["num_local_physical_experts"]
         if num_groups is None:
-            num_groups = layout["model_config_for_expert_location"].num_groups
+            num_groups = layout["num_groups"]
         if num_nodes is None:
             num_nodes = context.parallel.nnodes
         if algorithm is None:
