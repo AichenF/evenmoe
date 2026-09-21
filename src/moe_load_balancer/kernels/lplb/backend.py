@@ -28,9 +28,8 @@ class CUDALPLBKernels:
             raise ImportError(
                 "CUDALPLBKernels requires the LPLB CUDA solver and its runtime "
                 "dependencies (torch + tvm-ffi). JIT compilation additionally "
-                "requires NVIDIA Math-DX headers: set MATHDX_HOME, install the "
-                "nvidia-mathdx package, or run "
-                "src/moe_load_balancer/kernels/lplb/resources/download-mathdx.sh."
+                "requires NVIDIA Math-DX headers: set MATHDX_HOME or install the "
+                "nvidia-mathdx package."
             ) from exc
         self._cuda = cuda_solver
 

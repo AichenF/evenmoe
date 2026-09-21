@@ -6,12 +6,9 @@ This package owns the LPLB Linear-Programming load-balancer kernels:
                              post / dispatch). Build via
                              ``moe_load_balancer.kernels.jit.utils``.
 - ``protocol``              execution contract consumed by the LPLB policy.
-- ``shmem_budget``           shared-memory size calculation per (NC, NV).
 - ``csrc/``                  CUDA kernel sources (header-only ``.cuh``).
 - ``include/moe_lb_jit/``    Vendored helper C++ headers (TensorView
                              validation, ``LaunchKernel`` wrapper, etc.).
-- ``resources/download-mathdx.sh``   Math-DX (cuBLASDx) installer that
-                             populates ``resources/mathdx/``.
 
 The pipeline has no runtime or build-time dependency on any inference
 framework. Framework-specific implementations of ``LPLBKernels`` live
