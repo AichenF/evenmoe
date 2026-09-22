@@ -14,6 +14,11 @@ rebalance cadence, weight movement, and committed placement metadata. Adapters
 translate framework-native values to and from the plain request and result
 types used by this package.
 
+## Contributing
+
+See the [contribution guide](CONTRIBUTING.md) for adding model support,
+implementing L1/L2 algorithms, and reporting validation and performance.
+
 ## Status
 
 The current release is `0.1.0` and the public API is still evolving.
