@@ -14,8 +14,7 @@ from moe_load_balancer.policies.l1.eplb import (
     compute_algorithm,
     rebalance_experts,
 )
-from moe_load_balancer.policies.l1.ultraep import UltraEPPlacementPolicy
-from moe_load_balancer.policies.l1.ultraep_refresh import RefreshGate
+from moe_load_balancer.policies.l1.ultraep import RefreshGate, UltraEPPlacementPolicy
 
 __all__ = [
     "SUPPORTED_PLACEMENT_POLICIES",
