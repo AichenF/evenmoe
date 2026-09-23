@@ -243,13 +243,7 @@ def extract_log2phy_prob(
     with one CUDA kernel. Writes into the caller-provided ``log2phy_prob``
     buffer of shape ``(num_logical, max_copies)``.
     """
-    # A None share table selects the uniform/modulo mode, which is how a
-    # policy that just wants "one replica, evenly" gets the framework's own
-    # choice out of the same kernel instead of building the table for it.
-    if log2phy_prob is None:
-        num_logical, max_copies = log2phy_map.shape
-    else:
-        num_logical, max_copies = log2phy_prob.shape
+    num_logical, max_copies = log2phy_prob.shape
     num_single = phy_single.shape[0]
     num_red_phy = phy_replicated.shape[0]
     module = _post_module(num_logical, max_copies, num_single, num_red_phy, DEFAULT_BLOCK_DIM)
@@ -267,7 +261,6 @@ def _dispatch_module(max_copies: int, block_dim: int) -> "Module":
         extra_include_paths=[_INCLUDE],
         source_root=_HERE,
     )
-
 
 
 def dispatch_probability(
@@ -303,6 +296,8 @@ def dispatch_probability(
     else:
         num_logical, max_copies = log2phy_prob.shape
     assert log2phy_map.shape == (num_logical, max_copies)
+    if n == 0:
+        return torch.empty_like(topk_ids)
     map32 = log2phy_map.contiguous().to(torch.int32)
 
     out = torch.empty(n, dtype=torch.int32, device=topk_ids.device)
