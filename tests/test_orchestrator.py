@@ -585,3 +585,57 @@ def test_a_caller_supplied_count_is_never_re_gathered():
 
     assert collectives.payloads == []
     assert torch.equal(router.seen_count, supplied)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("setting", [None, "0", "1", "true"])
+@pytest.mark.parametrize("ids", [[[0, 0], [1, -1]], []])
+def test_lplb_local_count_switch_controls_collective_and_solver_input(monkeypatch, setting, ids):
+    if setting is None:
+        monkeypatch.delenv("LPLB_USE_LOCAL_COUNT", raising=False)
+    else:
+        monkeypatch.setenv("LPLB_USE_LOCAL_COUNT", setting)
+    router = _CountDeclaringPhysicalRouter(needs=True)
+    peer_count = torch.tensor([4.0, 7.0])
+    collectives = _RecordingCollectives(peer_count)
+    topk_ids = torch.tensor(ids, dtype=torch.int64).reshape(-1, 2)
+
+    _mlb_with(router, collectives).route_tokens(
+        _count_request(logical_topk_ids=topk_ids, topk_weights=torch.ones_like(topk_ids).float())
+    )
+
+    local_count = torch.tensor([2.0, 1.0]) if ids else torch.zeros(2)
+    expected = local_count if setting == "1" else local_count + peer_count
+    assert torch.equal(router.seen_count, expected)
+    assert router.seen_count.dtype == torch.float32
+    assert len(collectives.payloads) == (0 if setting == "1" else 1)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("supplied", [None, torch.tensor([5.0, 7.0])])
+def test_local_count_preserves_unused_and_explicit_counts(monkeypatch, supplied):
+    monkeypatch.setenv("LPLB_USE_LOCAL_COUNT", "1")
+    router = _CountDeclaringPhysicalRouter(needs=supplied is not None)
+    collectives = _RecordingCollectives(torch.tensor([4.0, 7.0]))
+
+    _mlb_with(router, collectives).route_tokens(_count_request(global_logical_count=supplied))
+
+    assert router.seen_count is supplied
+    assert collectives.payloads == []
+
+
+@pytest.mark.unit
+def test_lplb_local_count_does_not_change_other_count_consumers(monkeypatch):
+    monkeypatch.setenv("LPLB_USE_LOCAL_COUNT", "1")
+    router = _CountDeclaringPhysicalRouter(needs=True)
+    collectives = _RecordingCollectives(torch.tensor([4.0, 7.0]))
+    mlb = MoELoadBalancer(
+        placement_planners={},
+        routing_policies={"custom": router},
+        collectives=collectives,
+    )
+
+    mlb.route_tokens(_count_request(policies=(RoutingPolicyConfig(name="custom"),)))
+
+    assert torch.equal(router.seen_count, torch.tensor([5.0, 8.0]))
+    assert len(collectives.payloads) == 1

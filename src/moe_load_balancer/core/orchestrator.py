@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 
@@ -56,6 +57,7 @@ class MoELoadBalancer:
         self._rank_load_counter = rank_load_counter
         self._routing_pipeline = RoutingPipeline.from_value(routing_pipeline)
         self._collectives = collectives
+        self._use_lplb_local_count = os.environ.get("LPLB_USE_LOCAL_COUNT", "0") == "1"
 
     @classmethod
     def from_algorithm(
@@ -272,7 +274,7 @@ class MoELoadBalancer:
                     routed_rank_load=None,
                     active_rank_token_count=None,
                     global_logical_count=self._resolve_global_logical_count(
-                        router, request
+                        router, request, policy_config
                     ),
                 )
                 decision = router.route_tokens(policy_request, policy_config)
@@ -350,6 +352,7 @@ class MoELoadBalancer:
         self,
         router: TokenRouter,
         request: RoutingRequest,
+        policy: RoutingPolicyConfig,
     ) -> object:
         """Gather the EP-wide per-logical token count, but only if it is used.
 
@@ -372,9 +375,14 @@ class MoELoadBalancer:
             return None
         if not router.needs_global_logical_count(request):
             return None
-        return self._global_logical_count(request)
+        return self._global_logical_count(
+            request,
+            use_local_count=self._use_lplb_local_count and policy.name == "lplb",
+        )
 
-    def _global_logical_count(self, request: RoutingRequest) -> object:
+    def _global_logical_count(
+        self, request: RoutingRequest, *, use_local_count: bool = False
+    ) -> object:
         if request.placement is None:
             raise ValueError("LPLB routing requires a committed placement.")
         from moe_load_balancer.kernels.ops.counting import count_logical_experts
@@ -383,6 +391,10 @@ class MoELoadBalancer:
             request.logical_topk_ids,
             request.placement.num_logical_experts,
         )
+        # Local-count LPLB approximates the global distribution with this
+        # rank's own float32 histogram, without scaling by the EP size.
+        if use_local_count:
+            return local_count
         return self._all_reduce_sum(local_count, request.placement.ep_size)
 
     def _global_waterfill_load(

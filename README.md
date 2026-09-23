@@ -216,6 +216,11 @@ one collective. `lplb+waterfill` performs one logical-count collective, then
 derives Waterfill's planned global rank load from the LPLB solution, so it does
 not issue a second collective.
 
+Set `LPLB_USE_LOCAL_COUNT=1` before constructing `MoELoadBalancer` to skip
+MLB's LPLB count all-reduce and approximate the global distribution with local
+token counts. Default: `0` (global counts). Explicitly supplied
+`RoutingRequest.global_logical_count` takes precedence.
+
 After initial weight loading and after each placement update is committed, the
 framework passes its current metadata to
 `mlb.on_placement_committed(snapshot)`. MLB does not own a placement version;
