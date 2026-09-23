@@ -27,39 +27,6 @@ from moe_load_balancer.kernels.ultraep import (
 )
 
 
-def build_ultraep_initial_physical_to_logical_map(
-    *,
-    num_layers: int,
-    num_logical_experts: int,
-    ep_size: int,
-    num_redundant_experts_per_rank: int,
-    device: str | torch.device = "cpu",
-) -> torch.Tensor:
-    """Build fixed rank-local master slots followed by replica slots."""
-
-    if num_layers <= 0:
-        raise ValueError("UltraEP requires at least one MoE layer.")
-    if ep_size <= 1 or num_logical_experts % ep_size != 0:
-        raise ValueError("UltraEP requires divisible experts and ep_size > 1.")
-    if num_redundant_experts_per_rank <= 0:
-        raise ValueError("UltraEP requires at least one redundant slot per rank.")
-
-    local_masters = num_logical_experts // ep_size
-    rank_maps = []
-    for rank in range(ep_size):
-        masters = torch.arange(
-            rank * local_masters,
-            (rank + 1) * local_masters,
-            dtype=torch.int32,
-            device=device,
-        )
-        scratch = masters[
-            torch.arange(num_redundant_experts_per_rank, device=device) % local_masters
-        ]
-        rank_maps.append(torch.cat((masters, scratch)))
-    return torch.cat(rank_maps).repeat(num_layers, 1)
-
-
 class UltraEPPlacementPolicy(PlacementPlanner):
     """Compute replica placement from per-rank logical expert loads."""
 
@@ -87,10 +54,6 @@ class UltraEPPlacementPolicy(PlacementPlanner):
         if self._tuning is None:
             self._tuning = load_placement_tuning_from_env()
         return self._tuning
-
-    @staticmethod
-    def build_initial_physical_to_logical_map(**kwargs) -> torch.Tensor:
-        return build_ultraep_initial_physical_to_logical_map(**kwargs)
 
     def plan(self, request: PlacementRequest) -> PlacementPlan:
         policy = PlacementPolicyConfig.from_value(request.policy)
