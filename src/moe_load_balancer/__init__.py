@@ -7,7 +7,6 @@ from moe_load_balancer.core.l2 import (
     TokenRouter,
 )
 from moe_load_balancer.core.orchestrator import MoELoadBalancer
-from moe_load_balancer.core.refresh_gate import RefreshGate
 from moe_load_balancer.core.routing_pipeline import (
     ExpertDeploymentConfig,
     RoutingCapabilities,
@@ -41,7 +40,6 @@ __all__ = [
     "PlacementSnapshot",
     "PlacementStats",
     "PlacementTopology",
-    "RefreshGate",
     "RoutingCapabilities",
     "RoutingCollectives",
     "RoutingDecision",

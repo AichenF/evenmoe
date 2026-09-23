@@ -1,6 +1,6 @@
 import pytest
 
-from moe_load_balancer import RefreshGate
+from moe_load_balancer.policies.l1 import RefreshGate
 
 
 def _tick(gate: RefreshGate, layer_id: int, *, representative: bool) -> bool:
