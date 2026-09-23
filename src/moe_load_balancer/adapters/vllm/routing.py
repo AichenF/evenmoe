@@ -121,7 +121,8 @@ def nearest_replica_table(
 
       1. a single candidate is taken as-is
       2. otherwise a replica on this rank's own GPU, if one exists
-      3. otherwise a replica on this rank's own node
+      3. otherwise, when the candidates on this rank's node are a strict
+         subset of all candidates, the first of those (SGLang >= v0.5.16)
       4. ranks still unassigned share the candidates evenly -- `_fair_choices`
          repeats the candidate list `k // len` times, samples the remainder,
          and shuffles from a fixed seed so every rank derives the same map
@@ -134,9 +135,8 @@ def nearest_replica_table(
     ``ep_size`` must be passed when any rank holds no replica of any expert:
     inferring it from the largest physical id present undercounts exactly then,
     and the caller's own rank can fall outside the table. ``num_gpus_per_node``
-    defaults to the whole EP group, i.e. single node, in which case tiers 2 and
-    3 coincide and every rank without a local copy takes the first candidate --
-    that concentration is SGLang's behaviour, not an accident of this port.
+    defaults to the whole EP group, i.e. a single node, where tier 3 never
+    narrows anything and every rank without a local copy joins the even share.
     """
     import random
 
@@ -173,7 +173,8 @@ def nearest_replica_table(
                 chosen[r] = same_gpu[0]
                 continue
             same_node = [c for c in cands if c // per_node == r // gpus_per_node]
-            if same_node:
+            # The node tier applies only when it narrows the choice (SGLang >= v0.5.16).
+            if 0 < len(same_node) < len(cands):
                 chosen[r] = same_node[0]
                 continue
             remaining.append(r)
@@ -309,24 +310,25 @@ def to_vllm_topk_ids(decision: RoutingDecision) -> TensorLike:
     """Translate an MLB decision into the tensor vLLM's router writes back.
 
     vLLM's routing boundary (``BaseRouter._apply_eplb_mapping``) returns only
-    physical ``topk_ids``; weights are produced upstream and are not rewritten.
-
-    A shared-expert decision cannot be expressed here.  On vLLM's CUDA path the
-    shared expert is a per-rank replicated MLP that never enters EP dispatch
-    (``fused_moe/layer.py`` gates shared-expert fusion behind the AITER env),
-    so there is no "which rank runs it" choice to write back.  Any policy that
-    produces one is a configuration error rather than something to silently
-    drop.
+    the physical ``topk_ids`` of the routed experts; weights are produced
+    upstream and are not rewritten. A shared-expert decision adds a column
+    rather than substituting an id, so it travels separately through
+    ``to_vllm_shared_expert_rank``.
     """
 
-    if decision.shared_expert_rank is not None:
-        raise NotImplementedError(
-            "Shared-expert routing (Waterfill) has no writeback path on vLLM: "
-            "shared experts are replicated per rank and do not go through EP "
-            "dispatch. Select a routed-replica policy such as 'lplb', "
-            "'dynamic' or 'static'."
-        )
     return decision.routed_physical_topk_ids
+
+
+def to_vllm_shared_expert_rank(decision: RoutingDecision) -> TensorLike | None:
+    """The per-token EP rank a shared-expert policy chose, or None when the
+    pipeline has no shared-expert policy.
+
+    vLLM builds its widened shared-expert layout from the layer's own geometry,
+    so it takes the rank and does the id arithmetic itself, unlike SGLang, which
+    takes expanded ids from ``to_sglang_routing_output``.
+    """
+
+    return decision.shared_expert_rank
 
 
 def stage_from_vllm(name: Optional[str]) -> Optional[RoutingStage]:

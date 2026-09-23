@@ -3,7 +3,10 @@
 Copied rather than imported so the alignment tests do not depend on a SGLang
 install, and so a drift on either side shows up as a test failure rather than
 as a silently different policy sharing a name. Source:
-sglang/srt/eplb/expert_location.py and expert_location_dispatch.py.
+sglang/srt/eplb/expert_location.py and expert_location_dispatch.py, at the
+v0.5.16 semantics: the same-node tier applies only when it narrows the
+candidate set, so on a single node ranks without a local replica share the
+copies evenly instead of all taking the first one.
 """
 
 import random
@@ -42,8 +45,8 @@ def _find_nearest_expert(
     candidate_physical_expert_ids: List[int],
     num_local_gpu_physical_experts: int,
     moe_ep_rank: int,
-    num_gpus_per_node: int,
-    num_local_node_physical_experts: int,
+    num_gpus_per_node: int | None,
+    num_local_node_physical_experts: int | None,
 ) -> int:
     # 1. If only one candidate, return it directly
     if len(candidate_physical_expert_ids) == 1:
@@ -61,18 +64,19 @@ def _find_nearest_expert(
     if len(same_gpu_physical_expert_ids) > 0:
         return same_gpu_physical_expert_ids[0]
 
-    # 3. Otherwise, prefer same-node experts
-    node_rank = moe_ep_rank // num_gpus_per_node
-    same_node_physical_expert_ids = [
-        physical_expert_id
-        for physical_expert_id in candidate_physical_expert_ids
-        if _compute_node_id_of_physical_expert(
-            physical_expert_id, num_local_node_physical_experts
-        )
-        == node_rank
-    ]
-    if len(same_node_physical_expert_ids) > 0:
-        return same_node_physical_expert_ids[0]
+    # Prefer same-node experts only when it narrows the candidate set.
+    if num_gpus_per_node is not None and num_local_node_physical_experts is not None:
+        node_rank = moe_ep_rank // num_gpus_per_node
+        same_node_physical_expert_ids = [
+            physical_expert_id
+            for physical_expert_id in candidate_physical_expert_ids
+            if _compute_node_id_of_physical_expert(
+                physical_expert_id, num_local_node_physical_experts
+            )
+            == node_rank
+        ]
+        if 0 < len(same_node_physical_expert_ids) < len(candidate_physical_expert_ids):
+            return same_node_physical_expert_ids[0]
 
     # 4. At last, leave it as -1 to indicate not found.
     return -1

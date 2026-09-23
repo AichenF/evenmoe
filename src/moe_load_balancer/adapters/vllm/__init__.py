@@ -17,6 +17,7 @@ from moe_load_balancer.adapters.vllm.routing import (
     stage_from_vllm,
     to_placement_snapshot,
     to_routing_request,
+    to_vllm_shared_expert_rank,
     to_vllm_topk_ids,
 )
 
@@ -31,5 +32,6 @@ __all__ = [
     "to_routing_request",
     "to_vllm_maps",
     "to_vllm_physical_to_logical",
+    "to_vllm_shared_expert_rank",
     "to_vllm_topk_ids",
 ]
