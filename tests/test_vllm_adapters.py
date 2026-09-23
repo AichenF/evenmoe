@@ -190,16 +190,32 @@ def test_routing_output_is_the_physical_ids():
 
 
 @pytest.mark.unit
-def test_shared_expert_decision_is_rejected_not_dropped():
-    """vLLM's CUDA path replicates shared experts per rank; they never enter
-    EP dispatch, so there is no destination to write back."""
+def test_shared_expert_decision_is_handed_back_not_dropped():
+    """A shared-expert rank reaches the framework through
+    `to_vllm_shared_expert_rank`; `to_vllm_topk_ids` answers only about
+    physical ids, and a decision without a rank yields None."""
+    from moe_load_balancer.adapters.vllm import to_vllm_shared_expert_rank
+
+    rank = torch.tensor([0, 3], dtype=torch.int64)
     decision = RoutingDecision(
-        routed_physical_topk_ids=torch.tensor([[0, 1]]),
-        topk_weights=torch.tensor([[0.5, 0.5]]),
-        shared_expert_rank=torch.tensor([0]),
+        routed_physical_topk_ids=torch.zeros(2, 2, dtype=torch.int64),
+        topk_weights=torch.zeros(2, 2),
+        shared_expert_rank=rank,
     )
-    with pytest.raises(NotImplementedError, match="Shared-expert routing"):
-        to_vllm_topk_ids(decision)
+
+    ids = to_vllm_topk_ids(decision)
+    assert ids.shape == (2, 2)
+
+    got = to_vllm_shared_expert_rank(decision)
+    assert got is not None, "shared-expert rank was dropped by the adapter"
+    assert torch.equal(got, rank)
+
+    # A decision without one answers None rather than inventing a rank.
+    plain = RoutingDecision(
+        routed_physical_topk_ids=torch.zeros(2, 2, dtype=torch.int64),
+        topk_weights=torch.zeros(2, 2),
+    )
+    assert to_vllm_shared_expert_rank(plain) is None
 
 
 @pytest.mark.unit
@@ -284,22 +300,14 @@ def test_nearest_replica_table_ignores_padding_beyond_count():
     assert int(table[0]) == 5
 
 
-def test_single_node_fallback_concentrates_exactly_as_sglang_does():
-    """On one node every rank without a local copy takes the first candidate.
+def test_single_node_fallback_shares_evenly_as_sglang_does():
+    """On one node the ranks without a local copy split the replicas evenly.
 
-    That is a concentration, and an earlier version of this table deliberately
-    rotated by rank to avoid it -- with 8 ranks and 2 replicas, six ranks landing
-    on one replica is worse than the load-blind uniform choice it replaces.
-
-    It is still wrong to "fix" here. `static` is meant to be the same policy on
-    both runtimes, and SGLang resolves this case through its same-node tier,
-    which on a single node matches every rank and returns the first candidate.
-    Diverging makes the two runtimes' `static` rows incomparable, which costs
-    more than the imbalance does -- `static` is for locality across nodes, and
-    on one node `dynamic` is the policy that spreads.
-
-    Held here so the concentration is a recorded decision rather than something
-    rediscovered later as a bug.
+    SGLang's same-node tier applies only when it narrows the candidate set
+    (v0.5.16). On a single node every candidate is on the node, so those ranks
+    fall through to `_fair_choices`: with 8 ranks and 2 replicas, the six
+    non-owners land three on each copy. The alignment tests pin the same rule
+    against the vendored reference rank for rank.
     """
     # Logical 0 is replicated on slot 0 (rank 0) and slot 8 (rank 4).
     candidates = torch.tensor([[0, 8, -1]])
@@ -313,5 +321,5 @@ def test_single_node_fallback_concentrates_exactly_as_sglang_does():
     # Owners still take their own copy.
     assert picks[0] == 0
     assert picks[4] == 8
-    # Everyone else falls to the first candidate, per the same-node tier.
-    assert [picks[r] for r in (1, 2, 3, 5, 6, 7)] == [0] * 6
+    # Everyone else is shared evenly between the two copies.
+    assert sorted(picks[r] for r in (1, 2, 3, 5, 6, 7)) == [0, 0, 0, 8, 8, 8]

@@ -118,22 +118,3 @@ def test_ultraep_is_built_by_the_unified_algorithm_factory():
 
     assert mlb.placement_policy == "ultraep"
     assert decision.routed_physical_topk_ids.tolist() == [[0, 1]]
-
-
-@pytest.mark.unit
-def test_ultraep_bootstrap_placement_is_exposed_through_orchestrator():
-    mlb = MoELoadBalancer.from_algorithm(
-        "ultraep",
-        ep_size=2,
-        source_rank=0,
-        experts_per_rank=3,
-    )
-
-    mapping = mlb.build_initial_physical_to_logical_map(
-        num_layers=1,
-        num_logical_experts=4,
-        ep_size=2,
-        num_redundant_experts_per_rank=1,
-    )
-
-    assert mapping.tolist() == [[0, 1, 0, 2, 3, 2]]

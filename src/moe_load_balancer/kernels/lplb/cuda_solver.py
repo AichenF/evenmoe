@@ -262,7 +262,6 @@ def _dispatch_module(max_copies: int, block_dim: int) -> Module:
     )
 
 
-
 def dispatch_probability(
     topk_ids: torch.Tensor,
     log2phy_prob: torch.Tensor,
@@ -296,6 +295,8 @@ def dispatch_probability(
     else:
         num_logical, max_copies = log2phy_prob.shape
     assert log2phy_map.shape == (num_logical, max_copies)
+    if n == 0:
+        return torch.empty_like(topk_ids)
     map32 = log2phy_map.contiguous().to(torch.int32)
 
     out = torch.empty(n, dtype=torch.int32, device=topk_ids.device)
