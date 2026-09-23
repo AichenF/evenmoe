@@ -292,18 +292,23 @@ class RoutingPipeline:
             )
 
         # Only LPLB solves against the EP-wide load; the other replica policies
-        # decide from placement alone. Declaring that here is what lets a
-        # framework skip the collective rather than gather it for every
-        # post-TopK policy.
-        consumes_count = replica_policy == "lplb" or waterfill_policy is not None
+        # decide from placement alone, and Waterfill works from the routed rank
+        # load the orchestrator derives from this step's own topk_ids.
+        # Declaring that here is what lets a framework skip the collective
+        # rather than gather it for every post-TopK policy.
+        consumes_count = replica_policy == "lplb"
         capabilities = RoutingCapabilities(
             requires_post_topk_routing=bool(post_topk),
             requires_placement_state=replica_policy == "lplb",
             requires_rank_dispatch_map=replica_policy == "static",
             # static decides from placement alone, so the framework may bake
             # its answer in at commit time instead of paying the boundary on
-            # every forward.
-            dispatch_fixed_by_placement=replica_policy == "static",
+            # every forward -- but only when static is the whole pipeline:
+            # `waterfill` expands to `static+waterfill`, whose shared-expert
+            # decision depends on the batch's load and is made in that call.
+            dispatch_fixed_by_placement=(
+                replica_policy == "static" and waterfill_policy is None
+            ),
             routes_shared_expert=waterfill_policy is not None,
             requires_deepep=waterfill_policy is not None or replica_policy == "ultraep",
             consumes_global_logical_count=consumes_count,
