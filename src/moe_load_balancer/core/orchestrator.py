@@ -128,20 +128,6 @@ class MoELoadBalancer:
 
         return self._routing_pipeline.placement_policy
 
-    def build_initial_physical_to_logical_map(self, **kwargs):
-        """Build policy-owned bootstrap placement without exposing its type."""
-
-        policy_name = self.placement_policy
-        if policy_name is None:
-            return None
-        planner = self._placement_planners[policy_name]
-        builder = getattr(planner, "build_initial_physical_to_logical_map", None)
-        if builder is None:
-            raise ValueError(
-                f"Placement policy {policy_name!r} has no bootstrap placement builder."
-            )
-        return builder(**kwargs)
-
     def on_placement_committed(self, placement: PlacementSnapshot) -> None:
         """Notify active policies that a framework placement was committed.
 

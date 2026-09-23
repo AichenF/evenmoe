@@ -14,16 +14,12 @@ from moe_load_balancer.policies.l1.eplb import (
     compute_algorithm,
     rebalance_experts,
 )
-from moe_load_balancer.policies.l1.ultraep import (
-    UltraEPPlacementPolicy,
-    build_ultraep_initial_physical_to_logical_map,
-)
+from moe_load_balancer.policies.l1.ultraep import UltraEPPlacementPolicy
 
 __all__ = [
     "EPLBPlacementPlanner",
     "EplbAlgorithm",
     "UltraEPPlacementPolicy",
-    "build_ultraep_initial_physical_to_logical_map",
     "compute_algorithm",
     "rebalance_experts",
     "SUPPORTED_PLACEMENT_POLICIES",
