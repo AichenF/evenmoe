@@ -6,10 +6,11 @@ impl + the runtime hook) lives separately under
 
 Layout:
 
-- ``csrc/``                  CUDA kernel source files (``.cuh``).
-- ``include/moe_lb_jit/``    Vendored tvm-ffi + CUDA helper headers
-                              (TensorView validation chain, stream-aware
-                              ``cudaLaunchKernelEx`` wrapper, etc.; ~33 KB).
+- ``csrc/``   CUDA kernel source files (``.cuh``). The ``moe_lb_jit/*`` helper
+              headers they include (TensorView validation chain, stream-aware
+              ``cudaLaunchKernelEx`` wrapper, etc.; adapted from SGLang's
+              jit_kernel) live in ``kernels/jit/include/`` and reach every
+              build through ``load_jit``.
 
 NVIDIA Math-DX headers are resolved from MATHDX_HOME or nvidia-mathdx.
 
@@ -45,13 +46,11 @@ DEFAULT_BLOCK_DIM = 256
 DISPATCH_BLOCK_DIM = 256
 DEFAULT_NUM_ITERS = 5
 
-# Adapter-local kernel-source roots. ``load_jit`` resolves ``cuda_files``
-# paths against ``_HERE / "csrc" / <file>`` (the vendored ``.cuh`` files
-# live in a flat ``csrc/`` layout). The vendored ``moe_lb_jit/*`` headers
-# the kernels ``#include`` live under ``_INCLUDE`` and are added to every
-# build's ``-I`` path so the SDK has no external C++ header dependencies.
+# Kernel-source root. ``load_jit`` resolves ``cuda_files`` paths against
+# ``_HERE / "csrc" / <file>`` (the ``.cuh`` files live in a flat ``csrc/``
+# layout) and supplies the shared ``moe_lb_jit/*`` headers itself, so the only
+# external C++ header dependencies are tvm-ffi and Math-DX.
 _HERE = pathlib.Path(__file__).parent.resolve()
-_INCLUDE = str(_HERE / "include")
 
 # Resolve Math-DX from MATHDX_HOME or the installed nvidia-mathdx package.
 register_dependency("mathdx")(make_mathdx_include_paths_resolver())
@@ -76,7 +75,6 @@ def _ipm_module(nc: int, nv: int, block_dim: int, num_iters: int, sm_ver: int) -
         cuda_files=["ipm.cuh"],
         cuda_wrappers=[("ipm_solve", f"ipm_solve<{args}>")],
         extra_dependencies=["mathdx"],
-        extra_include_paths=[_INCLUDE],
         source_root=_HERE,
     )
 
@@ -181,7 +179,6 @@ def _prep_module(
         *args,
         cuda_files=["lp_prep.cuh"],
         cuda_wrappers=[("lp_prep", f"lp_prep<{args}>")],
-        extra_include_paths=[_INCLUDE],
         source_root=_HERE,
     )
 
@@ -225,7 +222,6 @@ def _post_module(
         *args,
         cuda_files=["lp_post.cuh"],
         cuda_wrappers=[("lp_post", f"lp_post<{args}>")],
-        extra_include_paths=[_INCLUDE],
         source_root=_HERE,
     )
 
@@ -257,7 +253,6 @@ def _dispatch_module(max_copies: int, block_dim: int) -> Module:
         *args,
         cuda_files=["dispatch_probability.cuh"],
         cuda_wrappers=[("dispatch_probability", f"dispatch_probability<{args}>")],
-        extra_include_paths=[_INCLUDE],
         source_root=_HERE,
     )
 

@@ -20,7 +20,8 @@ MAX_REPLICAS = EP_SIZE
 
 def _reroute(logical_topk_ids, replica_counts, rank_quota_prefix):
     """Run the vendored kernel and return the physical ids it chose."""
-    extension = pytest.importorskip("moe_load_balancer.kernels.ultraep._C")
+    from moe_load_balancer.kernels.ultraep import UltraEPPlacementBackend
+
     device = logical_topk_ids.device
     # One replica per rank, so a physical id doubles as the rank that holds it
     # and the assertions can read placement straight off the output.
@@ -29,13 +30,13 @@ def _reroute(logical_topk_ids, replica_counts, rank_quota_prefix):
     ).reshape(NUM_LOGICAL, MAX_REPLICAS)
     routed = torch.empty_like(logical_topk_ids, dtype=torch.int64)
     counters = torch.zeros(NUM_LOGICAL, dtype=torch.int32, device=device)
-    extension.reroute_sparse(
-        logical_topk_ids,
-        routed,
-        logical_to_physical,
-        replica_counts,
-        rank_quota_prefix,
-        counters,
+    UltraEPPlacementBackend().reroute_sparse(
+        logical_topk_ids=logical_topk_ids,
+        routed_topk_ids=routed,
+        logical_to_physical_map=logical_to_physical,
+        logical_replica_counts=replica_counts,
+        rank_quota_prefix=rank_quota_prefix,
+        counters=counters,
     )
     torch.cuda.synchronize()
     return routed

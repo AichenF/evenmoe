@@ -1,14 +1,22 @@
+"""GPU checks for the JIT-built UltraEP kernels.
+
+The placement solve is held to upstream UltraEP's own extension, bit for bit,
+when that extension is importable; the sparse reroute is checked on a
+non-default stream, which is where a wrong stream resolution would show.
+"""
+
 from __future__ import annotations
 
 import pytest
 import torch
 
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA device"),
+]
 
-@pytest.mark.integration
-def test_fused_placement_backend_matches_ultraep_reference_extension():
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required")
-    mlb_extension = pytest.importorskip("moe_load_balancer.kernels.ultraep._C")
+
+def test_placement_backend_matches_ultraep_reference_extension():
     ultraep_extension = pytest.importorskip("ultra_ep._C")
 
     from moe_load_balancer.kernels.ultraep import (
@@ -46,7 +54,7 @@ def test_fused_placement_backend_matches_ultraep_reference_extension():
         oracle_eps=0.01,
         kernel_stage=1,
     )
-    backend = UltraEPPlacementBackend(extension=mlb_extension)
+    backend = UltraEPPlacementBackend()
     stream = torch.cuda.Stream(device=device)
 
     for rank in (0, 3, 7):
@@ -89,17 +97,12 @@ def test_fused_placement_backend_matches_ultraep_reference_extension():
             assert torch.equal(actual, expected)
 
 
-@pytest.mark.integration
 @pytest.mark.parametrize("topk_dtype", [torch.int32, torch.int64])
 def test_sparse_reroute_quota_on_non_default_stream(topk_dtype):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required")
-    mlb_extension = pytest.importorskip("moe_load_balancer.kernels.ultraep._C")
-
     from moe_load_balancer.kernels.ultraep import UltraEPPlacementBackend
 
     device = torch.device("cuda")
-    backend = UltraEPPlacementBackend(extension=mlb_extension)
+    backend = UltraEPPlacementBackend()
     logical_to_physical = torch.tensor(
         [[10, 11, 12], [20, 21, -1]],
         dtype=torch.int32,

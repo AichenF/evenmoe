@@ -28,6 +28,12 @@ compile through ``tvm-ffi``:
   declare build-time include-path dependencies (e.g. Math-DX) that
   resolve at JIT compile time rather than at module import.
 
+``include/moe_lb_jit/`` next to this module holds the C++ helper headers
+adapted from SGLang's ``jit_kernel`` (``TensorMatcher`` validation, the
+stream-aware ``LaunchKernel`` wrapper, error reporting); ``load_jit`` puts
+it on every build's include path, so a kernel just ``#include
+<moe_lb_jit/tensor.h>``.
+
 Nothing here imports any inference framework. Kernel subpackages
 (:mod:`moe_load_balancer.kernels.<algo>`) ship their own ``.cuh`` /
 ``.hpp`` files and pass ``source_root=Path(__file__).parent`` to
@@ -99,6 +105,8 @@ def _resolve_kernel_path() -> pathlib.Path:
 
 
 KERNEL_PATH = _resolve_kernel_path()
+# The shared ``moe_lb_jit/*`` headers; on the include path of every build.
+INCLUDE_PATH = KERNEL_PATH / "include"
 DEFAULT_CFLAGS = ["-std=c++20", "-O3"]
 DEFAULT_LDFLAGS: list[str] = []
 CPP_TEMPLATE_TYPE: TypeAlias = int | float | str | bool | torch.dtype
@@ -246,7 +254,8 @@ def load_jit(
     Kernel subpackages that ship their own ``csrc/`` directory (e.g.
     ``kernels/lplb/csrc/``) pass ``source_root=<package dir>`` so
     resolution happens against ``source_root / "csrc" / <file>``
-    instead.
+    instead. ``INCLUDE_PATH`` (the shared ``moe_lb_jit/*`` headers) is
+    always on the include path; ``extra_include_paths`` adds to it.
     """
 
     from tvm_ffi.cpp import load, load_inline
@@ -256,7 +265,9 @@ def load_jit(
     extra_cflags = extra_cflags or []
     extra_cuda_cflags = extra_cuda_cflags or []
     extra_ldflags = extra_ldflags or []
-    extra_include_paths = extra_include_paths or []
+    # A fresh list: the dependency paths appended below must not leak into
+    # the caller's.
+    extra_include_paths = [str(INCLUDE_PATH), *(extra_include_paths or [])]
 
     root = source_root.resolve() if source_root is not None else KERNEL_PATH
     cpp_files = [str((root / "csrc" / f).resolve()) for f in cpp_files]
@@ -407,6 +418,7 @@ __all__ = [
     "CPP_DTYPE_MAP",
     "DEFAULT_CFLAGS",
     "DEFAULT_LDFLAGS",
+    "INCLUDE_PATH",
     "KERNEL_PATH",
     "ArchInfo",
     "CPPArgList",

@@ -54,16 +54,11 @@ Issues = "https://github.com/xutizhou/moe_load_balancer/issues"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"moe_load_balancer.kernels.lplb" = [
-    "csrc/*.cuh",
-    "include/moe_lb_jit/*",
-]
+"moe_load_balancer.kernels.jit" = ["include/moe_lb_jit/*"]
+"moe_load_balancer.kernels.lplb" = ["csrc/*.cuh"]
 "moe_load_balancer.kernels.ultraep" = [
     "LICENSE.ultraep",
-    "csrc/*.cpp",
-    "csrc/kernels/*.cu",
-    "csrc/kernels/*.cuh",
-    "csrc/utils/*.cuh",
+    "csrc/*.cuh",
 ]
 
 [tool.pytest.ini_options]
