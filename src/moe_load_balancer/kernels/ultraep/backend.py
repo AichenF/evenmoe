@@ -1,37 +1,20 @@
-"""Thin Python wrapper around MLB's UltraEP-derived CUDA placement kernels."""
+"""CUDA implementation of the UltraEP kernel contract."""
 
 from __future__ import annotations
 
-from typing import Any
-
 import torch
 
-from .config import UltraEPPlacementTuning
+from moe_load_balancer.kernels.ultraep import cuda_placement
+from moe_load_balancer.kernels.ultraep.config import UltraEPPlacementTuning
 
 
 class UltraEPPlacementBackend:
-    """Stateless placement/reroute kernel launcher.
+    """Framework-independent implementation of the :class:`UltraEPKernels` contract.
 
-    The extension is imported lazily so the rest of MLB stays usable on hosts
-    without CUDA.  Runtime state and expert communication intentionally live
-    outside this class.
+    Stateless. Each kernel is JIT-compiled once per process on its first call
+    and launched on the current stream of the tensors' device. Runtime state and
+    expert communication intentionally live outside this class.
     """
-
-    def __init__(self, extension: Any | None = None) -> None:
-        self._extension = extension
-
-    @property
-    def extension(self):
-        if self._extension is None:
-            try:
-                from . import _C
-            except ImportError as exc:  # pragma: no cover - optional CUDA build
-                raise ImportError(
-                    "UltraEP placement kernels are not built. Reinstall MLB with "
-                    "MLB_BUILD_ULTRAEP_PLACEMENT=1 and --no-build-isolation."
-                ) from exc
-            self._extension = _C
-        return self._extension
 
     def solve(
         self,
@@ -51,26 +34,21 @@ class UltraEPPlacementBackend:
         rank: int,
         tuning: UltraEPPlacementTuning,
     ) -> None:
-        self.extension.solve_placement(
-            expert_loads,
-            expert_loads_per_rank,
-            physical_to_logical_map,
-            logical_to_physical_map,
-            logical_replica_counts,
-            logical_instance_quota,
-            logical_instance_quota_prefix,
-            rank_quota_prefix,
-            num_ranks,
-            num_local_master_experts,
-            num_local_redundant_experts,
-            num_nvl_ranks,
-            tuning.balance_threshold,
-            tuning.min_tokens_per_replica,
-            tuning.allow_zero_master_quota,
-            tuning.locality_aware,
-            tuning.oracle_eps,
-            tuning.kernel_stage,
-            rank,
+        cuda_placement.solve_placement(
+            expert_loads=expert_loads,
+            expert_loads_per_rank=expert_loads_per_rank,
+            physical_to_logical_map=physical_to_logical_map,
+            logical_to_physical_map=logical_to_physical_map,
+            logical_replica_counts=logical_replica_counts,
+            logical_instance_quota=logical_instance_quota,
+            logical_instance_quota_prefix=logical_instance_quota_prefix,
+            rank_quota_prefix=rank_quota_prefix,
+            num_ranks=num_ranks,
+            num_local_master_experts=num_local_master_experts,
+            num_local_redundant_experts=num_local_redundant_experts,
+            num_nvl_ranks=num_nvl_ranks,
+            rank=rank,
+            tuning=tuning,
         )
 
     def reroute_sparse(
@@ -83,11 +61,11 @@ class UltraEPPlacementBackend:
         rank_quota_prefix: torch.Tensor,
         counters: torch.Tensor,
     ) -> None:
-        self.extension.reroute_sparse(
-            logical_topk_ids,
-            routed_topk_ids,
-            logical_to_physical_map,
-            logical_replica_counts,
-            rank_quota_prefix,
-            counters,
+        cuda_placement.reroute_sparse(
+            logical_topk_ids=logical_topk_ids,
+            routed_topk_ids=routed_topk_ids,
+            logical_to_physical_map=logical_to_physical_map,
+            logical_replica_counts=logical_replica_counts,
+            rank_quota_prefix=rank_quota_prefix,
+            counters=counters,
         )

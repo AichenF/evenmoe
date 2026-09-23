@@ -124,7 +124,9 @@ The main source directories are:
 
 Python 3.10 or newer, PyTorch 2.5 or newer, Triton, tvm-ffi, and NVIDIA
 MathDX are required. The normal installation installs these dependencies once;
-the Waterfill and LPLB kernels themselves are included in the MLB package.
+the Waterfill, LPLB, and UltraEP kernels themselves are included in the MLB
+package as sources and JIT-compiled for the current GPU on first use. There is
+no extension to build at install time.
 
 Install the complete package:
 
@@ -132,9 +134,10 @@ Install the complete package:
 python -m pip install -e .
 ```
 
-The LPLB CUDA implementation requires a compatible NVIDIA CUDA toolchain.
-`nvidia-mathdx` is pinned to the version used by the packaged JIT sources. A
-manual MathDX installation can instead be selected with `MATHDX_HOME`.
+The LPLB and UltraEP CUDA kernels require a compatible NVIDIA CUDA toolchain
+(`nvcc`) at run time. `nvidia-mathdx` is pinned to the version used by the
+packaged JIT sources. A manual MathDX installation can instead be selected with
+`MATHDX_HOME`.
 
 Inside an existing SGLang environment, dependency versions are normally owned
 by that environment:

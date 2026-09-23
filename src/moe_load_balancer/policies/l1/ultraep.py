@@ -21,6 +21,7 @@ from moe_load_balancer.core.types import (
     PlacementRequest,
 )
 from moe_load_balancer.kernels.ultraep import (
+    UltraEPKernels,
     UltraEPPlacementBackend,
     UltraEPPlacementTuning,
     load_placement_tuning_from_env,
@@ -68,10 +69,10 @@ class UltraEPPlacementPolicy(PlacementPlanner):
     def __init__(
         self,
         *,
-        backend: UltraEPPlacementBackend | None = None,
+        backend: UltraEPKernels | None = None,
         tuning: UltraEPPlacementTuning | None = None,
     ) -> None:
-        self._backend = backend or UltraEPPlacementBackend()
+        self._backend: UltraEPKernels = backend or UltraEPPlacementBackend()
         self._tuning = tuning
 
     @property

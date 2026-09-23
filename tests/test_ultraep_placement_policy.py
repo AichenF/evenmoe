@@ -75,8 +75,7 @@ def test_ultraep_placement_policy_handles_multiple_layers():
     enforces contiguity; a mock happily accepts any stride.
     """
     if not torch.cuda.is_available():
-        pytest.skip("CUDA is required")
-    pytest.importorskip("moe_load_balancer.kernels.ultraep._C")
+        pytest.skip("requires a CUDA device")
 
     from moe_load_balancer.kernels.ultraep import UltraEPPlacementBackend
 
