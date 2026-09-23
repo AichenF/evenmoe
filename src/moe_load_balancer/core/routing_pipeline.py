@@ -8,11 +8,9 @@ Framework adapters consume capabilities instead of branching on policy names.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import lru_cache
-from typing import Optional
+from functools import cache
 
 from moe_load_balancer.core.types import RoutingPolicyConfig
-
 
 _INPUT_TRANSFORMS = frozenset({"fake"})
 _REPLICA_POLICIES = frozenset({"static", "dynamic", "dynamic_random", "lplb", "ultraep"})
@@ -132,9 +130,9 @@ class RoutingPipeline:
     name: str
     policies: tuple[str, ...]
     post_topk_policies: tuple[RoutingPolicyConfig, ...]
-    input_transform: Optional[str]
+    input_transform: str | None
     capabilities: RoutingCapabilities
-    placement_policy: Optional[str] = None
+    placement_policy: str | None = None
     """The L1 placement policy this L2 selection requires, if any.
 
     Set only when a replica policy's dispatch decision is meaningless without
@@ -143,7 +141,7 @@ class RoutingPipeline:
     that work with whatever placement the framework already committed.
     """
 
-    def is_applicable(self, topology: ExpertDeploymentConfig) -> Optional[str]:
+    def is_applicable(self, topology: ExpertDeploymentConfig) -> str | None:
         """Why this pipeline cannot act on a deployment, or None if it can.
 
         Returns a reason rather than a bool so a framework that disables the
@@ -200,8 +198,8 @@ class RoutingPipeline:
         return cls._from_string(value)
 
     @classmethod
-    @lru_cache(maxsize=None)
-    def _from_string(cls, value: Optional[str]) -> RoutingPipeline:
+    @cache
+    def _from_string(cls, value: str | None) -> RoutingPipeline:
         if value is None:
             return cls(
                 name="disabled",

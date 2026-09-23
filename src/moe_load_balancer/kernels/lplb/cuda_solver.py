@@ -35,7 +35,6 @@ from moe_load_balancer.kernels.jit.utils import (
 )
 from moe_load_balancer.kernels.ops.replica_draw import uniform_draw
 
-
 if TYPE_CHECKING:
     from tvm_ffi.module import Module
 
@@ -64,7 +63,7 @@ def _sm_ver() -> int:
 
 
 @cache_once
-def _ipm_module(nc: int, nv: int, block_dim: int, num_iters: int, sm_ver: int) -> "Module":
+def _ipm_module(nc: int, nv: int, block_dim: int, num_iters: int, sm_ver: int) -> Module:
     """JIT-compile the IPM kernel for one shape. Cached for the process lifetime."""
     args = make_cpp_args(nc, nv, block_dim, sm_ver, num_iters)
     # The kernel uses cuBLASDx (header-only) for the GEMMs and a hand-written
@@ -133,7 +132,7 @@ def solve_ipm(
     b: torch.Tensor,
     c: torch.Tensor,
     num_iters: int = DEFAULT_NUM_ITERS,
-    result: "torch.Tensor | None" = None,
+    result: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Run the fused single-SM IPM kernel.
 
@@ -175,7 +174,7 @@ def _prep_module(
     num_red_log: int,
     num_gpus: int,
     block_dim: int,
-) -> "Module":
+) -> Module:
     args = make_cpp_args(nc, nv, num_single, num_red_log, num_gpus, block_dim)
     return load_jit(
         "lplb_lp_prep",
@@ -219,7 +218,7 @@ def _post_module(
     num_single: int,
     num_red_phy: int,
     block_dim: int,
-) -> "Module":
+) -> Module:
     args = make_cpp_args(num_logical, max_copies, num_single, num_red_phy, block_dim)
     return load_jit(
         "lplb_lp_post",
@@ -243,13 +242,7 @@ def extract_log2phy_prob(
     with one CUDA kernel. Writes into the caller-provided ``log2phy_prob``
     buffer of shape ``(num_logical, max_copies)``.
     """
-    # A None share table selects the uniform/modulo mode, which is how a
-    # policy that just wants "one replica, evenly" gets the framework's own
-    # choice out of the same kernel instead of building the table for it.
-    if log2phy_prob is None:
-        num_logical, max_copies = log2phy_map.shape
-    else:
-        num_logical, max_copies = log2phy_prob.shape
+    num_logical, max_copies = log2phy_prob.shape
     num_single = phy_single.shape[0]
     num_red_phy = phy_replicated.shape[0]
     module = _post_module(num_logical, max_copies, num_single, num_red_phy, DEFAULT_BLOCK_DIM)
@@ -257,7 +250,7 @@ def extract_log2phy_prob(
 
 
 @cache_once
-def _dispatch_module(max_copies: int, block_dim: int) -> "Module":
+def _dispatch_module(max_copies: int, block_dim: int) -> Module:
     args = make_cpp_args(max_copies, block_dim)
     return load_jit(
         "lplb_dispatch_probability",
@@ -274,9 +267,9 @@ def dispatch_probability(
     topk_ids: torch.Tensor,
     log2phy_prob: torch.Tensor,
     log2phy_map: torch.Tensor,
-    expert_load_view: 'torch.Tensor | None' = None,
-    record_enabled: 'torch.Tensor | None' = None,
-    num_unpadded_tokens: 'torch.Tensor | None' = None,
+    expert_load_view: torch.Tensor | None = None,
+    record_enabled: torch.Tensor | None = None,
+    num_unpadded_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Replace the 7 torch ops in `_topk_ids_logical_to_physical_probability`
     with a single per-token-per-slot CUDA kernel.

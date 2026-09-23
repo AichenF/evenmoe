@@ -2,14 +2,13 @@
 # SPDX-License-Identifier: MIT
 # Copied from https://github.com/deepseek-ai/EPLB/blob/main/eplb.py and adapted
 # for the framework-neutral MLB placement API.
-from typing import Tuple
 
 import torch
 
 
 def balanced_packing(
     weight: torch.Tensor, num_packs: int
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Pack n weighted objects to m packs, such that each bin contains exactly n/m objects and the weights of all packs
     are as balanced as possible.
@@ -57,7 +56,7 @@ def balanced_packing(
 
 def replicate_experts(
     weight: torch.Tensor, num_phy: int
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Replicate `num_log` experts to `num_phy` replicas, such that the maximum load of all replicas is minimized.
 
@@ -178,7 +177,7 @@ def rebalance_experts(
     num_nodes: int,
     num_gpus: int,
     enable_hierarchical: bool,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Entry point for expert-parallelism load balancer.
 

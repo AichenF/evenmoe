@@ -15,7 +15,6 @@ tensors as a direct call into sglang's ``eplb_algorithms.rebalance_experts``.
 from __future__ import annotations
 
 from enum import Enum, auto
-from typing import Optional
 
 import torch
 
@@ -41,10 +40,10 @@ def rebalance_experts(
     tokens_per_expert: torch.Tensor,
     num_physical_experts: int,
     num_local_physical_experts: int,
-    num_groups: Optional[int],
+    num_groups: int | None,
     num_nodes: int,
     algorithm: EplbAlgorithm,
-    active_ranks: Optional[torch.Tensor] = None,
+    active_ranks: torch.Tensor | None = None,
 ):
     """Dispatch to the requested EPLB variant.
 
@@ -113,7 +112,7 @@ def rebalance_experts(
 
 def compute_algorithm(
     raw_algorithm: str,
-    num_groups: Optional[int],
+    num_groups: int | None,
     num_nodes: int,
 ) -> EplbAlgorithm:
     """Resolve a string flag (e.g. SGLang ``--eplb-algorithm``) to an enum.

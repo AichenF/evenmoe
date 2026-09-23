@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from moe_load_balancer.core.types import (
     PlacementPlan,
@@ -80,14 +80,14 @@ class SGLangPlacementMaps:
 def to_placement_request(
     logical_count: TensorLike,
     *,
-    context: Optional[RuntimeContext] = None,
-    num_physical_experts: Optional[int] = None,
-    num_local_physical_experts: Optional[int] = None,
-    num_groups: Optional[int] = None,
-    num_nodes: Optional[int] = None,
-    algorithm: Optional[str] = None,
-    active_ranks: Optional[TensorLike] = None,
-    policy_metadata: Optional[dict[str, Any]] = None,
+    context: RuntimeContext | None = None,
+    num_physical_experts: int | None = None,
+    num_local_physical_experts: int | None = None,
+    num_groups: int | None = None,
+    num_nodes: int | None = None,
+    algorithm: str | None = None,
+    active_ranks: TensorLike | None = None,
+    policy_metadata: dict[str, Any] | None = None,
 ) -> PlacementRequest:
     """Translate SGLang-completed EPLB statistics into an MLB request.
 
@@ -144,7 +144,7 @@ def to_sglang_maps(plan: PlacementPlan) -> SGLangPlacementMaps:
 
 
 def to_placement_snapshot(
-    live_metadata: object,
+    live_metadata: Any,
     layer_id: int,
 ) -> PlacementSnapshot:
     """Translate SGLang's current committed placement into an L2 snapshot.
@@ -155,8 +155,8 @@ def to_placement_snapshot(
 
     if live_metadata is None:
         raise ValueError("live_metadata must be SGLang's committed placement metadata.")
-    num_physical = int(getattr(live_metadata, "num_physical_experts"))
-    num_local = int(getattr(live_metadata, "num_local_physical_experts"))
+    num_physical = int(live_metadata.num_physical_experts)
+    num_local = int(live_metadata.num_local_physical_experts)
     if num_physical % num_local != 0:
         raise ValueError(
             "SGLang placement requires num_physical_experts to be divisible by "
@@ -175,19 +175,13 @@ def to_placement_snapshot(
 
     return PlacementSnapshot(
         layer_id=layer_id,
-        num_logical_experts=int(getattr(live_metadata, "num_logical_experts")),
+        num_logical_experts=int(live_metadata.num_logical_experts),
         num_physical_experts=num_physical,
         ep_size=ep_size,
         num_local_physical_experts=num_local,
-        physical_to_logical_map=getattr(live_metadata, "physical_to_logical_map")[layer_id],
-        logical_to_physical_candidates=getattr(
-            live_metadata,
-            "logical_to_all_physical_map",
-        )[layer_id],
-        logical_to_physical_count=getattr(
-            live_metadata,
-            "logical_to_all_physical_map_num_valid",
-        )[layer_id],
+        physical_to_logical_map=live_metadata.physical_to_logical_map[layer_id],
+        logical_to_physical_candidates=live_metadata.logical_to_all_physical_map[layer_id],
+        logical_to_physical_count=live_metadata.logical_to_all_physical_map_num_valid[layer_id],
         default_physical_for_logical=(
             rank_dispatch[layer_id] if rank_dispatch is not None else None
         ),

@@ -21,10 +21,10 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import _sglang_reference as ref  # noqa: E402
+import _sglang_reference as ref
 
-from moe_load_balancer.adapters.vllm import nearest_replica_table  # noqa: E402
-from moe_load_balancer.policies.l2.replica import (  # noqa: E402
+from moe_load_balancer.adapters.vllm import nearest_replica_table
+from moe_load_balancer.policies.l2.replica import (
     route_dynamic_random_replicas,
     route_static_replicas,
 )
@@ -216,7 +216,7 @@ def test_l1_placement_is_identical_through_both_adapters(num_nodes, num_groups):
     # The two adapters name these differently -- vLLM counts ranks, SGLang
     # counts experts per rank -- which is exactly the kind of mismatch that
     # would produce two layouts from one planner without anything erroring.
-    common = dict(num_groups=num_groups, num_nodes=num_nodes, algorithm="auto")
+    common = {"num_groups": num_groups, "num_nodes": num_nodes, "algorithm": "auto"}
     a = vllm_req(
         logical_count=counts, num_replicas=num_physical,
         num_ranks=ep_size, **common)

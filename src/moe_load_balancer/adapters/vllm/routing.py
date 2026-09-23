@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Optional, Sequence
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from moe_load_balancer.core.types import (
     PlacementSnapshot,
@@ -10,6 +11,9 @@ from moe_load_balancer.core.types import (
     RoutingStage,
     TensorLike,
 )
+
+if TYPE_CHECKING:
+    import torch
 
 # vLLM ForwardMode -> MLB RoutingStage.  vLLM does not distinguish a dedicated
 # "idle" routing mode the way SGLang does; dummy/profile runs reuse DECODE.
@@ -89,7 +93,7 @@ def collapse_candidates_to_local(
 def build_physical_to_rank_map(
     num_physical_experts: int,
     ep_size: int,
-    device: object,
+    device: torch.device | str,
 ) -> TensorLike:
     """Build a [num_physical_experts] tensor mapping each slot to its EP rank.
 
@@ -108,8 +112,8 @@ def nearest_replica_table(
     *,
     ep_rank: int,
     num_local_physical_experts: int,
-    ep_size: Optional[int] = None,
-    num_gpus_per_node: Optional[int] = None,
+    ep_size: int | None = None,
+    num_gpus_per_node: int | None = None,
     seed: int = 42,
 ) -> TensorLike:
     """Build the per-rank dispatch map `static` routes through.
@@ -208,11 +212,11 @@ def to_placement_snapshot(
     num_logical_experts: int,
     num_physical_experts: int,
     ep_size: int,
-    candidates: Optional[TensorLike] = None,
-    counts: Optional[TensorLike] = None,
-    default_physical_for_logical: Optional[TensorLike] = None,
-    physical_to_rank_map: Optional[TensorLike] = None,
-    rank_quota_prefix: Optional[TensorLike] = None,
+    candidates: TensorLike | None = None,
+    counts: TensorLike | None = None,
+    default_physical_for_logical: TensorLike | None = None,
+    physical_to_rank_map: TensorLike | None = None,
+    rank_quota_prefix: TensorLike | None = None,
 ) -> PlacementSnapshot:
     """Translate vLLM's per-layer ``EplbLayerState`` into an L2 snapshot.
 
@@ -277,11 +281,11 @@ def to_routing_request(
     logical_topk_ids: TensorLike,
     topk_weights: TensorLike,
     policies: Sequence[RoutingPolicyConfig | str] = (),
-    placement: Optional[PlacementSnapshot] = None,
-    stage: Optional[RoutingStage | str] = None,
-    token_count: Optional[TensorLike] = None,
+    placement: PlacementSnapshot | None = None,
+    stage: RoutingStage | str | None = None,
+    token_count: TensorLike | None = None,
     routed_scaling_factor: float = 1.0,
-    global_logical_count: Optional[TensorLike] = None,
+    global_logical_count: TensorLike | None = None,
 ) -> RoutingRequest:
     """Translate vLLM's logical TopK and live placement into MLB input.
 
@@ -329,7 +333,7 @@ def to_vllm_topk_ids(decision: RoutingDecision) -> TensorLike:
     return decision.routed_physical_topk_ids
 
 
-def stage_from_vllm(name: Optional[str]) -> Optional[RoutingStage]:
+def stage_from_vllm(name: str | None) -> RoutingStage | None:
     """Map a vLLM-side stage label onto MLB's stage enum."""
 
     if name is None:

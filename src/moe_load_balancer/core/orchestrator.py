@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import replace
-from typing import Callable, Mapping, Optional
 
 from moe_load_balancer.core.l1 import PlacementPlanner
 from moe_load_balancer.core.l2 import (
@@ -23,7 +23,7 @@ from moe_load_balancer.core.types import (
 )
 from moe_load_balancer.kernels.lplb.protocol import LPLBKernels
 
-RankLoadCounter = Callable[[object, Optional[PlacementSnapshot], RoutingPolicyConfig], object]
+RankLoadCounter = Callable[[object, PlacementSnapshot | None, RoutingPolicyConfig], object]
 
 
 class MoELoadBalancer:
@@ -32,18 +32,18 @@ class MoELoadBalancer:
     def __init__(
         self,
         *,
-        placement_planners: Optional[Mapping[str, PlacementPlanner]] = None,
-        routing_policies: Optional[Mapping[str, TokenRouter]] = None,
-        rank_load_counter: Optional[RankLoadCounter] = None,
+        placement_planners: Mapping[str, PlacementPlanner] | None = None,
+        routing_policies: Mapping[str, TokenRouter] | None = None,
+        rank_load_counter: RankLoadCounter | None = None,
         routing_pipeline: RoutingPipeline | str | None = None,
-        collectives: Optional[RoutingCollectives] = None,
+        collectives: RoutingCollectives | None = None,
     ) -> None:
         if placement_planners is None:
-            from moe_load_balancer.policies.l1.eplb import (
-                EPLBPlacementPlanner,
-                SUPPORTED_PLACEMENT_POLICIES,
-            )
             from moe_load_balancer.policies.fused.ultraep import UltraEPPlacementPolicy
+            from moe_load_balancer.policies.l1.eplb import (
+                SUPPORTED_PLACEMENT_POLICIES,
+                EPLBPlacementPlanner,
+            )
 
             placement_planners = {
                 name: EPLBPlacementPlanner(name) for name in SUPPORTED_PLACEMENT_POLICIES
@@ -65,8 +65,8 @@ class MoELoadBalancer:
         ep_size: int,
         source_rank: int,
         experts_per_rank: int,
-        lplb_kernels: Optional[LPLBKernels] = None,
-        collectives: Optional[RoutingCollectives] = None,
+        lplb_kernels: LPLBKernels | None = None,
+        collectives: RoutingCollectives | None = None,
     ) -> MoELoadBalancer:
         """Build the MLB-owned implementations for one algorithm expression."""
 
@@ -123,7 +123,7 @@ class MoELoadBalancer:
         return self._routing_pipeline.capabilities
 
     @property
-    def placement_policy(self) -> Optional[str]:
+    def placement_policy(self) -> str | None:
         """Return the L1 policy coupled to this routing pipeline, if any."""
 
         return self._routing_pipeline.placement_policy
@@ -230,8 +230,8 @@ class MoELoadBalancer:
     def transform_topk_inputs(
         self,
         router_logits: TensorLike,
-        correction_bias: Optional[TensorLike] = None,
-    ) -> tuple[TensorLike, Optional[TensorLike]]:
+        correction_bias: TensorLike | None = None,
+    ) -> tuple[TensorLike, TensorLike | None]:
         """Run the configured pipeline's optional transform before TopK.
 
         Production physical-routing policies normally leave these inputs
@@ -458,7 +458,7 @@ class MoELoadBalancer:
 
 def _count_routed_per_rank(
     physical_topk_ids: object,
-    placement: Optional[PlacementSnapshot],
+    placement: PlacementSnapshot | None,
     policy: RoutingPolicyConfig,
 ) -> object:
     """Resolve routing metadata for the default rank-load counter."""

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional, Sequence
+from typing import TYPE_CHECKING
 
 from moe_load_balancer.adapters.sglang import placement as placement_adapter
 from moe_load_balancer.core.types import (
@@ -14,6 +15,7 @@ from moe_load_balancer.core.types import (
 )
 
 if TYPE_CHECKING:
+    import torch
     from sglang.srt.runtime_context import RuntimeContext
 
 
@@ -51,14 +53,14 @@ class SGLangRoutingOutput:
 
     topk_weights: TensorLike
     topk_ids: TensorLike
-    router_logits: Optional[TensorLike]
+    router_logits: TensorLike | None
     recorded_physical_topk_ids: TensorLike
 
 
 def count_logical_experts(
     logical_topk_ids: TensorLike,
     num_logical_experts: int,
-    dtype: Optional[object] = None,
+    dtype: torch.dtype | None = None,
 ) -> TensorLike:
     """Compatibility export for the MLB-owned logical count helper."""
 
@@ -69,14 +71,14 @@ def count_logical_experts(
 
 def to_routing_request(
     *,
-    context: Optional[RuntimeContext] = None,
+    context: RuntimeContext | None = None,
     layer_id: int,
     logical_topk_ids: TensorLike,
     topk_weights: TensorLike,
     policies: Sequence[RoutingPolicyConfig | str] = (),
-    placement: Optional[PlacementSnapshot] = None,
-    stage: Optional[RoutingStage | str] = None,
-    token_count: Optional[TensorLike] = None,
+    placement: PlacementSnapshot | None = None,
+    stage: RoutingStage | str | None = None,
+    token_count: TensorLike | None = None,
     routed_scaling_factor: float = 1.0,
 ) -> RoutingRequest:
     """Translate TopK and placement, reading context when no snapshot is supplied."""
@@ -101,10 +103,10 @@ def to_routing_request(
 def to_sglang_routing_output(
     decision: RoutingDecision,
     *,
-    context: Optional[RuntimeContext] = None,
-    router_logits: Optional[TensorLike] = None,
-    num_routed_experts: Optional[int] = None,
-    world_size: Optional[int] = None,
+    context: RuntimeContext | None = None,
+    router_logits: TensorLike | None = None,
+    num_routed_experts: int | None = None,
+    world_size: int | None = None,
     routed_scaling_factor: float = 1.0,
 ) -> SGLangRoutingOutput:
     """Translate an MLB decision into the tensors consumed by SGLang Glue.

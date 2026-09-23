@@ -152,6 +152,9 @@ class UltraEPWeightTransfer:
         # boolean-mask assignment on a chained slice, so an unassigned row
         # provably keeps its prior value rather than depending on
         # in-place-through-a-view semantics.
+        assert num_local_master is not None
+        assert self._num_local_redundant_experts is not None
+        assert self._ep_rank is not None
         num_local_physical = num_local_master + self._num_local_redundant_experts
         my_redundant_p2l = manager.physical_to_logical_map[layer_id][
             self._ep_rank * num_local_physical
@@ -213,6 +216,9 @@ class UltraEPWeightTransfer:
             self._expert_weights[layer_id][0],
             self._expert_weights[layer_id][1],
         )
+        assert num_local_master is not None
+        assert self._num_local_redundant_experts is not None
+        assert self._ep_rank is not None
         num_local_physical = num_local_master + self._num_local_redundant_experts
         my_redundant_p2l = manager.physical_to_logical_map[layer_id][
             self._ep_rank * num_local_physical

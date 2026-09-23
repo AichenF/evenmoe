@@ -32,7 +32,6 @@ because the real SGLang kernels require CUDA + cuBLASDx + Math-DX. Kernel
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
 
 import pytest
 import torch
@@ -51,7 +50,6 @@ from moe_load_balancer.policies.l2.lplb import (
     _build_layer_state,
     _identity_dispatch,
 )
-
 
 # -- Test fixtures: a tiny placement we can reason about by hand -----------
 #
@@ -125,7 +123,7 @@ def _shape_changing_rebalanced_snapshot(layer_id: int = 0) -> PlacementSnapshot:
 
 
 def _no_redundancy_snapshot(
-    layer_id: int = 0, default_map: Optional[Tensor] = None
+    layer_id: int = 0, default_map: Tensor | None = None
 ) -> PlacementSnapshot:
     """4 logicals each with exactly one physical copy."""
     return PlacementSnapshot(
@@ -149,8 +147,8 @@ def _no_redundancy_snapshot(
 @dataclass
 class _KernelCall:
     name: str
-    shapes: Tuple[Tuple[int, ...], ...]
-    dtypes: Tuple[str, ...]
+    shapes: tuple[tuple[int, ...], ...]
+    dtypes: tuple[str, ...]
 
 
 @dataclass
@@ -163,13 +161,13 @@ class _RecordingKernels:
     is covered by the GPU integration tests.
     """
 
-    calls: List[_KernelCall] = field(default_factory=list)
-    warmup_shapes: List[Tuple[int, int]] = field(default_factory=list)
-    precompiled: List[dict] = field(default_factory=list)
+    calls: list[_KernelCall] = field(default_factory=list)
+    warmup_shapes: list[tuple[int, int]] = field(default_factory=list)
+    precompiled: list[dict] = field(default_factory=list)
     # Identity tracking — verifies buffer reuse across calls.
-    last_A_full_id: Optional[int] = None
-    last_x_id: Optional[int] = None
-    last_log2phy_prob_id: Optional[int] = None
+    last_A_full_id: int | None = None
+    last_x_id: int | None = None
+    last_log2phy_prob_id: int | None = None
 
     def _record(self, name: str, *tensors: Tensor) -> None:
         shapes = tuple(tuple(t.shape) for t in tensors)
@@ -234,10 +232,10 @@ def _toy_request(
     *,
     snapshot: PlacementSnapshot,
     topk_ids: Tensor,
-    topk_weights: Optional[Tensor] = None,
-    stage: Optional[RoutingStage] = RoutingStage.PREFILL,
-    global_logical_count: Optional[Tensor] = None,
-    enabled_stages: Optional[frozenset] = None,
+    topk_weights: Tensor | None = None,
+    stage: RoutingStage | None = RoutingStage.PREFILL,
+    global_logical_count: Tensor | None = None,
+    enabled_stages: frozenset | None = None,
 ) -> RoutingRequest:
     if topk_weights is None:
         topk_weights = torch.ones(topk_ids.shape, dtype=torch.float32)

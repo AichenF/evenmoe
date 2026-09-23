@@ -163,10 +163,11 @@ def test_uniform_mode_matches_the_framework_kernel_exactly():
     the load view, since the policy now records it and a mismatch would corrupt
     the counts the next placement is planned from.
     """
-    from moe_load_balancer.kernels.lplb import cuda_solver
     from vllm.model_executor.layers.fused_moe.router.base_router import (
         _eplb_map_and_record_triton,
     )
+
+    from moe_load_balancer.kernels.lplb import cuda_solver
 
     for num_logical, num_redundant, tokens, topk, seed in (
         (256, 32, 4096, 8, 0),

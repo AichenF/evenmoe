@@ -15,7 +15,6 @@ from pathlib import Path
 
 from setuptools import setup
 
-
 _ROOT = Path(__file__).resolve().parent
 _ULTRAEP_ROOT = _ROOT / "src" / "moe_load_balancer" / "kernels" / "ultraep"
 _TRUE_VALUES = {"1", "true", "yes", "on"}

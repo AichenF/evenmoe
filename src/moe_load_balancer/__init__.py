@@ -31,8 +31,9 @@ from moe_load_balancer.core.types import (
 from moe_load_balancer.kernels.lplb import LPLBKernels
 
 __all__ = [
-    "MoELoadBalancer",
+    "ExpertDeploymentConfig",
     "LPLBKernels",
+    "MoELoadBalancer",
     "PlacementPlan",
     "PlacementPlanner",
     "PlacementPolicyConfig",
@@ -40,10 +41,10 @@ __all__ = [
     "PlacementSnapshot",
     "PlacementStats",
     "PlacementTopology",
-    "RoutingDecision",
-    "ExpertDeploymentConfig",
+    "RefreshGate",
     "RoutingCapabilities",
     "RoutingCollectives",
+    "RoutingDecision",
     "RoutingLoadHistory",
     "RoutingLoadHistoryProvider",
     "RoutingPhase",
@@ -51,7 +52,6 @@ __all__ = [
     "RoutingPolicyConfig",
     "RoutingRequest",
     "RoutingStage",
-    "RefreshGate",
     "TensorLike",
     "TokenRouter",
 ]

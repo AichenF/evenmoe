@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 from torch import Tensor
 
@@ -19,8 +17,8 @@ from moe_load_balancer.kernels.ops.replica_draw import replica_index
 
 def transform_fake_routing_inputs(
     router_logits: Tensor,
-    correction_bias: Optional[Tensor],
-) -> tuple[Tensor, Optional[Tensor]]:
+    correction_bias: Tensor | None,
+) -> tuple[Tensor, Tensor | None]:
     """Create the uniform random routing stimulus used by SGLang fake mode."""
 
     if not isinstance(router_logits, Tensor):
@@ -34,10 +32,10 @@ def transform_fake_routing_inputs(
 
 
 def transform_topk_inputs(
-    transform_name: Optional[str],
+    transform_name: str | None,
     router_logits: Tensor,
-    correction_bias: Optional[Tensor],
-) -> tuple[Tensor, Optional[Tensor]]:
+    correction_bias: Tensor | None,
+) -> tuple[Tensor, Tensor | None]:
     """Apply an optional experimental transform before framework TopK."""
 
     if transform_name == "fake":
@@ -96,10 +94,10 @@ def route_dynamic_replicas(
 
 
 def route_replicas(
-    policy_name: Optional[str],
+    policy_name: str | None,
     logical_topk_ids: Tensor,
     *,
-    default_physical_for_logical: Optional[Tensor],
+    default_physical_for_logical: Tensor | None,
     logical_to_physical_candidates: Tensor,
     logical_to_physical_count: Tensor,
 ) -> Tensor:
