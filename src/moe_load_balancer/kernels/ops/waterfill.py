@@ -7,7 +7,6 @@ import triton
 import triton.language as tl
 from torch import Tensor
 
-
 _BLOCK_SIZE = 128
 _LOCAL_PREFERENCE_DENOMINATOR = 10
 
@@ -48,7 +47,7 @@ def waterfill_select(
 
     grid = (triton.cdiv(num_tokens, _BLOCK_SIZE),)
     preference_numerator = max(
-        int(round(local_preference * _LOCAL_PREFERENCE_DENOMINATOR)),
+        round(local_preference * _LOCAL_PREFERENCE_DENOMINATOR),
         1,
     )
 

@@ -405,7 +405,7 @@ def test_every_replica_policy_survives_the_fused_path():
 
     num_redundant = 16
     snap = make_snapshot(SPREADS["pairs"], num_redundant)
-    cuda = lambda t: t.cuda() if hasattr(t, "cuda") else t  # noqa: E731
+    cuda = lambda t: t.cuda() if hasattr(t, "cuda") else t
     snap = type(snap)(**{
         k: (cuda(v) if hasattr(v, "is_cuda") else v)
         for k, v in snap.__dict__.items()

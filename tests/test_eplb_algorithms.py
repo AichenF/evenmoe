@@ -10,7 +10,6 @@ from moe_load_balancer.policies.l1.eplb.algorithms import (
 )
 from moe_load_balancer.policies.l1.eplb.algorithms.deepseek import balanced_packing
 
-
 _COUNTS = torch.tensor(
     [
         [[20, 3, 9, 4, 15, 2, 8, 6], [5, 16, 2, 7, 3, 14, 1, 10]],

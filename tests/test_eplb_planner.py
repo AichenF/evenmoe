@@ -49,13 +49,13 @@ def test_orchestrator_eplb_matches_raw_deepseek_algorithm():
 @pytest.mark.unit
 def test_cold_start_and_periodic_paths_use_same_request_and_policy_entry():
     logical_count = torch.tensor([[10, 7, 4, 1]])
-    kwargs = dict(
-        num_physical_experts=8,
-        num_local_physical_experts=4,
-        num_groups=1,
-        num_nodes=1,
-        algorithm="deepseek",
-    )
+    kwargs = {
+        "num_physical_experts": 8,
+        "num_local_physical_experts": 4,
+        "num_groups": 1,
+        "num_nodes": 1,
+        "algorithm": "deepseek",
+    }
     mlb = MoELoadBalancer()
 
     cold_start = mlb.plan_placement(to_placement_request(logical_count, **kwargs))

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from moe_load_balancer.core.types import TensorLike
 
@@ -48,7 +48,7 @@ class LPLBKernels(Protocol):
         b: TensorLike,
         c: TensorLike,
         num_iters: int = 5,
-        result: Optional[TensorLike] = None,
+        result: TensorLike | None = None,
     ) -> TensorLike: ...
 
     def extract_log2phy_prob(

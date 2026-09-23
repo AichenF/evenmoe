@@ -15,14 +15,14 @@ from moe_load_balancer.policies.l1.eplb.algorithms import (
     rebalance_experts,
 )
 from moe_load_balancer.policies.l1.eplb.planner import (
-    EPLBPlacementPlanner,
     SUPPORTED_PLACEMENT_POLICIES,
+    EPLBPlacementPlanner,
 )
 
 __all__ = [
+    "SUPPORTED_PLACEMENT_POLICIES",
     "EPLBPlacementPlanner",
     "EplbAlgorithm",
     "compute_algorithm",
     "rebalance_experts",
-    "SUPPORTED_PLACEMENT_POLICIES",
 ]

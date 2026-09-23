@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: MIT
 # Copied from https://github.com/deepseek-ai/EPLB/blob/main/eplb.py and adapted
 # for the framework-neutral MLB placement API.
-from typing import Optional, Tuple
 
 import torch
 
@@ -18,12 +17,13 @@ def pack_groups(tokens_per_group: torch.Tensor, num_nodes: int) -> torch.Tensor:
         node_tokens = [0.0] * num_nodes
         node_groups = [0] * num_nodes
         for group in indices[layer]:
-
-            def key_func(rank: int) -> Tuple[int, float]:
-                if node_groups[rank] >= groups_per_rank:
+            # min() consumes key_func within this iteration, so it reads the
+            # loop's live tallies on purpose.
+            def key_func(rank: int) -> tuple[int, float]:
+                if node_groups[rank] >= groups_per_rank:  # noqa: B023
                     return 1, 0.0
                 else:
-                    return 0, node_tokens[rank]
+                    return 0, node_tokens[rank]  # noqa: B023
 
             rank = min(range(num_nodes), key=key_func)
             assert node_groups[rank] < groups_per_rank
@@ -38,7 +38,7 @@ def make_redundant_experts_chunkwise(
     num_physical_experts: int,
     num_local_physical_experts: int,
     num_physical_experts_per_chunk: int,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     num_steps, num_moe_layers, num_logical_experts = tokens_per_expert.shape
     num_redundancy_experts = num_physical_experts - num_logical_experts
 
@@ -235,7 +235,7 @@ def rebalance_experts(
     tokens_per_expert: torch.Tensor,
     num_physical_experts: int,
     num_local_physical_experts: int,
-    num_groups: Optional[int],
+    num_groups: int | None,
     num_nodes: int,
     enable_hierarchical: bool,
 ):

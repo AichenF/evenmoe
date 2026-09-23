@@ -14,6 +14,11 @@ kernel, so a decision realises identically wherever it is executed.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import torch
+
 # floor(2^32 / phi) -- the classic Knuth multiplicative hash constant. Shared
 # with the framework-side kernels on purpose: the value is part of the
 # agreement, not an implementation detail either side may pick.
@@ -29,7 +34,7 @@ def token_hash(token_idx):
             * KNUTH_MULTIPLIER) & 0xFFFFFFFF
 
 
-def uniform_draw(n: int, topk: int, device) -> object:
+def uniform_draw(n: int, topk: int, device) -> torch.Tensor:
     """``n`` draws in ``[0, 1)``, one per routed slot, constant within a token.
 
     Cached by shape: it depends on nothing else, and rebuilding it every
@@ -47,7 +52,7 @@ def uniform_draw(n: int, topk: int, device) -> object:
     return draw
 
 
-def replica_index(shape, topk: int, counts, device) -> object:
+def replica_index(shape, topk: int, counts, device) -> torch.Tensor:
     """Which replica each routed slot takes, from the token index alone.
 
     ``counts`` is the live replica count per slot, so an expert with one copy

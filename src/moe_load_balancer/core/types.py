@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, ClassVar, Mapping, Optional
+from typing import Any, ClassVar
 
 TensorLike = Any
 
@@ -44,7 +45,7 @@ class RoutingPolicyConfig:
     DISABLED: ClassVar[str] = "disabled"
 
     name: str = DISABLED
-    enabled_stages: Optional[frozenset[RoutingStage]] = None
+    enabled_stages: frozenset[RoutingStage] | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -71,12 +72,12 @@ class RoutingPolicyConfig:
     def is_disabled(self) -> bool:
         return self.name == self.DISABLED
 
-    def allows_stage(self, stage: Optional[RoutingStage]) -> bool:
+    def allows_stage(self, stage: RoutingStage | None) -> bool:
         if self.enabled_stages is None:
             return True
         return stage is not None and stage in self.enabled_stages
 
-    def should_run_for_stage(self, stage: Optional[RoutingStage]) -> bool:
+    def should_run_for_stage(self, stage: RoutingStage | None) -> bool:
         return not self.is_disabled and self.allows_stage(stage)
 
 
@@ -99,8 +100,8 @@ class PlacementSnapshot:
     # consumers must honor logical_to_physical_count rather than its width.
     logical_to_physical_candidates: TensorLike
     logical_to_physical_count: TensorLike
-    default_physical_for_logical: Optional[TensorLike] = None
-    physical_to_rank_map: Optional[TensorLike] = None
+    default_physical_for_logical: TensorLike | None = None
+    physical_to_rank_map: TensorLike | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -121,9 +122,9 @@ class PlacementSnapshot:
 class PlacementStats:
     """Framework-completed statistics consumed by an L1 policy."""
 
-    logical_count: Optional[TensorLike] = None
-    physical_count: Optional[TensorLike] = None
-    rank_load: Optional[TensorLike] = None
+    logical_count: TensorLike | None = None
+    physical_count: TensorLike | None = None
+    rank_load: TensorLike | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -136,9 +137,9 @@ class PlacementTopology:
 
     num_physical_experts: int
     num_local_physical_experts: int
-    num_groups: Optional[int]
+    num_groups: int | None
     num_nodes: int
-    active_ranks: Optional[TensorLike] = None
+    active_ranks: TensorLike | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -193,8 +194,8 @@ class PlacementRequest:
     stats: PlacementStats
     topology: PlacementTopology
     policy: PlacementPolicyConfig | str
-    current: Optional[Mapping[int, PlacementSnapshot]] = None
-    hbm_budget_bytes: Optional[int] = None
+    current: Mapping[int, PlacementSnapshot] | None = None
+    hbm_budget_bytes: int | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -219,10 +220,10 @@ class PlacementPlan:
 class RoutingLoadHistory:
     """Optional long-lived load view for future L2 policies."""
 
-    live_rank_load: Optional[TensorLike] = None
-    historical_rank_load: Optional[TensorLike] = None
-    historical_expert_load: Optional[TensorLike] = None
-    historical_rank_expert_load: Optional[TensorLike] = None
+    live_rank_load: TensorLike | None = None
+    historical_rank_load: TensorLike | None = None
+    historical_expert_load: TensorLike | None = None
+    historical_rank_expert_load: TensorLike | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -243,14 +244,14 @@ class RoutingRequest:
     logical_topk_ids: TensorLike
     topk_weights: TensorLike
     policies: tuple[RoutingPolicyConfig | str, ...] = ()
-    placement: Optional[PlacementSnapshot] = None
-    routed_physical_topk_ids: Optional[TensorLike] = None
-    stage: Optional[RoutingStage] = None
-    routed_rank_load: Optional[TensorLike] = None
-    active_rank_token_count: Optional[TensorLike] = None
-    global_logical_count: Optional[TensorLike] = None
-    token_count: Optional[TensorLike] = None
-    lb_token_mask: Optional[TensorLike] = None
+    placement: PlacementSnapshot | None = None
+    routed_physical_topk_ids: TensorLike | None = None
+    stage: RoutingStage | None = None
+    routed_rank_load: TensorLike | None = None
+    active_rank_token_count: TensorLike | None = None
+    global_logical_count: TensorLike | None = None
+    token_count: TensorLike | None = None
+    lb_token_mask: TensorLike | None = None
     routed_scaling_factor: float = 1.0
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
@@ -268,7 +269,7 @@ class RoutingDecision:
 
     routed_physical_topk_ids: TensorLike
     topk_weights: TensorLike
-    shared_expert_rank: Optional[TensorLike] = None
+    shared_expert_rank: TensorLike | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

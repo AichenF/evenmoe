@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 
 class CUDALPLBKernels:
@@ -61,7 +61,7 @@ class CUDALPLBKernels:
             a_base_row_sum,
         )
 
-    def solve_ipm(self, a, b, c, num_iters: int = 5, result: Optional[Any] = None):
+    def solve_ipm(self, a, b, c, num_iters: int = 5, result: Any | None = None):
         return self._cuda.solve_ipm(a, b, c, num_iters=num_iters, result=result)
 
     def extract_log2phy_prob(
