@@ -15,11 +15,13 @@ from moe_load_balancer.policies.l1.eplb import (
     rebalance_experts,
 )
 from moe_load_balancer.policies.l1.ultraep import UltraEPPlacementPolicy
+from moe_load_balancer.policies.l1.ultraep_refresh import RefreshGate
 
 __all__ = [
     "SUPPORTED_PLACEMENT_POLICIES",
     "EPLBPlacementPlanner",
     "EplbAlgorithm",
+    "RefreshGate",
     "UltraEPPlacementPolicy",
     "compute_algorithm",
     "rebalance_experts",
