@@ -7,7 +7,11 @@ import torch
 
 from moe_load_balancer import (
     MoELoadBalancer,
+    PlacementPlan,
+    PlacementRequest,
     PlacementSnapshot,
+    PlacementStats,
+    PlacementTopology,
     RoutingDecision,
     RoutingPhase,
     RoutingPolicyConfig,
@@ -102,6 +106,68 @@ class _RecordingCollectives:
     def all_reduce_sum(self, payload):
         self.payloads.append(payload.clone())
         return payload + self.peer_contribution.to(payload)
+
+
+class _PlacementPlanner:
+    def __init__(self):
+        self.seen_policy = None
+
+    def plan(self, request):
+        self.seen_policy = request.policy
+        return PlacementPlan([], [], [])
+
+
+def _placement_request(policy="disabled") -> PlacementRequest:
+    return PlacementRequest(
+        stats=PlacementStats(logical_count=[[1, 1]]),
+        topology=PlacementTopology(
+            num_physical_experts=2,
+            num_local_physical_experts=1,
+            num_groups=1,
+            num_nodes=1,
+        ),
+        policy=policy,
+    )
+
+
+@pytest.mark.unit
+def test_configured_placement_policy_is_the_default_and_request_can_override_it():
+    deepseek = _PlacementPlanner()
+    auto = _PlacementPlanner()
+    mlb = MoELoadBalancer(
+        placement_policy="deepseek",
+        placement_planners={"deepseek": deepseek, "auto": auto},
+    )
+
+    mlb.plan_placement(_placement_request())
+    mlb.plan_placement(_placement_request("auto"))
+
+    assert deepseek.seen_policy.name == "deepseek"
+    assert auto.seen_policy.name == "auto"
+
+
+@pytest.mark.unit
+def test_configured_routing_pipeline_is_the_default_and_request_can_override_it():
+    calls = []
+    mlb = MoELoadBalancer(
+        placement_planners={},
+        routing_policies={
+            "static": _PhysicalRouter(calls),
+            "dynamic": _PhysicalRouter(calls),
+        },
+        routing_pipeline="static",
+    )
+    common = {
+        "layer_id": 0,
+        "logical_topk_ids": torch.tensor([[0, 1], [1, 0]]),
+        "topk_weights": torch.ones((2, 2)),
+        "placement": _placement(),
+    }
+
+    mlb.route_tokens(RoutingRequest(**common))
+    mlb.route_tokens(RoutingRequest(**common, policies=("dynamic",)))
+
+    assert calls == [("physical", "static"), ("physical", "dynamic")]
 
 
 @pytest.mark.unit

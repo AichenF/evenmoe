@@ -28,7 +28,13 @@ RankLoadCounter = Callable[[object, PlacementSnapshot | None, RoutingPolicyConfi
 
 
 class MoELoadBalancer:
-    """Framework-neutral entry point for L1 placement and L2 routing."""
+    """Framework-neutral entry point for L1 placement and L2 routing.
+
+    ``placement_policy`` and ``routing_pipeline`` are defaults selected once
+    at construction. A non-disabled ``PlacementRequest.policy`` or a non-empty
+    ``RoutingRequest.policies`` overrides the corresponding default for one
+    call.
+    """
 
     def __init__(
         self,
@@ -36,6 +42,7 @@ class MoELoadBalancer:
         placement_planners: Mapping[str, PlacementPlanner] | None = None,
         routing_policies: Mapping[str, TokenRouter] | None = None,
         rank_load_counter: RankLoadCounter | None = None,
+        placement_policy: PlacementPolicyConfig | str | None = None,
         routing_pipeline: RoutingPipeline | str | None = None,
         collectives: RoutingCollectives | None = None,
     ) -> None:
@@ -56,6 +63,26 @@ class MoELoadBalancer:
         self._routing_policies = dict(routing_policies or {})
         self._rank_load_counter = rank_load_counter
         self._routing_pipeline = RoutingPipeline.from_value(routing_pipeline)
+        configured_placement = PlacementPolicyConfig.from_value(
+            PlacementPolicyConfig.DISABLED
+            if placement_policy is None
+            else placement_policy
+        )
+        required_placement = self._routing_pipeline.placement_policy
+        if configured_placement.is_disabled and required_placement is not None:
+            configured_placement = PlacementPolicyConfig(name=required_placement)
+        elif (
+            required_placement is not None
+            and configured_placement.name != required_placement
+        ):
+            raise ValueError(
+                f"Routing pipeline {self._routing_pipeline.name!r} requires placement "
+                f"policy {required_placement!r}, not {configured_placement.name!r}."
+            )
+        # TODO: Apply the same compatibility check to request-time overrides:
+        # PlacementRequest.policy against the configured L2 pipeline, and
+        # RoutingRequest.policies against the configured L1 policy.
+        self._configured_placement_policy = configured_placement
         self._collectives = collectives
         self._use_lplb_local_count = os.environ.get("LPLB_USE_LOCAL_COUNT", "0") == "1"
 
@@ -126,9 +153,11 @@ class MoELoadBalancer:
 
     @property
     def placement_policy(self) -> str | None:
-        """Return the L1 policy coupled to this routing pipeline, if any."""
+        """Return the configured default L1 policy, if any."""
 
-        return self._routing_pipeline.placement_policy
+        if self._configured_placement_policy.is_disabled:
+            return None
+        return self._configured_placement_policy.name
 
     def on_placement_committed(self, placement: PlacementSnapshot) -> None:
         """Notify active policies that a framework placement was committed.
@@ -202,6 +231,8 @@ class MoELoadBalancer:
 
         policy = PlacementPolicyConfig.from_value(request.policy)
         if policy.is_disabled:
+            policy = self._configured_placement_policy
+        if policy.is_disabled:
             raise ValueError(
                 "Placement policy is disabled. The framework must skip the "
                 "plan_placement call when it decides not to rebalance."
@@ -213,7 +244,7 @@ class MoELoadBalancer:
                 f"Unknown placement policy {policy.name!r}; registered "
                 f"policies are {sorted(self._placement_planners)}."
             ) from exc
-        return planner.plan(request)
+        return planner.plan(replace(request, policy=policy))
 
     def transform_topk_inputs(
         self,

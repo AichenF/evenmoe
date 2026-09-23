@@ -189,11 +189,15 @@ class PlacementPolicyConfig:
 
 @dataclass(frozen=True, kw_only=True)
 class PlacementRequest:
-    """Framework-neutral L1 planning input."""
+    """Framework-neutral L1 planning input.
+
+    ``policy`` overrides the balancer's configured placement policy for this
+    planning call. Leave it disabled to use the configured default.
+    """
 
     stats: PlacementStats
     topology: PlacementTopology
-    policy: PlacementPolicyConfig | str
+    policy: PlacementPolicyConfig | str = PlacementPolicyConfig.DISABLED
     current: Mapping[int, PlacementSnapshot] | None = None
     hbm_budget_bytes: int | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
