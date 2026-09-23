@@ -217,16 +217,9 @@ derives Waterfill's planned global rank load from the LPLB solution, so it does
 not issue a second collective.
 
 Set `LPLB_USE_LOCAL_COUNT=1` before constructing `MoELoadBalancer` to skip
-MLB's LPLB logical-count all-reduce. Each rank then solves using its own
-float32 expert-token histogram, without scaling by EP size, as an
-approximation of the global distribution. This saves a collective but can
-produce different routing probabilities across ranks and worse global load
-balance when their token distributions differ. The default (`0`) uses global
-counts. An explicitly supplied `RoutingRequest.global_logical_count` takes
-precedence; this switch does not disable collectives performed by the calling
-framework. Other routing policies retain their existing count behavior.
-With `lplb+waterfill`, Waterfill's planned rank load is derived from the same
-local-count LP solution when this switch is enabled.
+MLB's LPLB count all-reduce and approximate the global distribution with local
+token counts. Default: `0` (global counts). Explicitly supplied
+`RoutingRequest.global_logical_count` takes precedence.
 
 After initial weight loading and after each placement update is committed, the
 framework passes its current metadata to
