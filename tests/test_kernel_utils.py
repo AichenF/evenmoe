@@ -5,7 +5,11 @@ import pathlib
 
 import pytest
 
-from moe_load_balancer.kernels.jit.utils import _find_package_root, get_mathdx_root
+from moe_load_balancer.kernels.jit.utils import (
+    INCLUDE_PATH,
+    _find_package_root,
+    get_mathdx_root,
+)
 
 
 @pytest.mark.unit
@@ -13,6 +17,14 @@ def test_find_package_root_handles_regular_packages():
     root = _find_package_root("moe_load_balancer")
     assert root is not None
     assert (root / "kernels").is_dir()
+
+
+@pytest.mark.unit
+def test_shared_jit_headers_ship_next_to_the_loader():
+    """``load_jit`` puts ``INCLUDE_PATH`` on every build; the ``moe_lb_jit``
+    headers every kernel package includes must be there."""
+    for name in ("tensor.h", "utils.h", "utils.cuh", "source_location.h"):
+        assert (INCLUDE_PATH / "moe_lb_jit" / name).is_file(), name
 
 
 @pytest.mark.unit

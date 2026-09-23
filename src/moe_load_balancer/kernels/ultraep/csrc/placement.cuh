@@ -1,11 +1,15 @@
+// Adapted from UltraEP v1.0.0 (Dots-Infra/UltraEP @ 94cab099):
+//   csrc/kernels/placement.cu
+// Copyright (c) 2026 PKU-DASYS and Dots-Infra. MIT License -- see
+// LICENSE.ultraep.
+
 #include <cuda_runtime.h>
 
 #include <climits>
 #include <cmath>
 #include <cstdint>
 
-#include "../utils/exception.cuh"
-#include "api.cuh"
+#include "exception.cuh"
 #include "launch.cuh"
 #include "ptx.cuh"
 
@@ -1657,3 +1661,98 @@ void solve_placement(const int32_t* expert_loads,
 }
 
 }  // namespace ultra_ep::kernels
+
+// ---------------------------------------------------------------------------
+// MLB tvm-ffi entry point; everything above is UltraEP's. Exported through
+// ``load_jit`` by ``cuda_placement.py``: validates the arguments, then runs
+// the vendored solve on the caller's current stream.
+// ---------------------------------------------------------------------------
+
+#include "entry.cuh"
+
+namespace {
+
+void solve_placement(tvm::ffi::TensorView expert_loads,
+                     tvm::ffi::TensorView expert_loads_per_rank,
+                     tvm::ffi::TensorView physical_to_logical_map,
+                     tvm::ffi::TensorView logical_to_physical_map,
+                     tvm::ffi::TensorView logical_replica_counts,
+                     tvm::ffi::TensorView logical_instance_quota,
+                     tvm::ffi::TensorView logical_instance_quota_prefix,
+                     tvm::ffi::TensorView rank_quota_prefix,
+                     int64_t num_ranks,
+                     int64_t num_local_master_experts,
+                     int64_t num_local_redundant_experts,
+                     int64_t num_nvl_ranks,
+                     double balance_threshold,
+                     int64_t min_tokens_per_replica,
+                     bool allow_zero_master_quota,
+                     bool locality_aware,
+                     double oracle_eps,
+                     int64_t kernel_stage,
+                     int64_t rank) {
+    using namespace host;
+
+    RuntimeCheck(num_ranks > 1, "num_ranks must be greater than one");
+    RuntimeCheck(num_local_master_experts > 0, "num_local_master_experts must be positive");
+    RuntimeCheck(num_local_redundant_experts > 0, "num_local_redundant_experts must be positive");
+    RuntimeCheck(num_nvl_ranks > 0 && num_ranks % num_nvl_ranks == 0,
+                 "num_nvl_ranks must be positive and divide num_ranks");
+    RuntimeCheck(rank >= 0 && rank < num_ranks, "rank is outside the EP group");
+    RuntimeCheck(kernel_stage == 0 || kernel_stage == 1, "kernel_stage must be 0 or 1");
+    RuntimeCheck(min_tokens_per_replica >= 0, "min_tokens_per_replica must be non-negative");
+
+    const int64_t logical = num_ranks * num_local_master_experts;
+    const int64_t physical = num_ranks * (num_local_master_experts + num_local_redundant_experts);
+    RuntimeCheck(physical <= INT_MAX, "the physical expert count exceeds the CUDA kernel limit");
+
+    // Every tensor is int32, contiguous, and on the one device the launch goes to.
+    SymbolicDevice device_;
+    TensorMatcher({logical}).with_dtype<int32_t>().with_device<kDLCUDA>(device_).verify(expert_loads);
+    TensorMatcher({num_ranks, logical})
+        .with_dtype<int32_t>()
+        .with_device<kDLCUDA>(device_)
+        .verify(expert_loads_per_rank);
+    TensorMatcher({physical}).with_dtype<int32_t>().with_device<kDLCUDA>(device_).verify(physical_to_logical_map);
+    TensorMatcher({logical, num_ranks})
+        .with_dtype<int32_t>()
+        .with_device<kDLCUDA>(device_)
+        .verify(logical_to_physical_map);
+    TensorMatcher({logical}).with_dtype<int32_t>().with_device<kDLCUDA>(device_).verify(logical_replica_counts);
+    TensorMatcher({logical, num_ranks})
+        .with_dtype<int32_t>()
+        .with_device<kDLCUDA>(device_)
+        .verify(logical_instance_quota);
+    TensorMatcher({logical, num_ranks})
+        .with_dtype<int32_t>()
+        .with_device<kDLCUDA>(device_)
+        .verify(logical_instance_quota_prefix);
+    TensorMatcher({logical, num_ranks}).with_dtype<int32_t>().with_device<kDLCUDA>(device_).verify(rank_quota_prefix);
+
+    const DLDevice device = device_.unwrap();
+    const mlb_ultraep::CurrentDeviceGuard guard(device.device_id);
+    ultra_ep::kernels::solve_placement(static_cast<const int32_t*>(expert_loads.data_ptr()),
+                                       static_cast<const int32_t*>(expert_loads_per_rank.data_ptr()),
+                                       static_cast<int32_t*>(physical_to_logical_map.data_ptr()),
+                                       static_cast<int32_t*>(logical_to_physical_map.data_ptr()),
+                                       static_cast<int32_t*>(logical_replica_counts.data_ptr()),
+                                       static_cast<int32_t*>(logical_instance_quota.data_ptr()),
+                                       static_cast<int32_t*>(logical_instance_quota_prefix.data_ptr()),
+                                       static_cast<int32_t*>(rank_quota_prefix.data_ptr()),
+                                       mlb_ultraep::current_stream(device),
+                                       static_cast<int>(logical),
+                                       static_cast<int>(num_ranks),
+                                       static_cast<int>(num_local_master_experts),
+                                       static_cast<int>(num_local_redundant_experts),
+                                       static_cast<int>(num_nvl_ranks),
+                                       /*max_replicas_dim=*/static_cast<int>(num_ranks),
+                                       static_cast<float>(balance_threshold),
+                                       static_cast<int32_t>(min_tokens_per_replica),
+                                       allow_zero_master_quota,
+                                       locality_aware,
+                                       static_cast<float>(oracle_eps),
+                                       static_cast<int>(kernel_stage),
+                                       static_cast<int>(rank));
+}
+
+}  // namespace

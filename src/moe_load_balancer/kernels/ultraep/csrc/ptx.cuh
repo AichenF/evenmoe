@@ -1,3 +1,8 @@
+// Adapted from UltraEP v1.0.0 (Dots-Infra/UltraEP @ 94cab099):
+//   csrc/kernels/ptx.cuh
+// Copyright (c) 2026 PKU-DASYS and Dots-Infra. MIT License -- see
+// LICENSE.ultraep.
+
 #pragma once
 
 #include <cuda/barrier>
