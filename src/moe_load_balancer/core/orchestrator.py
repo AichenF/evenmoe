@@ -43,7 +43,7 @@ class MoELoadBalancer:
                 EPLBPlacementPlanner,
                 SUPPORTED_PLACEMENT_POLICIES,
             )
-            from moe_load_balancer.policies.fused.ultraep import UltraEPPlacementPolicy
+            from moe_load_balancer.policies.l1.ultraep import UltraEPPlacementPolicy
 
             placement_planners = {
                 name: EPLBPlacementPlanner(name) for name in SUPPORTED_PLACEMENT_POLICIES
@@ -127,20 +127,6 @@ class MoELoadBalancer:
         """Return the L1 policy coupled to this routing pipeline, if any."""
 
         return self._routing_pipeline.placement_policy
-
-    def build_initial_physical_to_logical_map(self, **kwargs):
-        """Build policy-owned bootstrap placement without exposing its type."""
-
-        policy_name = self.placement_policy
-        if policy_name is None:
-            return None
-        planner = self._placement_planners[policy_name]
-        builder = getattr(planner, "build_initial_physical_to_logical_map", None)
-        if builder is None:
-            raise ValueError(
-                f"Placement policy {policy_name!r} has no bootstrap placement builder."
-            )
-        return builder(**kwargs)
 
     def on_placement_committed(self, placement: PlacementSnapshot) -> None:
         """Notify active policies that a framework placement was committed.

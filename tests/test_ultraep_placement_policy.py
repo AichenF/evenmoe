@@ -8,10 +8,7 @@ from moe_load_balancer import (
     PlacementTopology,
 )
 from moe_load_balancer.kernels.ultraep.config import UltraEPPlacementTuning
-from moe_load_balancer.policies.fused.ultraep import (
-    UltraEPPlacementPolicy,
-    build_ultraep_initial_physical_to_logical_map,
-)
+from moe_load_balancer.policies.l1.ultraep import UltraEPPlacementPolicy
 
 
 class _Backend:
@@ -126,22 +123,6 @@ def test_ultraep_placement_policy_handles_multiple_layers():
     assert not torch.equal(
         plan.physical_to_logical_map[0], plan.physical_to_logical_map[1]
     )
-
-
-@pytest.mark.unit
-def test_ultraep_initial_layout_keeps_master_slots_fixed():
-    mapping = build_ultraep_initial_physical_to_logical_map(
-        num_layers=2,
-        num_logical_experts=8,
-        ep_size=2,
-        num_redundant_experts_per_rank=2,
-    )
-
-    assert mapping.dtype == torch.int32
-    assert mapping.tolist() == [
-        [0, 1, 2, 3, 0, 1, 4, 5, 6, 7, 4, 5],
-        [0, 1, 2, 3, 0, 1, 4, 5, 6, 7, 4, 5],
-    ]
 
 
 @pytest.mark.unit
