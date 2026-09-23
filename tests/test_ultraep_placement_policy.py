@@ -8,7 +8,7 @@ from moe_load_balancer import (
     PlacementTopology,
 )
 from moe_load_balancer.kernels.ultraep.config import UltraEPPlacementTuning
-from moe_load_balancer.policies.fused.ultraep import (
+from moe_load_balancer.policies.l1.ultraep import (
     UltraEPPlacementPolicy,
     build_ultraep_initial_physical_to_logical_map,
 )

@@ -1,9 +1,20 @@
-"""UltraEP placement algorithm behind MLB's existing planner interface."""
+"""UltraEP placement algorithm behind MLB's existing planner interface.
+
+UltraEP solves placement and routing together: this L1 half publishes the
+per-replica token quota that its L2 half (``policies.l2.ultraep``) reads, so
+the two are selected as a pair rather than composed with an unrelated router
+the way ``deepseek`` / ``lplb`` / ``waterfill`` compose freely.
+
+Placement only: moving expert weight to match a solved ``PlacementPlan`` is
+the framework adapter's job, done with whatever mover that framework already
+owns.
+"""
 
 from __future__ import annotations
 
 import torch
 
+from moe_load_balancer.core.l1 import PlacementPlanner
 from moe_load_balancer.core.types import (
     PlacementPlan,
     PlacementPolicyConfig,
@@ -49,7 +60,7 @@ def build_ultraep_initial_physical_to_logical_map(
     return torch.cat(rank_maps).repeat(num_layers, 1)
 
 
-class UltraEPPlacementPolicy:
+class UltraEPPlacementPolicy(PlacementPlanner):
     """Compute replica placement from per-rank logical expert loads."""
 
     name = "ultraep"
@@ -65,17 +76,13 @@ class UltraEPPlacementPolicy:
 
     @property
     def _resolved_tuning(self) -> UltraEPPlacementTuning:
-        """Env-derived tuning, resolved on first use rather than in ``__init__``.
+        """Env-derived tuning, read on first use.
 
         ``load_placement_tuning_from_env`` raises on a malformed ``ULTRA_EP_*``
-        value.  The orchestrator registers every L1 policy by name up front, so
-        ``__init__`` runs for every ``MoELoadBalancer`` regardless of the
-        selected algorithm -- reading the environment there let a stray
-        ``ULTRA_EP_*`` variable fail construction for a deployment that never
-        selects this policy.  Deferring the read keeps the failure where it
-        belongs: on the first solve that actually consumes the tuning.  Mirrors
-        the deferral ``UltraEPPlacementBackend.extension`` already does for
-        ``_C``.
+        value, and the orchestrator constructs every L1 policy up front, so
+        reading here keeps that failure on the first solve that consumes the
+        tuning rather than on the construction of a balancer that never selects
+        this policy.
         """
         if self._tuning is None:
             self._tuning = load_placement_tuning_from_env()
@@ -113,12 +120,8 @@ class UltraEPPlacementPolicy:
         per_rank_loads = logical_count.to(torch.int32).contiguous()
         global_loads = per_rank_loads.sum(dim=0, dtype=torch.int32).contiguous()
         max_replicas = ep_size
-        # The initial value here does not matter: the kernel memsets all four
-        # of these itself on every call (physical_to_logical_map and
-        # logical_to_physical_map to -1, the rest to 0) before it solves.
-        # zeros rather than empty only avoids handing the kernel whatever
-        # garbage this process's allocator last left behind, on the off
-        # chance a future kernel revision reads before it solves.
+        # The kernel resets all four before it solves (the two maps to -1, the
+        # rest to 0); zeros only avoid handing it uninitialised memory.
         physical_to_logical = torch.zeros(
             (num_layers, topology.num_physical_experts),
             dtype=torch.int32,
@@ -162,20 +165,12 @@ class UltraEPPlacementPolicy:
                 tuning=self._resolved_tuning,
             )
 
-        # The kernel memsets physical_to_logical_map to -1 before it solves,
-        # then only overwrites the slots it actually assigns a replica to: a
-        # redundant slot whose would-be replica falls below the tuning's
-        # token floor is deliberately left at -1, UltraEP's "not worth
-        # materializing" signal. Every physical slot in a PlacementPlan is
-        # otherwise guaranteed to name a real logical expert -- the
-        # framework's load-history scatter and weight table both index by it
-        # unconditionally -- so a slot the solve declined is filled with this
-        # rank's own master experts, round-robin, the same fallback the
-        # initial bootstrap layout already uses for a redundant slot with no
-        # information yet. It is a harmless duplicate, never a wrong answer:
-        # nothing routes tokens there unless logical_to_all_physical_map also
-        # lists it as a candidate, which this fallback deliberately leaves
-        # untouched -- the solve's decision not to route here stands.
+        # A redundant slot the solve declined (its replica would fall below the
+        # tuning's token floor) is left at -1. Every slot in a PlacementPlan
+        # must name a real logical expert, so such slots take this rank's own
+        # master experts round-robin, as the initial layout does. Nothing
+        # routes to them: logical_to_all_physical_map, which the solve owns, is
+        # left untouched.
         unassigned = physical_to_logical < 0
         if unassigned.any():
             physical_ids = torch.arange(
