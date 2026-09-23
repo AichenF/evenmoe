@@ -53,7 +53,8 @@ The MIT-licensed components above are distributed under the following terms:
   `src/moe_load_balancer/policies/l2/lplb.py`,
   the static, dynamic, and experimental fake replica-routing behavior in
   `src/moe_load_balancer/policies/l2/replica.py`,
-  `src/moe_load_balancer/kernels/jit/utils.py`, and
+  `src/moe_load_balancer/kernels/jit/utils.py`, the JIT kernel helper headers
+  in `src/moe_load_balancer/kernels/jit/include/moe_lb_jit/`, and
   `src/moe_load_balancer/kernels/lplb/`, plus the Elastic-EP-aware placement
   policy in
   `src/moe_load_balancer/policies/l1/eplb/algorithms/elasticity_aware.py`.
@@ -66,9 +67,11 @@ The Apache License 2.0 text is provided in the repository's `LICENSE` file.
 - Version: v1.0.0, commit `94cab099b44fffa99a82fea99e7c12d89cf65e4f`
 - License: MIT
 - Copyright: Copyright (c) 2026 PKU-DASYS and Dots-Infra
-- Local code: placement and sparse quota-rerouting sources under
-  `src/moe_load_balancer/kernels/ultraep/`; the UltraEP communication runtime
-  is not copied into MLB.
+- Local code: placement and sparse quota-rerouting kernels under
+  `src/moe_load_balancer/kernels/ultraep/csrc/`, JIT-compiled through MLB's
+  tvm-ffi loader (the entry point at the end of each kernel file and
+  `csrc/entry.cuh` are MLB's); the UltraEP communication runtime is not copied
+  into MLB.
 
 The original MIT license is retained at
 `src/moe_load_balancer/kernels/ultraep/LICENSE.ultraep`.

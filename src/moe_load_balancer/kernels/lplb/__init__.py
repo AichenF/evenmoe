@@ -6,9 +6,12 @@ This package owns the LPLB Linear-Programming load-balancer kernels:
                              post / dispatch). Build via
                              ``moe_load_balancer.kernels.jit.utils``.
 - ``protocol``              execution contract consumed by the LPLB policy.
-- ``csrc/``                  CUDA kernel sources (header-only ``.cuh``).
-- ``include/moe_lb_jit/``    Vendored helper C++ headers (TensorView
-                             validation, ``LaunchKernel`` wrapper, etc.).
+- ``csrc/``                  CUDA kernel sources (header-only ``.cuh``). The
+                             ``moe_lb_jit/*`` helper headers they include
+                             (TensorView validation, ``LaunchKernel`` wrapper;
+                             adapted from SGLang) live in
+                             ``kernels/jit/include/`` and reach every build
+                             through ``load_jit``.
 
 The pipeline has no runtime or build-time dependency on any inference
 framework. Framework-specific implementations of ``LPLBKernels`` live

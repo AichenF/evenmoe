@@ -11,8 +11,6 @@ something this class knows about.
 
 from __future__ import annotations
 
-from typing import Dict
-
 
 class RefreshGate:
     """Per-layer "N representative batches since the last refresh" gate.
@@ -31,7 +29,7 @@ class RefreshGate:
         if interval <= 0:
             raise ValueError("RefreshGate requires a positive interval.")
         self._interval = interval
-        self._batches_since_refresh: Dict[int, int] = {}
+        self._batches_since_refresh: dict[int, int] = {}
 
     def is_due(self, layer_id: int) -> bool:
         """Advance ``layer_id``'s call counter by one and report whether a

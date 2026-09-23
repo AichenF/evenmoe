@@ -10,13 +10,13 @@ copies evenly instead of all taking the first one.
 """
 
 import random
-from typing import List
+
 import torch
 
 
 def _logical_to_all_physical_raw(
     logical_to_all_physical_map, layer_id: int, logical_expert_id: int
-) -> List[int]:
+) -> list[int]:
     return [
         physical_expert_id
         for physical_expert_id in logical_to_all_physical_map[
@@ -42,7 +42,7 @@ def _compute_node_id_of_physical_expert(
 
 
 def _find_nearest_expert(
-    candidate_physical_expert_ids: List[int],
+    candidate_physical_expert_ids: list[int],
     num_local_gpu_physical_experts: int,
     moe_ep_rank: int,
     num_gpus_per_node: int | None,
@@ -83,7 +83,7 @@ def _find_nearest_expert(
 
 
 
-def _fair_choices(arr: List, k: int, r: random.Random) -> List:
+def _fair_choices(arr: list, k: int, r: random.Random) -> list:
     quotient, remainder = divmod(k, len(arr))
     ans = arr * quotient + r.sample(arr, k=remainder)
     r.shuffle(ans)

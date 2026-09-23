@@ -6,10 +6,11 @@ impl + the runtime hook) lives separately under
 
 Layout:
 
-- ``csrc/``                  CUDA kernel source files (``.cuh``).
-- ``include/moe_lb_jit/``    Vendored tvm-ffi + CUDA helper headers
-                              (TensorView validation chain, stream-aware
-                              ``cudaLaunchKernelEx`` wrapper, etc.; ~33 KB).
+- ``csrc/``   CUDA kernel source files (``.cuh``). The ``moe_lb_jit/*`` helper
+              headers they include (TensorView validation chain, stream-aware
+              ``cudaLaunchKernelEx`` wrapper, etc.; adapted from SGLang's
+              jit_kernel) live in ``kernels/jit/include/`` and reach every
+              build through ``load_jit``.
 
 NVIDIA Math-DX headers are resolved from MATHDX_HOME or nvidia-mathdx.
 
@@ -35,7 +36,6 @@ from moe_load_balancer.kernels.jit.utils import (
 )
 from moe_load_balancer.kernels.ops.replica_draw import uniform_draw
 
-
 if TYPE_CHECKING:
     from tvm_ffi.module import Module
 
@@ -46,13 +46,11 @@ DEFAULT_BLOCK_DIM = 256
 DISPATCH_BLOCK_DIM = 256
 DEFAULT_NUM_ITERS = 5
 
-# Adapter-local kernel-source roots. ``load_jit`` resolves ``cuda_files``
-# paths against ``_HERE / "csrc" / <file>`` (the vendored ``.cuh`` files
-# live in a flat ``csrc/`` layout). The vendored ``moe_lb_jit/*`` headers
-# the kernels ``#include`` live under ``_INCLUDE`` and are added to every
-# build's ``-I`` path so the SDK has no external C++ header dependencies.
+# Kernel-source root. ``load_jit`` resolves ``cuda_files`` paths against
+# ``_HERE / "csrc" / <file>`` (the ``.cuh`` files live in a flat ``csrc/``
+# layout) and supplies the shared ``moe_lb_jit/*`` headers itself, so the only
+# external C++ header dependencies are tvm-ffi and Math-DX.
 _HERE = pathlib.Path(__file__).parent.resolve()
-_INCLUDE = str(_HERE / "include")
 
 # Resolve Math-DX from MATHDX_HOME or the installed nvidia-mathdx package.
 register_dependency("mathdx")(make_mathdx_include_paths_resolver())
@@ -64,7 +62,7 @@ def _sm_ver() -> int:
 
 
 @cache_once
-def _ipm_module(nc: int, nv: int, block_dim: int, num_iters: int, sm_ver: int) -> "Module":
+def _ipm_module(nc: int, nv: int, block_dim: int, num_iters: int, sm_ver: int) -> Module:
     """JIT-compile the IPM kernel for one shape. Cached for the process lifetime."""
     args = make_cpp_args(nc, nv, block_dim, sm_ver, num_iters)
     # The kernel uses cuBLASDx (header-only) for the GEMMs and a hand-written
@@ -77,7 +75,6 @@ def _ipm_module(nc: int, nv: int, block_dim: int, num_iters: int, sm_ver: int) -
         cuda_files=["ipm.cuh"],
         cuda_wrappers=[("ipm_solve", f"ipm_solve<{args}>")],
         extra_dependencies=["mathdx"],
-        extra_include_paths=[_INCLUDE],
         source_root=_HERE,
     )
 
@@ -133,7 +130,7 @@ def solve_ipm(
     b: torch.Tensor,
     c: torch.Tensor,
     num_iters: int = DEFAULT_NUM_ITERS,
-    result: "torch.Tensor | None" = None,
+    result: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Run the fused single-SM IPM kernel.
 
@@ -175,14 +172,13 @@ def _prep_module(
     num_red_log: int,
     num_gpus: int,
     block_dim: int,
-) -> "Module":
+) -> Module:
     args = make_cpp_args(nc, nv, num_single, num_red_log, num_gpus, block_dim)
     return load_jit(
         "lplb_lp_prep",
         *args,
         cuda_files=["lp_prep.cuh"],
         cuda_wrappers=[("lp_prep", f"lp_prep<{args}>")],
-        extra_include_paths=[_INCLUDE],
         source_root=_HERE,
     )
 
@@ -219,14 +215,13 @@ def _post_module(
     num_single: int,
     num_red_phy: int,
     block_dim: int,
-) -> "Module":
+) -> Module:
     args = make_cpp_args(num_logical, max_copies, num_single, num_red_phy, block_dim)
     return load_jit(
         "lplb_lp_post",
         *args,
         cuda_files=["lp_post.cuh"],
         cuda_wrappers=[("lp_post", f"lp_post<{args}>")],
-        extra_include_paths=[_INCLUDE],
         source_root=_HERE,
     )
 
@@ -251,14 +246,13 @@ def extract_log2phy_prob(
 
 
 @cache_once
-def _dispatch_module(max_copies: int, block_dim: int) -> "Module":
+def _dispatch_module(max_copies: int, block_dim: int) -> Module:
     args = make_cpp_args(max_copies, block_dim)
     return load_jit(
         "lplb_dispatch_probability",
         *args,
         cuda_files=["dispatch_probability.cuh"],
         cuda_wrappers=[("dispatch_probability", f"dispatch_probability<{args}>")],
-        extra_include_paths=[_INCLUDE],
         source_root=_HERE,
     )
 
@@ -267,9 +261,9 @@ def dispatch_probability(
     topk_ids: torch.Tensor,
     log2phy_prob: torch.Tensor,
     log2phy_map: torch.Tensor,
-    expert_load_view: 'torch.Tensor | None' = None,
-    record_enabled: 'torch.Tensor | None' = None,
-    num_unpadded_tokens: 'torch.Tensor | None' = None,
+    expert_load_view: torch.Tensor | None = None,
+    record_enabled: torch.Tensor | None = None,
+    num_unpadded_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Replace the 7 torch ops in `_topk_ids_logical_to_physical_probability`
     with a single per-token-per-slot CUDA kernel.

@@ -141,7 +141,7 @@ def route(engine, ids=None):
 
 
 def test_routing_reads_in_place_changes_and_replaced_metadata(engine):
-    mlb, ctx = engine
+    _mlb, ctx = engine
     assert route(engine).topk_ids.tolist() == [[0, 1]]
     ctx.resources.expert_location_metadata.logical_to_rank_dispatch_physical_map.copy_(
         torch.tensor([[2, 3]])
@@ -163,7 +163,7 @@ def test_empty_routing_still_reaches_pipeline(engine):
 
 
 def test_missing_committed_metadata_fails_at_routing_not_construction(engine):
-    mlb, ctx = engine
+    _mlb, ctx = engine
     ctx.resources.expert_location_metadata = None
     new_mlb = MoELoadBalancer.from_algorithm(**to_load_balancer_kwargs(ctx))
     with pytest.raises(RuntimeError, match="committed expert metadata"):
@@ -182,7 +182,7 @@ def test_snapshot_reads_replaced_metadata_without_copying(engine):
 
 
 def test_collective_transport_reads_current_group(engine):
-    mlb, ctx = engine
+    _mlb, ctx = engine
     transport = to_load_balancer_kwargs(ctx)["collectives"]
     replacement = Mock(rank_in_group=1, world_size=2)
     ctx.parallel.moe_ep_group = replacement
@@ -193,7 +193,7 @@ def test_collective_transport_reads_current_group(engine):
 
 
 def test_planning_reads_context_and_keeps_per_call_inputs_explicit(engine):
-    mlb, ctx = engine
+    _mlb, ctx = engine
     counts = torch.tensor([[[10, 20]]])
     ctx.config_bag("exec").moe.eplb_algorithm = "deepseek_vec"
     active = torch.tensor([True, True])

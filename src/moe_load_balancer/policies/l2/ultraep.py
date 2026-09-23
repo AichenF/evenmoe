@@ -11,14 +11,14 @@ from moe_load_balancer.core.types import (
     RoutingPolicyConfig,
     RoutingRequest,
 )
-from moe_load_balancer.kernels.ultraep import UltraEPPlacementBackend
+from moe_load_balancer.kernels.ultraep import UltraEPKernels, UltraEPPlacementBackend
 
 
 class UltraEPL2Router(TokenRouter):
     phase = RoutingPhase.PHYSICAL_ROUTING
 
-    def __init__(self, *, backend: UltraEPPlacementBackend | None = None) -> None:
-        self._backend = backend or UltraEPPlacementBackend()
+    def __init__(self, *, backend: UltraEPKernels | None = None) -> None:
+        self._backend: UltraEPKernels = backend or UltraEPPlacementBackend()
         self._counters: dict[tuple[torch.device, int], torch.Tensor] = {}
         self._placements: dict[
             int,

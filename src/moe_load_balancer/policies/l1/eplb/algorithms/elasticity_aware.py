@@ -11,7 +11,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Tuple
 
 import torch
 
@@ -28,7 +27,7 @@ def rebalance_experts(
     num_gpus: int,
     enable_hierarchical: bool,
     active_ranks: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Run the Elastic-EP-aware DeepSeek placement policy."""
 
     num_layers, num_logical_experts = weight.shape

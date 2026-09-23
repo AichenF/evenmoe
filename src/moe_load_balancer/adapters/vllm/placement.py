@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 from moe_load_balancer.core.types import (
     PlacementPlan,
@@ -33,12 +33,12 @@ def to_placement_request(
     *,
     num_replicas: int,
     num_ranks: int,
-    num_groups: Optional[int],
+    num_groups: int | None,
     num_nodes: int,
     algorithm: str = "auto",
-    old_physical_to_logical_map: Optional[TensorLike] = None,
-    active_ranks: Optional[TensorLike] = None,
-    ep_rank: Optional[int] = None,
+    old_physical_to_logical_map: TensorLike | None = None,
+    active_ranks: TensorLike | None = None,
+    ep_rank: int | None = None,
 ) -> PlacementRequest:
     """Translate vLLM's ``AbstractEplbPolicy.rebalance_experts`` arguments.
 

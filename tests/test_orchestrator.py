@@ -505,13 +505,13 @@ class _CountDeclaringPhysicalRouter:
 
 
 def _count_request(**overrides) -> RoutingRequest:
-    kwargs = dict(
-        layer_id=0,
-        logical_topk_ids=torch.tensor([[0, 1]]),
-        topk_weights=torch.ones((1, 2)),
-        placement=_placement(),
-        policies=(RoutingPolicyConfig(name="lplb"),),
-    )
+    kwargs = {
+        "layer_id": 0,
+        "logical_topk_ids": torch.tensor([[0, 1]]),
+        "topk_weights": torch.ones((1, 2)),
+        "placement": _placement(),
+        "policies": (RoutingPolicyConfig(name="lplb"),),
+    }
     kwargs.update(overrides)
     return RoutingRequest(**kwargs)
 

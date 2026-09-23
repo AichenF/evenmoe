@@ -28,6 +28,12 @@ compile through ``tvm-ffi``:
   declare build-time include-path dependencies (e.g. Math-DX) that
   resolve at JIT compile time rather than at module import.
 
+``include/moe_lb_jit/`` next to this module holds the C++ helper headers
+adapted from SGLang's ``jit_kernel`` (``TensorMatcher`` validation, the
+stream-aware ``LaunchKernel`` wrapper, error reporting); ``load_jit`` puts
+it on every build's include path, so a kernel just ``#include
+<moe_lb_jit/tensor.h>``.
+
 Nothing here imports any inference framework. Kernel subpackages
 (:mod:`moe_load_balancer.kernels.<algo>`) ship their own ``.cuh`` /
 ``.hpp`` files and pass ``source_root=Path(__file__).parent`` to
@@ -41,19 +47,14 @@ import importlib.util
 import logging
 import os
 import pathlib
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
-    Dict,
-    List,
-    Optional,
-    Tuple,
     TypeAlias,
     TypeVar,
-    Union,
 )
 
 import torch
@@ -72,7 +73,7 @@ def cache_once(fn: F) -> F:
     ``functools.lru_cache`` is incompatible with ``torch.compile``; this
     plain dict-backed cache is a torch.compile-safe alternative.
     """
-    result_map: Dict[Tuple[Any, ...], Any] = {}
+    result_map: dict[tuple[Any, ...], Any] = {}
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
@@ -84,7 +85,7 @@ def cache_once(fn: F) -> F:
     return wrapper  # type: ignore[return-value]
 
 
-def _make_wrapper(tup: Tuple[str, str]) -> str:
+def _make_wrapper(tup: tuple[str, str]) -> str:
     export_name, kernel_name = tup
     return f"TVM_FFI_DLL_EXPORT_TYPED_FUNC({export_name}, ({kernel_name}));"
 
@@ -104,9 +105,11 @@ def _resolve_kernel_path() -> pathlib.Path:
 
 
 KERNEL_PATH = _resolve_kernel_path()
+# The shared ``moe_lb_jit/*`` headers; on the include path of every build.
+INCLUDE_PATH = KERNEL_PATH / "include"
 DEFAULT_CFLAGS = ["-std=c++20", "-O3"]
-DEFAULT_LDFLAGS: List[str] = []
-CPP_TEMPLATE_TYPE: TypeAlias = Union[int, float, str, bool, torch.dtype]
+DEFAULT_LDFLAGS: list[str] = []
+CPP_TEMPLATE_TYPE: TypeAlias = int | float | str | bool | torch.dtype
 
 
 class CPPArgList(list[str]):
@@ -165,7 +168,7 @@ class ArchInfo:
         return f"-DSGL_CUDA_ARCH={self.major * 100 + self.minor * 10}"
 
 
-_CUDA_ARCH: Optional[ArchInfo] = None
+_CUDA_ARCH: ArchInfo | None = None
 
 
 @cache_once
@@ -174,7 +177,9 @@ def _init_jit_cuda_arch_once() -> None:
     try:
         device = torch.cuda.current_device()
         major, minor = torch.cuda.get_device_capability(device)
-    except Exception:
+    # Whatever torch raises here (no device, CUDA-less build, driver error)
+    # means the same thing: no architecture to target.
+    except Exception:  # noqa: BLE001
         logger.warning("Cannot detect CUDA architecture.")
         major, minor = 0, 0  # invalid value to trigger compile error if used
     _CUDA_ARCH = ArchInfo(major, minor, "")
@@ -216,7 +221,7 @@ def _jit_compile_context():
             os.environ[env_key] = old_value
 
 
-def _get_default_target_flags() -> List[str]:
+def _get_default_target_flags() -> list[str]:
     if is_hip_runtime():
         return ["-DUSE_ROCM", "-std=c++20", "-O3"]
     return [
@@ -229,15 +234,15 @@ def _get_default_target_flags() -> List[str]:
 
 def load_jit(
     *args: str,
-    cpp_files: List[str] | None = None,
-    cuda_files: List[str] | None = None,
-    cpp_wrappers: List[Tuple[str, str]] | None = None,
-    cuda_wrappers: List[Tuple[str, str]] | None = None,
-    extra_cflags: List[str] | None = None,
-    extra_cuda_cflags: List[str] | None = None,
-    extra_ldflags: List[str] | None = None,
-    extra_include_paths: List[str] | None = None,
-    extra_dependencies: List[str] | None = None,
+    cpp_files: list[str] | None = None,
+    cuda_files: list[str] | None = None,
+    cpp_wrappers: list[tuple[str, str]] | None = None,
+    cuda_wrappers: list[tuple[str, str]] | None = None,
+    extra_cflags: list[str] | None = None,
+    extra_cuda_cflags: list[str] | None = None,
+    extra_ldflags: list[str] | None = None,
+    extra_include_paths: list[str] | None = None,
+    extra_dependencies: list[str] | None = None,
     build_directory: str | None = None,
     header_only: bool = True,
     source_root: pathlib.Path | None = None,
@@ -249,7 +254,8 @@ def load_jit(
     Kernel subpackages that ship their own ``csrc/`` directory (e.g.
     ``kernels/lplb/csrc/``) pass ``source_root=<package dir>`` so
     resolution happens against ``source_root / "csrc" / <file>``
-    instead.
+    instead. ``INCLUDE_PATH`` (the shared ``moe_lb_jit/*`` headers) is
+    always on the include path; ``extra_include_paths`` adds to it.
     """
 
     from tvm_ffi.cpp import load, load_inline
@@ -259,7 +265,9 @@ def load_jit(
     extra_cflags = extra_cflags or []
     extra_cuda_cflags = extra_cuda_cflags or []
     extra_ldflags = extra_ldflags or []
-    extra_include_paths = extra_include_paths or []
+    # A fresh list: the dependency paths appended below must not leak into
+    # the caller's.
+    extra_include_paths = [str(INCLUDE_PATH), *(extra_include_paths or [])]
 
     root = source_root.resolve() if source_root is not None else KERNEL_PATH
     cpp_files = [str((root / "csrc" / f).resolve()) for f in cpp_files]
@@ -304,7 +312,7 @@ def load_jit(
         )
 
 
-def _find_package_root(package: str) -> Optional[pathlib.Path]:
+def _find_package_root(package: str) -> pathlib.Path | None:
     try:
         spec = importlib.util.find_spec(package)
     except (ImportError, ModuleNotFoundError, ValueError):
@@ -330,7 +338,7 @@ def _find_package_root(package: str) -> Optional[pathlib.Path]:
     return None
 
 
-_REGISTERED_DEPENDENCIES: Dict[str, Callable[[], List[str]]] = {}
+_REGISTERED_DEPENDENCIES: dict[str, Callable[[], list[str]]] = {}
 
 
 def register_dependency(name: str):
@@ -342,7 +350,7 @@ def register_dependency(name: str):
     ``importlib.util.find_spec`` and the file system.
     """
 
-    def decorator(f: Callable[[], List[str]]) -> Callable[[], List[str]]:
+    def decorator(f: Callable[[], list[str]]) -> Callable[[], list[str]]:
         if name in _REGISTERED_DEPENDENCIES:
             raise ValueError(f"Dependency {name!r} already registered")
         _REGISTERED_DEPENDENCIES[name] = f
@@ -351,7 +359,7 @@ def register_dependency(name: str):
     return decorator
 
 
-def get_mathdx_root(*extra_bundled_paths: pathlib.Path) -> Optional[pathlib.Path]:
+def get_mathdx_root(*extra_bundled_paths: pathlib.Path) -> pathlib.Path | None:
     """Locate the NVIDIA Math-DX install (cuBLASDx + cuSolverDx).
 
     Searches, in order:
@@ -378,8 +386,8 @@ def get_mathdx_root(*extra_bundled_paths: pathlib.Path) -> Optional[pathlib.Path
 
 def make_mathdx_include_paths_resolver(
     *bundled_search_paths: pathlib.Path,
-    bundled_hint: Optional[str] = None,
-) -> Callable[[], List[str]]:
+    bundled_hint: str | None = None,
+) -> Callable[[], list[str]]:
     """Build an include-path resolver suitable for ``@register_dependency``.
 
     Adapters call this with their own bundled-mathdx location(s) and
@@ -388,7 +396,7 @@ def make_mathdx_include_paths_resolver(
     ``resources/mathdx`` (rather than a hard-coded SDK-relative path).
     """
 
-    def _resolver() -> List[str]:
+    def _resolver() -> list[str]:
         root = get_mathdx_root(*bundled_search_paths)
         if root is None:
             raise RuntimeError(
@@ -407,19 +415,20 @@ def make_mathdx_include_paths_resolver(
 
 
 __all__ = [
-    "ArchInfo",
-    "CPPArgList",
     "CPP_DTYPE_MAP",
     "DEFAULT_CFLAGS",
     "DEFAULT_LDFLAGS",
+    "INCLUDE_PATH",
     "KERNEL_PATH",
+    "ArchInfo",
+    "CPPArgList",
     "cache_once",
     "get_jit_cuda_arch",
     "get_mathdx_root",
-    "make_mathdx_include_paths_resolver",
     "is_hip_runtime",
     "load_jit",
     "make_cpp_args",
+    "make_mathdx_include_paths_resolver",
     "override_jit_cuda_arch",
     "register_dependency",
 ]

@@ -6,7 +6,6 @@ import triton
 import triton.language as tl
 from torch import Tensor
 
-
 _BLOCK_SIZE = 256
 
 

@@ -59,9 +59,8 @@ so overlapping execution cannot overwrite another batch's LP state.
 from __future__ import annotations
 
 import logging
-
+from collections.abc import Hashable
 from dataclasses import dataclass, replace
-from typing import Dict, Hashable, Optional, Tuple
 
 import torch
 from torch import Tensor
@@ -609,9 +608,9 @@ class LPLBL2Router(TokenRouter):
         self.ipm_iters = ipm_iters
         # Placement-derived state is authoritative only for the current
         # framework-committed snapshot of each layer.
-        self._layer_state: Dict[int, _LPLBLayerState] = {}
+        self._layer_state: dict[int, _LPLBLayerState] = {}
         # Mutable LP workspaces cannot be shared by overlapping CUDA graphs.
-        self._execution_state: Dict[Tuple[int, Hashable], _LPLBLayerState] = {}
+        self._execution_state: dict[tuple[int, Hashable], _LPLBLayerState] = {}
         # The shape set is compiled once per process, on the first layer seen.
         self._warmed_shape_set = False
 
@@ -663,7 +662,7 @@ class LPLBL2Router(TokenRouter):
     def route_tokens(
         self,
         request: RoutingRequest,
-        policy: Optional[RoutingPolicyConfig] = None,
+        policy: RoutingPolicyConfig | None = None,
     ) -> RoutingDecision:
         if policy is None:
             if len(request.policies) != 1:
