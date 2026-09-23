@@ -202,3 +202,20 @@ def test_uniform_mode_matches_the_framework_kernel_exactly():
 
         assert torch.equal(ref, ours), f"routing drifted at red{num_redundant}"
         assert torch.equal(load_ref, load_ours), f"load drifted at red{num_redundant}"
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize("uniform", [False, True])
+def test_empty_dispatch_does_not_launch_or_modify_recorded_load(dtype, uniform):
+    from moe_load_balancer.kernels.lplb.cuda_solver import dispatch_probability
+
+    ids = torch.empty((0, 2), dtype=dtype, device="cuda")
+    candidates = torch.tensor([[0, 2], [1, 3]], dtype=torch.int32, device="cuda")
+    shares = None if uniform else torch.full((2, 2), 0.5, device="cuda")
+    load = torch.tensor([1, 2, 3, 4], dtype=torch.int64, device="cuda")
+    result = dispatch_probability(ids, shares, candidates, expert_load_view=load)
+    torch.cuda.synchronize()
+    assert result.shape == ids.shape and result.dtype == ids.dtype
+    assert load.tolist() == [1, 2, 3, 4]
