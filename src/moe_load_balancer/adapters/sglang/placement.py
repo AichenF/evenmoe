@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from moe_load_balancer.core.types import (
@@ -75,6 +75,7 @@ class SGLangPlacementMaps:
     physical_to_logical_map: TensorLike
     logical_to_all_physical_map: TensorLike
     logical_to_physical_count: TensorLike
+    routing_metadata: dict[int, dict[str, Any]] = field(default_factory=dict)
 
 
 def to_placement_request(
@@ -92,15 +93,16 @@ def to_placement_request(
     """Translate SGLang-completed EPLB statistics into an MLB request.
 
     SGLang must perform recording, dump, physical-to-logical aggregation,
-    all-reduce and threshold gating before calling this function.
+    EP aggregation and threshold gating before calling this function. Coupled
+    placement preserves one logical-count sample per source EP rank.
 
     Context supplies omitted layout and policy values. Explicit arguments,
     such as ``num_nodes=1`` for flat topology, take precedence.
 
-    ``policy_metadata`` is opaque, per-policy configuration -- ``ultraep``
-    reads ``rank``/``num_nvl_ranks`` from it (its placement kernel solves
-    once per EP rank and validates the value is in range); every other MLB
-    policy ignores it, so it is safe to leave unset.
+    ``policy_metadata`` is opaque, per-policy configuration. ``ultraep``
+    reads ``rank`` to build the current source rank's quota and
+    ``num_nvl_ranks`` to describe its locality domain. Other policies leave
+    it unset.
     """
 
     if context is not None:
@@ -114,7 +116,21 @@ def to_placement_request(
         if num_nodes is None:
             num_nodes = context.parallel.nnodes
         if algorithm is None:
-            algorithm = context.config_bag("exec").moe.eplb_algorithm
+            from moe_load_balancer.core.routing_pipeline import RoutingPipeline
+
+            moe = context.config_bag("exec").moe
+            pipeline = RoutingPipeline.from_value(moe.moe_load_balancer_algorithm)
+            algorithm = pipeline.placement_policy or moe.eplb_algorithm
+        if policy_metadata is None and algorithm == "ultraep":
+            if layout["ep_size"] % context.parallel.nnodes != 0:
+                raise ValueError(
+                    "UltraEP requires the EP group to be evenly distributed "
+                    "across nodes."
+                )
+            policy_metadata = {
+                "rank": context.parallel.moe_ep_rank,
+                "num_nvl_ranks": layout["ep_size"] // context.parallel.nnodes,
+            }
     if num_physical_experts is None or num_local_physical_experts is None or num_nodes is None:
         raise ValueError("Placement requires a context or explicit expert and node counts.")
 
@@ -136,10 +152,24 @@ def to_placement_request(
 def to_sglang_maps(plan: PlacementPlan) -> SGLangPlacementMaps:
     """Translate an uncommitted MLB plan into plain SGLang mapping tensors."""
 
+    quota = plan.metadata.get("rank_quota_prefix")
+    routing_metadata = (
+        {
+            layer: {
+                "logical_to_physical_candidates": plan.logical_to_all_physical_map[layer],
+                "logical_to_physical_count": plan.logical_to_physical_count[layer],
+                "rank_quota_prefix": quota[layer],
+            }
+            for layer in range(quota.shape[0])
+        }
+        if quota is not None
+        else {}
+    )
     return SGLangPlacementMaps(
         physical_to_logical_map=plan.physical_to_logical_map,
         logical_to_all_physical_map=plan.logical_to_all_physical_map,
         logical_to_physical_count=plan.logical_to_physical_count,
+        routing_metadata=routing_metadata,
     )
 
 
@@ -172,6 +202,9 @@ def to_placement_snapshot(
     explicit_rank_map = getattr(live_metadata, "physical_to_rank_map", None)
     if explicit_rank_map is not None and getattr(explicit_rank_map, "ndim", 1) > 1:
         explicit_rank_map = explicit_rank_map[layer_id]
+    routing_metadata = getattr(live_metadata, "mlb_routing_metadata", {}).get(
+        layer_id, {}
+    )
 
     return PlacementSnapshot(
         layer_id=layer_id,
@@ -180,10 +213,17 @@ def to_placement_snapshot(
         ep_size=ep_size,
         num_local_physical_experts=num_local,
         physical_to_logical_map=live_metadata.physical_to_logical_map[layer_id],
-        logical_to_physical_candidates=live_metadata.logical_to_all_physical_map[layer_id],
-        logical_to_physical_count=live_metadata.logical_to_all_physical_map_num_valid[layer_id],
+        logical_to_physical_candidates=routing_metadata.get(
+            "logical_to_physical_candidates",
+            live_metadata.logical_to_all_physical_map[layer_id],
+        ),
+        logical_to_physical_count=routing_metadata.get(
+            "logical_to_physical_count",
+            live_metadata.logical_to_all_physical_map_num_valid[layer_id],
+        ),
         default_physical_for_logical=(
             rank_dispatch[layer_id] if rank_dispatch is not None else None
         ),
         physical_to_rank_map=explicit_rank_map,
+        metadata=routing_metadata,
     )

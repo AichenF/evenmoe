@@ -43,8 +43,8 @@ class ExpertDeploymentConfig:
     plan and the snapshot are separate objects the framework builds at different
     times, and a runtime whose committed placement has no room for extra fields
     has to thread it explicitly. MLB's vLLM adapter takes the quota as an
-    argument to ``to_placement_snapshot``; its SGLang adapter has no such channel
-    today, so ``ultraep`` is not usable there yet.
+    argument to ``to_placement_snapshot``; the SGLang adapter carries it in
+    per-layer committed placement metadata.
 
     Declared as a capability rather than inferred from the runtime's name so a
     framework that gains the plumbing only has to flip this, and so a policy that

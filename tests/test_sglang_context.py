@@ -252,3 +252,45 @@ def test_explicit_placement_values_override_context_defaults(engine):
     assert request.topology.num_groups == 2
     assert request.topology.num_nodes == 1
     assert request.policy.name == "deepseek_vec"
+    assert request.policy.metadata == {}
+
+
+def test_coupled_placement_uses_rank_and_preserves_quota(engine):
+    from moe_load_balancer import PlacementPlan
+    from moe_load_balancer.adapters.sglang import to_sglang_maps
+
+    _, ctx = engine
+    ctx.config_bag("exec").moe.moe_load_balancer_algorithm = "ultraep"
+    ctx.parallel.moe_ep_rank = 1
+    request = to_placement_request(torch.ones((2, 1, 2)), context=ctx)
+    assert request.policy.name == "ultraep"
+    assert request.policy.metadata == {"rank": 1, "num_nvl_ranks": 1}
+    candidates = torch.tensor([[[0, 2], [1, 3]]], dtype=torch.int32)
+    replica_counts = torch.tensor([[2, 2]], dtype=torch.int32)
+    quota = torch.tensor([[[1, 2], [2, 3]]], dtype=torch.int32)
+    live = ctx.resources.expert_location_metadata
+    plan = PlacementPlan(
+        physical_to_logical_map=live.physical_to_logical_map,
+        logical_to_all_physical_map=candidates,
+        logical_to_physical_count=replica_counts,
+        metadata={"rank_quota_prefix": quota},
+    )
+    maps = to_sglang_maps(plan)
+    live.logical_to_all_physical_map = torch.nn.functional.pad(
+        candidates, (0, live.num_physical_experts - candidates.shape[-1]), value=-1
+    )
+    live.mlb_routing_metadata = maps.routing_metadata
+    snapshot = to_placement_snapshot(live, 0)
+    assert live.logical_to_all_physical_map.shape[-1] == live.num_physical_experts
+    assert snapshot.logical_to_physical_candidates.data_ptr() == candidates.data_ptr()
+    assert snapshot.logical_to_physical_count.data_ptr() == replica_counts.data_ptr()
+    assert snapshot.metadata["rank_quota_prefix"].data_ptr() == quota.data_ptr()
+
+
+def test_coupled_placement_rejects_uneven_node_distribution(engine):
+    _, ctx = engine
+    ctx.config_bag("exec").moe.moe_load_balancer_algorithm = "ultraep"
+    ctx.parallel.ep_size = 4
+    ctx.parallel.nnodes = 3
+    with pytest.raises(ValueError, match="evenly distributed"):
+        to_placement_request(torch.ones((4, 1, 2)), context=ctx)
