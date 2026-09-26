@@ -283,7 +283,8 @@ def test_default_rank_counter_resolves_routing_metadata(rank_map_kind):
 
 
 @pytest.mark.unit
-def test_dynamic_waterfill_packs_rank_and_active_load_into_one_collective():
+def test_global_waterfill_packs_rank_and_active_load_into_one_collective(monkeypatch):
+    monkeypatch.setenv("WATERFILL_USE_GLOBAL_LOAD", "1")
     calls = []
     shared = _SharedRouter(calls)
     collectives = _RecordingCollectives(torch.tensor([1, 1, 0, 3]))
@@ -303,16 +304,58 @@ def test_dynamic_waterfill_packs_rank_and_active_load_into_one_collective():
         token_count=2,
         policies=(
             RoutingPolicyConfig(name="dynamic"),
-            RoutingPolicyConfig(
-                name="waterfill",
-                metadata={"load_view": "global"},
-            ),
+            RoutingPolicyConfig(name="waterfill"),
         ),
     )
 
     mlb.route_tokens(request)
 
     assert torch.equal(collectives.payloads[0], torch.tensor([1, 3, 2, 0]))
+    assert len(collectives.payloads) == 1
+    assert torch.equal(shared.seen_rank_load, torch.tensor([2, 4]))
+    assert torch.equal(shared.seen_active, torch.tensor([2, 3]))
+
+
+@pytest.mark.unit
+def test_global_rank_load_follows_the_policy_declaration_not_its_name(monkeypatch):
+    """The orchestrator issues the rank-load collective for whichever policy
+    declares ``rank_load="global"``; it never keys off the policy's name."""
+    from moe_load_balancer.core.policy import PolicyRegistry, RoutingPolicySpec
+    from moe_load_balancer.policies.registry import builtin_registry
+
+    monkeypatch.delenv("WATERFILL_USE_GLOBAL_LOAD", raising=False)
+    calls = []
+    shared = _SharedRouter(calls)
+    collectives = _RecordingCollectives(torch.tensor([1, 1, 0, 3]))
+    base = builtin_registry()
+    registry = PolicyRegistry(
+        physical_routers=base.physical_routers,
+        shared_expert_routers={
+            "custom_shared": RoutingPolicySpec(
+                "custom_shared", RoutingPhase.SHARED_EXPERT, rank_load="global"
+            ),
+        },
+        default_physical_router=base.default_physical_router,
+        placement_planners=base.placement_planners,
+    )
+    mlb = MoELoadBalancer(
+        placement_planners={},
+        routing_policies={"dynamic": _PhysicalRouter(calls), "custom_shared": shared},
+        routing_pipeline="dynamic+custom_shared",
+        collectives=collectives,
+        registry=registry,
+    )
+
+    mlb.route_tokens(
+        RoutingRequest(
+            layer_id=0,
+            logical_topk_ids=torch.tensor([[0, 1], [0, 1]]),
+            topk_weights=torch.ones((2, 2)),
+            placement=_placement(),
+            token_count=2,
+        )
+    )
+
     assert len(collectives.payloads) == 1
     assert torch.equal(shared.seen_rank_load, torch.tensor([2, 4]))
     assert torch.equal(shared.seen_active, torch.tensor([2, 3]))

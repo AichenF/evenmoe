@@ -1,327 +1,231 @@
-"""Configuration for one composed L2 routing algorithm pipeline.
-
-The serving framework supplies one algorithm expression.  MLB owns parsing,
-validation, composition order, and the capabilities implied by that expression.
-Framework adapters consume capabilities instead of branching on policy names.
-"""
+"""Parse, order, and validate one L2 policy selection."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from functools import cache
+from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
 
-from moe_load_balancer.core.types import RoutingPolicyConfig
+from moe_load_balancer.core.policy import (
+    ExpertDeploymentConfig,
+    InputTransformSpec,
+    PolicyRegistry,
+    RoutingCapabilities,
+    RoutingPolicySpec,
+)
+from moe_load_balancer.core.types import RoutingPhase, RoutingPolicyConfig
 
-_INPUT_TRANSFORMS = frozenset({"fake"})
-_REPLICA_POLICIES = frozenset({"static", "dynamic", "dynamic_random", "lplb", "ultraep"})
-_WATERFILL_POLICIES = frozenset({"waterfill", "waterfill_dynamic"})
-_ALIASES = {"lp": "lplb"}
-
-
-@dataclass(frozen=True)
-class ExpertDeploymentConfig:
-    """What a framework can tell MLB about a deployment before it starts.
-
-    Deliberately small: this is consulted while the framework is still reading
-    its configuration, so it may only contain what is known that early.
-    """
-
-    num_redundant_experts: int = 0
-    routes_shared_expert: bool = False
-    """Whether the framework can dispatch the shared expert to a chosen rank.
-
-    False on runtimes that replicate it per rank, where there is no such
-    decision to hand back.
-    """
-
-    carries_placement_metadata: bool = False
-    """Whether the framework threads ``PlacementPlan.metadata`` into the
-    committed ``PlacementSnapshot.metadata``.
-
-    An L1 policy may publish state its own L2 half needs -- ``ultraep`` puts its
-    per-replica token quota there. Nothing forces a framework to carry it: the
-    plan and the snapshot are separate objects the framework builds at different
-    times, and a runtime whose committed placement has no room for extra fields
-    has to thread it explicitly. MLB's vLLM adapter takes the quota as an
-    argument to ``to_placement_snapshot``; the SGLang adapter carries it in
-    per-layer committed placement metadata.
-
-    Declared as a capability rather than inferred from the runtime's name so a
-    framework that gains the plumbing only has to flip this, and so a policy that
-    needs the channel can ask without knowing which runtime it is under.
-
-    Defaults False: a framework that has not considered the question cannot be
-    assumed to carry the metadata, and silently dropping it degrades the policy
-    rather than failing it.
-    """
+_PHASE_ORDER = {RoutingPhase.PHYSICAL_ROUTING: 0, RoutingPhase.SHARED_EXPERT: 1}
+_DISABLED = frozenset({"", "none", "disabled"})
 
 
 @dataclass(frozen=True)
-class RoutingCapabilities:
-    """Framework-visible requirements of a configured routing pipeline.
+class _RoutingStep:
+    """One selected policy: its resolved declaration and its configuration."""
 
-    Every field exists so the framework can act on a *declaration* instead of
-    on an assumption about what a policy is. A framework that keys behaviour off
-    a policy name both taxes policies that do not need the behaviour and leaves
-    policies that do need it unable to ask.
-    """
-
-    requires_post_topk_routing: bool = False
-    requires_placement_state: bool = False
-    requires_rank_dispatch_map: bool = False
-    routes_shared_expert: bool = False
-    requires_deepep: bool = False
-
-    # -- inputs the pipeline consumes -------------------------------------
-    dispatch_fixed_by_placement: bool = False
-    """Whether the per-token answer is a pure function of the committed placement.
-
-    True means the policy's choice does not depend on the batch at all, so a
-    framework can materialise it once when a placement commits and never call
-    the pipeline per forward. ``static`` is the case: it resolves a replica per
-    logical expert from the placement, and re-deriving that on every forward
-    buys nothing.
-
-    This exists because crossing the routing boundary is not free. On vLLM the
-    call measured 426 us per layer per forward against a policy-free path that
-    costs nothing, which is 26 ms of a ~1 s forward -- the whole reason `static`
-    trailed the built-in selection it was supposed to reproduce. SGLang has no
-    such gap because its `static` is one tensor index inside its own TopK code;
-    declaring the property here lets a framework reach the same place without
-    the pipeline having to know which runtime it is talking to.
-
-    A policy that sets this must publish its answer through
-    :attr:`PlacementSnapshot.default_physical_for_logical`.
-    """
-
-    consumes_global_logical_count: bool = False
-    """Whether any policy reads the EP-wide per-logical token count.
-
-    Distinct from ``requires_post_topk_routing``: a replica policy can run
-    without ever looking at the load, and gathering the count for it costs a
-    collective per layer per forward that is then discarded.
-
-    This is the pipeline-level declaration a framework adapter reads once, at
-    configuration time, to decide whether to gather the count at all. The
-    orchestrator's own per-request, per-router check of the same underlying
-    fact is :class:`~moe_load_balancer.core.l2.GlobalLogicalCountConsumer`.
-    """
-
-    # -- runtime properties the framework has to respect -------------------
-    supports_concurrent_microbatches: bool = True
-    """False when policies keep per-layer state that concurrent micro-batches
-    would clobber."""
-
-    graph_stability: str = "stable"
-    """``stable``, or ``realloc_on_placement_change`` when a placement update
-    can replace policy tensors and invalidate a captured graph."""
+    spec: RoutingPolicySpec
+    config: RoutingPolicyConfig
+    implicit: bool = False
 
 
 @dataclass(frozen=True)
 class RoutingPipeline:
-    """Validated, canonical L2 routing configuration.
+    """The selected L2 policies in execution order."""
 
-    Expressions use ``+`` for composition, for example ``lplb+waterfill``.
-    Bare ``waterfill`` expands to ``static+waterfill`` so the framework only
-    needs one selection parameter even when redundant experts are enabled.
-    ``waterfill_dynamic`` selects the collective-backed Waterfill load view.
-    """
+    steps: tuple[_RoutingStep, ...] = ()
+    input_transform: InputTransformSpec | None = None
+    capabilities: RoutingCapabilities = field(init=False)
 
-    name: str
-    policies: tuple[str, ...]
-    post_topk_policies: tuple[RoutingPolicyConfig, ...]
-    input_transform: str | None
-    capabilities: RoutingCapabilities
-    placement_policy: str | None = None
-    """The L1 placement policy this L2 selection requires, if any.
+    def __post_init__(self) -> None:
+        steps = tuple(sorted(self.steps, key=lambda step: _PHASE_ORDER[step.spec.phase]))
+        phases = [step.spec.phase for step in steps]
+        if len(phases) != len(set(phases)):
+            raise ValueError(
+                "At most one physical-routing policy and one shared-expert policy are supported."
+            )
 
-    Set only when a replica policy's dispatch decision is meaningless without
-    a specific placement algorithm's output -- ``ultraep``'s L2 router reads a
-    quota table that only its own L1 policy produces. ``None`` for policies
-    that work with whatever placement the framework already committed.
-    """
+        names = {step.spec.name for step in steps}
+        for step in steps:
+            conflicts = step.spec.incompatible_with & names
+            if conflicts:
+                raise ValueError(
+                    f"{step.spec.name} cannot be combined with {sorted(conflicts)}."
+                )
+        required_l1 = {step.spec.required_placement for step in steps} - {None}
+        if len(required_l1) > 1:
+            raise ValueError("Routing policies require incompatible L1 placement policies.")
 
-    def is_applicable(self, topology: ExpertDeploymentConfig) -> str | None:
-        """Why this pipeline cannot act on a deployment, or None if it can.
+        object.__setattr__(self, "steps", steps)
+        object.__setattr__(self, "capabilities", _merge_capabilities(steps))
 
-        Returns a reason rather than a bool so a framework that disables the
-        pipeline can tell the operator *what* it disabled and why. A silent
-        bool would turn a diagnosable configuration into a mystery.
+    @property
+    def name(self) -> str:
+        parts = [self.input_transform.name] if self.input_transform else []
+        parts += [
+            step.spec.name
+            for step in self.steps
+            if self.input_transform is None or not step.implicit
+        ]
+        return "+".join(parts) or "disabled"
 
-        Applicability is per policy, not per layer: LPLB needs replicated
-        experts to have a split to decide, Waterfill needs the framework to
-        dispatch the shared expert at all, and neither condition follows from
-        the other. Deciding both from one framework-side assumption is how a
-        policy that had work to do gets switched off.
+    @property
+    def policies(self) -> tuple[str, ...]:
+        return tuple(step.spec.name for step in self.steps)
+
+    @property
+    def post_topk_policies(self) -> tuple[RoutingPolicyConfig, ...]:
+        """The selected policy configs in execution order.
+
+        TODO: Orchestrator.route_tokens iterates these configs and then looks
+        the resolved spec back up through ``spec_for``. Make it iterate
+        ``steps`` directly (each step already pairs spec and config) and build
+        a request-level override with ``from_value(request.policies)``; then
+        this property, ``spec_for``, and ``Orchestrator._policy_spec`` go away.
+        The one open question is routers registered under a name with no
+        declaration (see the ``"custom"`` router in tests/test_orchestrator.py):
+        ``from_value`` rejects unknown names, so that path must either be
+        dropped or given a synthesised spec.
         """
 
-        if "lplb" in self.policies and topology.num_redundant_experts == 0:
-            return (
-                "lplb divides a logical expert's traffic among its replicas, "
-                "and this deployment has no redundant experts"
-            )
-        if "ultraep" in self.policies and topology.num_redundant_experts == 0:
-            return (
-                "ultraep places redundant replicas by quota, and this "
-                "deployment has no redundant experts"
-            )
-        if "ultraep" in self.policies and not topology.carries_placement_metadata:
-            return (
-                "ultraep's L2 router reads the per-replica token quota its own "
-                "L1 policy publishes on PlacementPlan.metadata, and this "
-                "framework does not thread that metadata into the committed "
-                "PlacementSnapshot -- without it every token routes to replica "
-                "0 and the policy does nothing"
-            )
-        if self.capabilities.routes_shared_expert and not topology.routes_shared_expert:
-            return (
-                "waterfill assigns the shared expert to a rank, and this "
-                "runtime does not dispatch the shared expert"
-            )
+        return tuple(step.config for step in self.steps)
+
+    def spec_for(self, name: str) -> RoutingPolicySpec | None:
+        """The resolved declaration of one selected policy, if it is selected.
+
+        Transitional; see the TODO on ``post_topk_policies``.
+        """
+
+        return next((step.spec for step in self.steps if step.spec.name == name), None)
+
+    @property
+    def placement_policy(self) -> str | None:
+        return next(
+            (
+                step.spec.required_placement
+                for step in self.steps
+                if step.spec.required_placement is not None
+            ),
+            None,
+        )
+
+    def is_applicable(self, deployment: ExpertDeploymentConfig) -> str | None:
+        for step in self.steps:
+            reason = step.spec.is_applicable(deployment)
+            if reason is not None:
+                return reason
         return None
 
     @classmethod
-    def default_replica_routing(cls) -> RoutingPipeline:
-        """Return the deterministic replica policy used with EPLB metadata."""
+    def default_replica_routing(
+        cls, *, registry: PolicyRegistry | None = None
+    ) -> RoutingPipeline:
+        if registry is None:
+            from moe_load_balancer.policies.registry import builtin_registry
 
-        return cls.from_value("static")
+            registry = builtin_registry()
+        if registry.default_physical_router is None:
+            raise ValueError("The policy registry has no default physical router.")
+        return cls.from_value(registry.default_physical_router, registry=registry)
 
     @classmethod
-    def from_value(cls, value: RoutingPipeline | str | None) -> RoutingPipeline:
+    def from_value(
+        cls,
+        value: RoutingPipeline | str | Sequence[RoutingPolicyConfig | str] | None,
+        *,
+        registry: PolicyRegistry | None = None,
+    ) -> RoutingPipeline:
         if isinstance(value, cls):
             return value
-        if value is not None and not isinstance(value, str):
+        if registry is None:
+            from moe_load_balancer.policies.registry import builtin_registry
+
+            registry = builtin_registry()
+        if value is None or (isinstance(value, str) and value.strip().lower() in _DISABLED):
+            return cls()
+
+        if isinstance(value, str):
+            raw = tuple(part.strip().lower() for part in value.split("+"))
+            if any(not part for part in raw):
+                raise ValueError(f"Invalid routing algorithm expression {value!r}.")
+            configs = tuple(RoutingPolicyConfig(name=part) for part in raw)
+        elif isinstance(value, (tuple, list)):
+            configs = tuple(RoutingPolicyConfig.from_value(item) for item in value)
+        else:
             raise TypeError(
-                "RoutingPipeline.from_value expects RoutingPipeline, str, or None, "
-                f"got {type(value).__name__}."
-            )
-        return cls._from_string(value)
-
-    @classmethod
-    @cache
-    def _from_string(cls, value: str | None) -> RoutingPipeline:
-        if value is None:
-            return cls(
-                name="disabled",
-                policies=(),
-                post_topk_policies=(),
-                input_transform=None,
-                capabilities=RoutingCapabilities(),
-            )
-        if value.strip().lower() in {"", "disabled", "none"}:
-            return cls(
-                name="disabled",
-                policies=(),
-                post_topk_policies=(),
-                input_transform=None,
-                capabilities=RoutingCapabilities(),
+                "Routing configuration must be a string, a sequence of policy configs, "
+                f"or a RoutingPipeline; got {type(value).__name__}."
             )
 
-        raw = tuple(part.strip().lower() for part in value.split("+"))
-        if any(not part for part in raw):
-            raise ValueError(f"Invalid routing algorithm expression {value!r}.")
-        normalized = tuple(_ALIASES.get(part, part) for part in raw)
-        supported = _INPUT_TRANSFORMS | _REPLICA_POLICIES | _WATERFILL_POLICIES
-        unknown = sorted(set(normalized) - supported)
-        if unknown:
-            raise ValueError(
-                f"Unknown routing algorithm(s) {unknown}; supported algorithms are "
-                f"{sorted(supported)}. Use '+' to compose algorithms."
-            )
-        if len(set(normalized)) != len(normalized):
-            raise ValueError(f"Routing algorithm expression contains duplicates: {value!r}.")
+        transform: InputTransformSpec | None = None
+        steps: list[_RoutingStep] = []
+        selected: set[str] = set()
+        for config in configs:
+            name = config.name.strip().lower()
+            if name in registry.input_transforms:
+                if transform is not None:
+                    raise ValueError("At most one input transform is supported.")
+                if config.enabled_stages is not None or config.metadata:
+                    raise ValueError("Input transforms do not accept stage gates or metadata.")
+                transform = registry.input_transforms[name]
+                continue
 
-        transforms = tuple(policy for policy in normalized if policy in _INPUT_TRANSFORMS)
-        replica = tuple(policy for policy in normalized if policy in _REPLICA_POLICIES)
-        waterfill = tuple(policy for policy in normalized if policy in _WATERFILL_POLICIES)
-        if len(transforms) > 1:
-            raise ValueError("A routing pipeline can contain at most one input transform.")
-        if len(replica) > 1:
-            raise ValueError(
-                "A routing pipeline can contain at most one physical-replica algorithm."
-            )
-        if len(waterfill) > 1:
-            raise ValueError("A routing pipeline can contain at most one Waterfill mode.")
-
-        input_transform = transforms[0] if transforms else None
-        explicit_replica = replica[0] if replica else None
-        # Fake is an experimental pre-TopK workload transform.  Its historical
-        # physical routing behavior is Dynamic when no explicit replica router
-        # is present.  Bare Waterfill keeps Static as its deterministic default.
-        replica_policy = explicit_replica
-        if replica_policy is None and input_transform == "fake":
-            replica_policy = "dynamic"
-        if replica_policy is None and waterfill:
-            replica_policy = "static"
-        waterfill_policy = waterfill[0] if waterfill else None
-        if replica_policy == "lplb" and waterfill_policy == "waterfill_dynamic":
-            raise ValueError(
-                "waterfill_dynamic cannot follow lplb: LPLB already produces the "
-                "global routed-load view consumed by static Waterfill."
-            )
-
-        execution_policies = tuple(
-            policy for policy in (replica_policy, waterfill_policy) if policy is not None
-        )
-        canonical_parts = []
-        if input_transform is not None:
-            canonical_parts.append(input_transform)
-        if explicit_replica is not None:
-            canonical_parts.append(explicit_replica)
-        elif input_transform is None and replica_policy is not None:
-            canonical_parts.append(replica_policy)
-        if waterfill_policy is not None:
-            canonical_parts.append(waterfill_policy)
-        canonical = "+".join(canonical_parts)
-
-        post_topk = []
-        if replica_policy is not None:
-            post_topk.append(RoutingPolicyConfig(name=replica_policy))
-        if waterfill_policy is not None:
-            post_topk.append(
-                RoutingPolicyConfig(
-                    name="waterfill",
-                    metadata={
-                        "load_view": (
-                            "global" if waterfill_policy == "waterfill_dynamic" else "local"
-                        )
-                    },
+            spec = registry.lookup(name)
+            if spec is None:
+                raise ValueError(
+                    f"Unknown routing algorithm {name!r}; supported algorithms are "
+                    f"{list(registry.names)}."
                 )
-            )
+            if spec.name in selected:
+                raise ValueError(f"Routing algorithm {spec.name!r} is selected twice.")
+            selected.add(spec.name)
+            if config.name != spec.name:
+                config = replace(config, name=spec.name)
+            steps.append(_RoutingStep(spec.resolve(config), config))
 
-        # Only LPLB solves against the EP-wide load; the other replica policies
-        # decide from placement alone, and Waterfill works from the routed rank
-        # load the orchestrator derives from this step's own topk_ids.
-        # Declaring that here is what lets a framework skip the collective
-        # rather than gather it for every post-TopK policy.
-        consumes_count = replica_policy == "lplb"
-        capabilities = RoutingCapabilities(
-            requires_post_topk_routing=bool(post_topk),
-            requires_placement_state=replica_policy == "lplb",
-            requires_rank_dispatch_map=replica_policy == "static",
-            # static decides from placement alone, so the framework may bake
-            # its answer in at commit time instead of paying the boundary on
-            # every forward -- but only when static is the whole pipeline:
-            # `waterfill` expands to `static+waterfill`, whose shared-expert
-            # decision depends on the batch's load and is made in that call.
-            dispatch_fixed_by_placement=(
-                replica_policy == "static" and waterfill_policy is None
-            ),
-            routes_shared_expert=waterfill_policy is not None,
-            requires_deepep=waterfill_policy is not None or replica_policy == "ultraep",
-            consumes_global_logical_count=consumes_count,
-            supports_concurrent_microbatches=replica_policy not in ("lplb", "ultraep"),
-            graph_stability=(
-                "realloc_on_placement_change"
-                if replica_policy in ("lplb", "ultraep")
-                else "stable"
-            ),
-        )
-        return cls(
-            name=canonical,
-            policies=execution_policies,
-            post_topk_policies=tuple(post_topk),
-            input_transform=input_transform,
-            capabilities=capabilities,
-            placement_policy="ultraep" if replica_policy == "ultraep" else None,
-        )
+        if steps or transform:
+            has_physical = any(
+                step.spec.phase is RoutingPhase.PHYSICAL_ROUTING for step in steps
+            )
+            if not has_physical:
+                default_name = (
+                    transform.physical_routing
+                    if transform is not None
+                    else registry.default_physical_router
+                )
+                if default_name is None:
+                    raise ValueError("The policy registry has no default physical router.")
+                default = registry.physical_routers.get(default_name)
+                if default is None:
+                    raise ValueError(
+                        f"Default physical router {default_name!r} is not registered."
+                    )
+                config = RoutingPolicyConfig(name=default.name)
+                steps.append(_RoutingStep(default.resolve(config), config, implicit=True))
+
+        return cls(steps=tuple(steps), input_transform=transform)
+
+
+def _merge_capabilities(steps: Sequence[_RoutingStep]) -> RoutingCapabilities:
+    specs = [step.spec for step in steps]
+    return RoutingCapabilities(
+        requires_post_topk_routing=bool(steps),
+        requires_placement_state=any(spec.requires_placement_state for spec in specs),
+        requires_rank_dispatch_map=any(spec.requires_rank_dispatch_map for spec in specs),
+        routes_shared_expert=any(
+            step.spec.phase is RoutingPhase.SHARED_EXPERT for step in steps
+        ),
+        requires_deepep=any(spec.requires_deepep for spec in specs),
+        # An input transform only perturbs the pre-TopK stimulus; it does not
+        # make the logical->physical answer depend on the batch, so ``fake+static``
+        # stays a deterministic, placement-fixed dispatch.
+        dispatch_fixed_by_placement=bool(steps)
+        and all(spec.dispatch_fixed_by_placement for spec in specs),
+        consumes_global_logical_count=any(spec.logical_count == "global" for spec in specs),
+        supports_concurrent_microbatches=all(
+            spec.supports_concurrent_microbatches for spec in specs
+        ),
+        graph_stability=(
+            "realloc_on_placement_change"
+            if any(spec.graph_stability == "realloc_on_placement_change" for spec in specs)
+            else "stable"
+        ),
+    )

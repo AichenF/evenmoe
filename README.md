@@ -111,9 +111,9 @@ The main source directories are:
 
 | Path | Responsibility |
 |---|---|
-| `src/moe_load_balancer/core/` | Public request/result types, protocols, and the unified orchestrator. |
+| `src/moe_load_balancer/core/` | Public request/result types, protocols, the policy declaration schema, and the policy-agnostic orchestrator. |
 | `src/moe_load_balancer/policies/l1/` | Framework-independent placement algorithms. |
-| `src/moe_load_balancer/policies/l2/` | Framework-independent routing policies. |
+| `src/moe_load_balancer/policies/l2/` | Framework-independent routing policies, each with its own `RoutingPolicySpec` declaration; `policies/registry.py` lists the built-ins. |
 | `src/moe_load_balancer/kernels/` | Triton and CUDA execution implementations. |
 | `src/moe_load_balancer/adapters/sglang/` | Data translations and stateless SGLang context integration. |
 | `src/moe_load_balancer/adapters/vllm/` | Stateless translation between vLLM and MLB values. |
@@ -195,8 +195,8 @@ mlb = MoELoadBalancer.from_algorithm(
 ```
 
 Supported expressions include `static`, `dynamic`, `fake`, `lplb`,
-`waterfill`, `waterfill_dynamic`, and combinations such as
-`lplb+waterfill`. Bare `waterfill` expands to `static+waterfill`, so redundant
+`waterfill`, and combinations such as `lplb+waterfill`. Bare `waterfill`
+expands to `static+waterfill`, so redundant
 experts still receive deterministic physical routing without a second
 selection parameter. `lp` remains an input alias for `lplb`.
 
@@ -211,13 +211,35 @@ count, and a generic EP collective adapter. MLB creates algorithm-specific
 counts, packs compatible payloads, and decides when to request a sum; framework
 Glue does not branch on algorithm names.
 
-`dynamic+waterfill_dynamic` packs routed-rank load and active-token count into
-one collective. `lplb+waterfill` performs one logical-count collective, then
-derives Waterfill's planned global rank load from the LPLB solution, so it does
-not issue a second collective.
+Neither does `core/`. Every L2 policy publishes one `RoutingPolicySpec` next
+to its router (`policies/l2/<name>.py`) declaring its phase, the data views it
+consumes, the capabilities it imposes on the framework, how it is built from a
+`RouterBuildContext`, and any policy it cannot be combined with. L1 placement
+policies are registered the same way, as name-to-planner factories.
+`policies/registry.py` lists the built-ins for both layers; `RoutingPipeline`
+and `MoELoadBalancer` only read that registry, so adding a policy touches no
+file under `core/`. Extra keyword arguments to `from_algorithm` are forwarded
+to every policy's builder as `RouterBuildContext.options` (for example
+`lplb_kernels=` to inject a kernel backend).
 
-Set `LPLB_USE_LOCAL_COUNT=1` before constructing `MoELoadBalancer` to skip
-MLB's LPLB count all-reduce and approximate the global distribution with local
+`lplb+waterfill` performs one logical-count collective, then derives
+Waterfill's planned global rank load from the LPLB solution, so it does not
+issue a second collective.
+
+Whether a policy consumes the local or the EP-wide view of its input is the
+policy's own declaration (`RoutingPolicySpec.logical_count` /
+`RoutingPolicySpec.rank_load`); the orchestrator issues the collective only
+when a policy declares the global view. Declarations are resolved once, when
+the pipeline is built, so set the switches below before constructing
+`MoELoadBalancer`.
+
+Set `WATERFILL_USE_GLOBAL_LOAD=1` to make Waterfill declare the global view and
+collect routed-rank load and active-token count across the EP group. The
+default is local load (`0`). This mode cannot currently follow LPLB because all
+ranks are not yet guaranteed to enter the second collective.
+
+Set `LPLB_USE_LOCAL_COUNT=1` to make LPLB declare the local view, skipping
+MLB's count all-reduce and approximating the global distribution with local
 token counts. Default: `0` (global counts). Explicitly supplied
 `RoutingRequest.global_logical_count` takes precedence.
 

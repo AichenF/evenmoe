@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 
@@ -10,7 +9,13 @@ from moe_load_balancer.core.l2 import (
     RoutingCollectives,
     TokenRouter,
 )
-from moe_load_balancer.core.routing_pipeline import RoutingCapabilities, RoutingPipeline
+from moe_load_balancer.core.policy import (
+    PolicyRegistry,
+    RouterBuildContext,
+    RoutingCapabilities,
+    RoutingPolicySpec,
+)
+from moe_load_balancer.core.routing_pipeline import RoutingPipeline
 from moe_load_balancer.core.types import (
     PlacementPlan,
     PlacementPolicyConfig,
@@ -22,7 +27,6 @@ from moe_load_balancer.core.types import (
     RoutingRequest,
     TensorLike,
 )
-from moe_load_balancer.kernels.lplb.protocol import LPLBKernels
 
 RankLoadCounter = Callable[[object, PlacementSnapshot | None, RoutingPolicyConfig], object]
 
@@ -45,24 +49,25 @@ class MoELoadBalancer:
         placement_policy: PlacementPolicyConfig | str | None = None,
         routing_pipeline: RoutingPipeline | str | None = None,
         collectives: RoutingCollectives | None = None,
+        registry: PolicyRegistry | None = None,
     ) -> None:
-        if placement_planners is None:
-            from moe_load_balancer.policies.l1.eplb import (
-                SUPPORTED_PLACEMENT_POLICIES,
-                EPLBPlacementPlanner,
-            )
-            from moe_load_balancer.policies.l1.ultraep import UltraEPPlacementPolicy
+        if registry is None:
+            from moe_load_balancer.policies.registry import builtin_registry
 
+            registry = builtin_registry()
+        self._registry = registry
+        if placement_planners is None:
             placement_planners = {
-                name: EPLBPlacementPlanner(name) for name in SUPPORTED_PLACEMENT_POLICIES
+                name: build() for name, build in registry.placement_planners.items()
             }
-            placement_planners["ultraep"] = UltraEPPlacementPolicy()
         if rank_load_counter is None:
             rank_load_counter = _count_routed_per_rank
         self._placement_planners = dict(placement_planners)
         self._routing_policies = dict(routing_policies or {})
         self._rank_load_counter = rank_load_counter
-        self._routing_pipeline = RoutingPipeline.from_value(routing_pipeline)
+        self._routing_pipeline = RoutingPipeline.from_value(
+            routing_pipeline, registry=registry
+        )
         configured_placement = PlacementPolicyConfig.from_value(
             PlacementPolicyConfig.DISABLED
             if placement_policy is None
@@ -84,7 +89,6 @@ class MoELoadBalancer:
         # RoutingRequest.policies against the configured L1 policy.
         self._configured_placement_policy = configured_placement
         self._collectives = collectives
-        self._use_lplb_local_count = os.environ.get("LPLB_USE_LOCAL_COUNT", "0") == "1"
 
     @classmethod
     def from_algorithm(
@@ -94,53 +98,37 @@ class MoELoadBalancer:
         ep_size: int,
         source_rank: int,
         experts_per_rank: int,
-        lplb_kernels: LPLBKernels | None = None,
         collectives: RoutingCollectives | None = None,
+        registry: PolicyRegistry | None = None,
+        **options: object,
     ) -> MoELoadBalancer:
-        """Build the MLB-owned implementations for one algorithm expression."""
+        """Build the routers one algorithm expression selects.
 
-        pipeline = RoutingPipeline.from_value(algorithm)
+        Each selected policy constructs its own router through
+        ``RoutingPolicySpec.build_router``; ``options`` is handed to every
+        builder for policy-specific injections (for example ``lplb_kernels``).
+        """
+
+        pipeline = RoutingPipeline.from_value(algorithm, registry=registry)
+        context = RouterBuildContext(
+            ep_size=ep_size,
+            source_rank=source_rank,
+            experts_per_rank=experts_per_rank,
+            options=options,
+        )
         routers: dict[str, TokenRouter] = {}
-        policy_names = {policy.name for policy in pipeline.post_topk_policies}
-        if "static" in policy_names:
-            from moe_load_balancer.policies.l2.replica import StaticL2Router
-
-            routers["static"] = StaticL2Router()
-        if "dynamic" in policy_names:
-            from moe_load_balancer.policies.l2.replica import DynamicL2Router
-
-            routers["dynamic"] = DynamicL2Router()
-        if "dynamic_random" in policy_names:
-            from moe_load_balancer.policies.l2.replica import DynamicRandomL2Router
-
-            routers["dynamic_random"] = DynamicRandomL2Router()
-        if "lplb" in policy_names:
-            from moe_load_balancer.policies.l2.lplb import LPLBL2Router
-
-            if lplb_kernels is None:
-                from moe_load_balancer.kernels.lplb import CUDALPLBKernels
-
-                lplb_kernels = CUDALPLBKernels()
-            routers["lplb"] = LPLBL2Router(
-                kernels=lplb_kernels,
-                num_gpus=ep_size,
-            )
-        if "waterfill" in policy_names:
-            from moe_load_balancer.policies.l2.waterfill import WaterfillL2Router
-
-            routers["waterfill"] = WaterfillL2Router(
-                source_rank=source_rank,
-                world_size=ep_size,
-                experts_per_rank=experts_per_rank,
-            )
-        if "ultraep" in policy_names:
-            from moe_load_balancer.policies.l2.ultraep import UltraEPL2Router
-
-            routers["ultraep"] = UltraEPL2Router()
+        for step in pipeline.steps:
+            if step.spec.build_router is None:
+                raise ValueError(
+                    f"Routing policy {step.spec.name!r} does not declare build_router; "
+                    "construct MoELoadBalancer with an explicit routing_policies mapping."
+                )
+            routers[step.spec.name] = step.spec.build_router(context)
         return cls(
             routing_policies=routers,
             routing_pipeline=pipeline,
             collectives=collectives,
+            registry=registry,
         )
 
     @property
@@ -158,6 +146,21 @@ class MoELoadBalancer:
         if self._configured_placement_policy.is_disabled:
             return None
         return self._configured_placement_policy.name
+
+    def _policy_spec(self, config: RoutingPolicyConfig) -> RoutingPolicySpec | None:
+        """The declaration for one executing L2 policy, if it has one.
+
+        The configured pipeline already resolved its specs; request-time
+        overrides fall back to the registry. A router registered under a name
+        with no declaration (test doubles, out-of-tree experiments) gets
+        ``None`` and the default data views.
+        """
+
+        spec = self._routing_pipeline.spec_for(config.name)
+        if spec is not None:
+            return spec
+        spec = self._registry.lookup(config.name)
+        return None if spec is None else spec.resolve(config)
 
     def on_placement_committed(self, placement: PlacementSnapshot) -> None:
         """Notify active policies that a framework placement was committed.
@@ -258,13 +261,10 @@ class MoELoadBalancer:
         MLB without moving framework-owned TopK selection into MLB.
         """
 
-        from moe_load_balancer.policies.l2.replica import transform_topk_inputs
-
-        return transform_topk_inputs(
-            self._routing_pipeline.input_transform,
-            router_logits,
-            correction_bias,
-        )
+        transform = self._routing_pipeline.input_transform
+        if transform is None:
+            return router_logits, correction_bias
+        return transform.apply(router_logits, correction_bias)
 
     def route_tokens(self, request: RoutingRequest) -> RoutingDecision:
         """Run physical routing and shared-expert policies in order."""
@@ -331,15 +331,13 @@ class MoELoadBalancer:
                         policy_config,
                     )
 
-                load_view = policy_config.metadata.get("load_view", "local")
-                if load_view == "global":
-                    routed_rank_load, active_rank_token_count = self._global_waterfill_load(
+                spec = self._policy_spec(policy_config)
+                if spec is not None and spec.rank_load == "global":
+                    routed_rank_load, active_rank_token_count = self._global_rank_load(
                         routed_rank_load, request
                     )
-                elif load_view == "local":
-                    active_rank_token_count = None
                 else:
-                    raise ValueError(f"Unknown Waterfill load view {load_view!r}.")
+                    active_rank_token_count = None
 
                 policy_request = replace(
                     request,
@@ -395,6 +393,10 @@ class MoELoadBalancer:
         counting would buy an EP collective per layer per forward whose result
         is discarded.
 
+        Whether the count is the EP-wide sum or this rank's own histogram is
+        the policy's declaration (``RoutingPolicySpec.logical_count``), not an
+        orchestrator decision.
+
         A framework that already holds the count passes it in and none of this
         runs: vLLM accumulates per-layer counts inside its CUDA graph and
         all-reduces once per step for every layer at once, because a collective
@@ -406,40 +408,42 @@ class MoELoadBalancer:
             return None
         if not router.needs_global_logical_count(request):
             return None
-        return self._global_logical_count(
-            request,
-            use_local_count=self._use_lplb_local_count and policy.name == "lplb",
-        )
+        spec = self._policy_spec(policy)
+        use_local_count = spec is not None and spec.logical_count == "local"
+        return self._logical_count(request, use_local_count=use_local_count)
 
-    def _global_logical_count(
+    def _logical_count(
         self, request: RoutingRequest, *, use_local_count: bool = False
     ) -> object:
         if request.placement is None:
-            raise ValueError("LPLB routing requires a committed placement.")
+            raise ValueError("Logical-count routing requires a committed placement.")
         from moe_load_balancer.kernels.ops.counting import count_logical_experts
 
         local_count = count_logical_experts(
             request.logical_topk_ids,
             request.placement.num_logical_experts,
         )
-        # Local-count LPLB approximates the global distribution with this
-        # rank's own float32 histogram, without scaling by the EP size.
+        # A policy declaring the local view approximates the global
+        # distribution with this rank's own float32 histogram, without scaling
+        # by the EP size.
         if use_local_count:
             return local_count
         return self._all_reduce_sum(local_count, request.placement.ep_size)
 
-    def _global_waterfill_load(
+    def _global_rank_load(
         self,
         local_routed_rank_load: object,
         request: RoutingRequest,
     ) -> tuple[object, object]:
+        """AllReduce per-rank load and per-rank active token count in one collective."""
+
         if request.placement is None:
-            raise ValueError("Global Waterfill routing requires a committed placement.")
+            raise ValueError("Global rank-load routing requires a committed placement.")
 
         import torch
 
         if not isinstance(local_routed_rank_load, torch.Tensor):
-            raise TypeError("Global Waterfill rank load must be a torch.Tensor.")
+            raise TypeError("Global rank load must be a torch.Tensor.")
         world_size = request.placement.ep_size
         rank = 0 if world_size == 1 and self._collectives is None else self._collective_rank()
         if not 0 <= rank < world_size:
@@ -462,7 +466,7 @@ class MoELoadBalancer:
 
         reduced = self._all_reduce_sum(payload, world_size)
         if not isinstance(reduced, torch.Tensor):
-            raise TypeError("Global Waterfill AllReduce must return a torch.Tensor.")
+            raise TypeError("Global rank-load AllReduce must return a torch.Tensor.")
         return reduced[:world_size], reduced[world_size:]
 
     def _all_reduce_sum(self, payload: object, expected_world_size: int) -> object:

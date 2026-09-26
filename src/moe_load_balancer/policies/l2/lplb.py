@@ -59,6 +59,7 @@ so overlapping execution cannot overwrite another batch's LP state.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Hashable
 from dataclasses import dataclass, replace
 
@@ -66,6 +67,7 @@ import torch
 from torch import Tensor
 
 from moe_load_balancer.core.l2 import TokenRouter
+from moe_load_balancer.core.policy import RouterBuildContext, RoutingPolicySpec
 from moe_load_balancer.core.types import (
     PlacementSnapshot,
     RoutingDecision,
@@ -928,3 +930,36 @@ class LPLBL2Router(TokenRouter):
             x=torch.empty_like(base.x),
             log2phy_prob=torch.empty_like(base.log2phy_prob),
         )
+
+
+def _configure(config: RoutingPolicyConfig) -> RoutingPolicySpec:
+    # TODO: Replace LPLB_USE_LOCAL_COUNT with an explicit RoutingPolicyConfig
+    # option read from ``config``.
+    del config
+    if os.environ.get("LPLB_USE_LOCAL_COUNT", "0") == "1":
+        return replace(ROUTING_POLICY, logical_count="local")
+    return ROUTING_POLICY
+
+
+def _build_router(context: RouterBuildContext) -> LPLBL2Router:
+    kernels = context.options.get("lplb_kernels")
+    if kernels is None:
+        from moe_load_balancer.kernels.lplb import CUDALPLBKernels
+
+        kernels = CUDALPLBKernels()
+    elif not isinstance(kernels, LPLBKernels):
+        raise TypeError("lplb_kernels must implement LPLBKernels.")
+    return LPLBL2Router(kernels=kernels, num_gpus=context.ep_size)
+
+
+ROUTING_POLICY = RoutingPolicySpec(
+    "lplb",
+    LPLBL2Router.phase,
+    logical_count="global",
+    requires_placement_state=True,
+    supports_concurrent_microbatches=False,
+    graph_stability="realloc_on_placement_change",
+    requires_redundancy=True,
+    configure=_configure,
+    build_router=_build_router,
+)

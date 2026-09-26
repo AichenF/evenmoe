@@ -7,11 +7,15 @@ from moe_load_balancer.core.l2 import (
     TokenRouter,
 )
 from moe_load_balancer.core.orchestrator import MoELoadBalancer
-from moe_load_balancer.core.routing_pipeline import (
+from moe_load_balancer.core.policy import (
     ExpertDeploymentConfig,
+    InputTransformSpec,
+    PolicyRegistry,
+    RouterBuildContext,
     RoutingCapabilities,
-    RoutingPipeline,
+    RoutingPolicySpec,
 )
+from moe_load_balancer.core.routing_pipeline import RoutingPipeline
 from moe_load_balancer.core.types import (
     PlacementPlan,
     PlacementPolicyConfig,
@@ -31,6 +35,7 @@ from moe_load_balancer.kernels.lplb import LPLBKernels
 
 __all__ = [
     "ExpertDeploymentConfig",
+    "InputTransformSpec",
     "LPLBKernels",
     "MoELoadBalancer",
     "PlacementPlan",
@@ -40,6 +45,8 @@ __all__ = [
     "PlacementSnapshot",
     "PlacementStats",
     "PlacementTopology",
+    "PolicyRegistry",
+    "RouterBuildContext",
     "RoutingCapabilities",
     "RoutingCollectives",
     "RoutingDecision",
@@ -48,6 +55,7 @@ __all__ = [
     "RoutingPhase",
     "RoutingPipeline",
     "RoutingPolicyConfig",
+    "RoutingPolicySpec",
     "RoutingRequest",
     "RoutingStage",
     "TensorLike",

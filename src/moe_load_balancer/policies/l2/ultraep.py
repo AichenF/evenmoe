@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 
 from moe_load_balancer.core.l2 import TokenRouter
+from moe_load_balancer.core.policy import RoutingPolicySpec
 from moe_load_balancer.core.types import (
     RoutingDecision,
     RoutingPhase,
@@ -98,3 +99,17 @@ class UltraEPL2Router(TokenRouter):
             topk_weights=request.topk_weights,
             metadata={"policy": policy.name},
         )
+
+
+ROUTING_POLICY = RoutingPolicySpec(
+    "ultraep",
+    UltraEPL2Router.phase,
+    requires_placement_state=True,
+    requires_deepep=True,
+    supports_concurrent_microbatches=False,
+    graph_stability="realloc_on_placement_change",
+    required_placement="ultraep",
+    requires_redundancy=True,
+    requires_placement_metadata=True,
+    build_router=lambda context: UltraEPL2Router(),
+)
