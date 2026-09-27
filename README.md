@@ -1,5 +1,7 @@
 # MoE Load Balancer
 
+> **Experimental.** This is an early release. Interfaces and behavior may change between versions.
+
 `moe-load-balancer` is an alpha-stage Python library for framework-decoupled
 Mixture-of-Experts load balancing. It provides one entry point for two levels
 of decisions:
