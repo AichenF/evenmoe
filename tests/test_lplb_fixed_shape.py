@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """The LP's shape must not depend on how a placement happened to fall.
 
 ``_build_layer_state`` turns a committed placement into the LP that LPLB

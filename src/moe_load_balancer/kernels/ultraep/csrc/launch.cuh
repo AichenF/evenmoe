@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 PKU-DASYS and Dots-Infra
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0 AND MIT
+
 // Adapted from UltraEP v1.0.0 (Dots-Infra/UltraEP @ 94cab099):
 //   csrc/kernels/launch.cuh
 // Copyright (c) 2026 PKU-DASYS and Dots-Infra. MIT License -- see

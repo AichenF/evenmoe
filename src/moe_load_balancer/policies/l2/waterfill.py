@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared-expert Waterfill L2 router.
 
 The algorithm is a degenerate L2 case: it does not modify the routed top-k

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """UltraEP placement and quota-reroute kernels -- framework-neutral.
 
 This package owns the two CUDA kernels behind MLB's ``ultraep`` policy pair:

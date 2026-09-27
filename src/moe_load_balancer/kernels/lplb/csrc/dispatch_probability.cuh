@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Copyright 2023-2026 SGLang Team
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 // LP probability dispatch kernel: collapse the ~7 torch ops in
 // _topk_ids_logical_to_physical_probability into one launch.
 //

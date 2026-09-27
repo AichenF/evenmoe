@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Copyright 2023-2026 SGLang Team
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 /// \file tensor.h
 /// \brief Tensor validation and symbolic matching utilities.
 ///

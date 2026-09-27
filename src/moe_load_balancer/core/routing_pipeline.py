@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Configuration for one composed L2 routing algorithm pipeline.
 
 The serving framework supplies one algorithm expression.  MLB owns parsing,

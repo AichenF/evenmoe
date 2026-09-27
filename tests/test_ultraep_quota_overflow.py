@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Quota reroute with more tokens than quota.
 
 `quota_replica_index` follows upstream's `sparse_quota_replica_index` except

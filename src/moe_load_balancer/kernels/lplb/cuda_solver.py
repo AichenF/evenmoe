@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Copyright 2023-2026 SGLang Team
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """JIT-compiled CUDA Interior Point Method LP solver.
 
 Framework-neutral; framework-specific glue (a ``LPLBKernels`` Protocol

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 // MLB glue between the vendored UltraEP kernels and tvm-ffi; not part of
 // upstream UltraEP. The kernels take raw pointers and a stream as upstream
 // wrote them; the entry point at the end of each kernel header validates its

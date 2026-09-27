@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright 2023-2026 SGLang Team
+# SPDX-License-Identifier: Apache-2.0
+
 """SGLang's replica-selection code, lifted verbatim as a comparison reference.
 
 Copied rather than imported so the alignment tests do not depend on a SGLang
