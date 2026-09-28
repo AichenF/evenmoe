@@ -135,18 +135,20 @@ class UltraEPPlacementPolicy(PlacementPlanner):
         # master experts round-robin, as the initial layout does. Nothing
         # routes to them: logical_to_all_physical_map, which the solve owns, is
         # left untouched.
+        # Fill unassigned slots with their rank-local master unconditionally:
+        # `if unassigned.any()` pulls a bool off the device and stalls the
+        # stream once per solve, which under UltraEP's fast refresh is once per
+        # layer per refresh. The where() is a no-op when nothing is unassigned.
         unassigned = physical_to_logical < 0
-        if unassigned.any():
-            physical_ids = torch.arange(
-                topology.num_physical_experts, device=physical_to_logical.device
-            )
-            local_idx = physical_ids % topology.num_local_physical_experts
-            rank_of_slot = physical_ids // topology.num_local_physical_experts
-            fallback = (
-                rank_of_slot * num_local_master_experts
-                + local_idx % num_local_master_experts
-            ).to(torch.int32)
-            physical_to_logical = torch.where(unassigned, fallback, physical_to_logical)
+        physical_ids = torch.arange(
+            topology.num_physical_experts, device=physical_to_logical.device
+        )
+        local_idx = physical_ids % topology.num_local_physical_experts
+        rank_of_slot = physical_ids // topology.num_local_physical_experts
+        fallback = (
+            rank_of_slot * num_local_master_experts + local_idx % num_local_master_experts
+        ).to(torch.int32)
+        physical_to_logical = torch.where(unassigned, fallback, physical_to_logical)
 
         return PlacementPlan(
             physical_to_logical_map=physical_to_logical,
