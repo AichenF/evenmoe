@@ -122,7 +122,7 @@ The main source directories are:
 
 ## Installation
 
-Python 3.10 or newer, PyTorch 2.5 or newer, Triton, tvm-ffi, and NVIDIA
+Python 3.10 or newer, PyTorch 2.5 or newer, Triton, apache-tvm-ffi, and NVIDIA
 MathDX are required. The normal installation installs these dependencies once;
 the Waterfill, LPLB, and UltraEP kernels themselves are included in the MLB
 package as sources and JIT-compiled for the current GPU on first use. There is
@@ -284,7 +284,7 @@ python -m pytest -m integration
 
 The current CUDA integration has been smoke-tested on NVIDIA H20 GPUs in the
 corresponding SGLang integration environment. GPU compatibility depends on the
-PyTorch, CUDA, Triton, tvm-ffi, and MathDX versions used by the serving
+PyTorch, CUDA, Triton, apache-tvm-ffi, and MathDX versions used by the serving
 framework; new combinations should run the integration test suite before
 deployment.
 
