@@ -106,7 +106,7 @@ For example, an L1 update proceeds in this order:
 ## 5. Add model support: DeepSeek-V3.2 as an example
 
 Check three integration points when adding a model: **expert information, TopK routing, and placement result handoff and commit notifications**. Reuse existing integration where it supports the model; otherwise, update the relevant SGLang integration or MLB adapter.
-This example uses the [SGLang branch with MLB integration](https://github.com/xutizhou/sglang-moe-lb-waterfill-dev/tree/e4189e8fac9c53b6698c23c1411d148350ae0137) and the [MLB implementation](https://github.com/xutizhou/moe_load_balancer/tree/main). SGLang paths are relative to `python/sglang/srt/`; MLB paths are relative to `src/moe_load_balancer/`.
+This example uses the [SGLang branch with MLB integration](https://github.com/xutizhou/sglang-moe-lb-waterfill-dev/tree/e4189e8fac9c53b6698c23c1411d148350ae0137) and the [MLB implementation](https://github.com/ai-dynamo/moe-load-balancer/tree/main). SGLang paths are relative to `python/sglang/srt/`; MLB paths are relative to `src/moe_load_balancer/`.
 
 ### 5.1 Expert information: can the model's expert layout reach MLB?
 
