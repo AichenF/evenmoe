@@ -2,156 +2,96 @@
 
 > **Experimental.** This is an early release. Interfaces and behavior may change between versions.
 
-`moe-load-balancer` is an alpha-stage Python library for framework-decoupled
-Mixture-of-Experts load balancing. It provides one entry point for two levels
-of decisions:
+A framework-independent library for expert placement and token routing in Mixture-of-Experts inference aiming to solve the MoE load imbalance issue and improve the MoE model serving efficiency. MoE Load Balancer (MLB) brings placement and routing policies behind a unified Python API, with adapters for different inference backend.
 
-- **L1 placement planning** chooses which logical expert weights should occupy
-  each physical expert slot.
-- **L2 token routing** chooses among equivalent physical replicas and, when
-  configured, selects a destination rank for a shared expert.
+![MoE Load Balancer — Expert placement. Balanced routing.](assets/banner-nvidia-green.png)
 
-Frameworks retain ownership of model execution, collectives, recording,
-rebalance cadence, weight movement, and committed placement metadata. Adapters
-translate framework-native values to and from the plain request and result
-types used by this package.
-
-## Contributing
-
-See the [contribution guide](CONTRIBUTING.md) for adding model support,
-implementing L1/L2 algorithms, and reporting validation and performance.
-
-## Status
-
-The current release is `0.1.0` and the public API is still evolving.
-
-| Level | Policy | Status | Purpose |
-|---|---|---|---|
-| L1 | `auto` | Implemented | Selects the appropriate implemented DeepSeek EPLB mode from topology. |
-| L1 | `deepseek` | Implemented | Non-hierarchical expert placement. |
-| L1 | `deepseek_hierarchical` | Implemented | Node-aware hierarchical expert placement. |
-| L1 | `deepseek_vec` | Implemented | Vectorized non-hierarchical expert placement. |
-| L1 | `deepseek_vec_hierarchical` | Implemented | Vectorized node-aware expert placement. |
-| L1 | `elasticity_aware` | Implemented | Placement that excludes inactive EP ranks. |
-| L1 | `elasticity_aware_hierarchical` | Implemented | Node-aware placement that excludes inactive EP ranks. |
-| L2 | `lplb` | Implemented | LP-based routing among redundant physical replicas. |
-| L2 | `static` | Implemented | Deterministic routing through the framework-selected replica. |
-| L2 | `dynamic` | Implemented | Random routing among committed physical replicas. |
-| L2 | `fake` | Experimental | Pre-TopK uniform router stimulus preset; defaults to dynamic replica routing. |
-| L2 | `waterfill` | Implemented | Shared-expert destination selection from per-rank routed load. |
-
-## End-to-End Serving Performance
-
-The table below shows observed end-to-end SGLang serving throughput with a
-DeepSeek-V3 FP8 10-layer integration checkpoint. Each value is total throughput
-in K tokens/s; the parenthesized value is the observed difference from the
-Baseline in the same dataset. **Bold** marks the highest observed throughput in
-each row. `All` enables EPLB, Waterfill, and LPLB together.
-
-| Dataset | Baseline | Waterfill | LPLB | EPLB | EPLB + Waterfill | EPLB + LPLB | All |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| GSM8K-1K | 161.77 | 165.48 (+2.29%) | 159.72 (-1.27%) | 188.69 (+16.64%) | 190.03 (+17.47%) | 189.44 (+17.11%) | **191.44 (+18.34%)** |
-| MMLU-1K | 183.96 | 189.04 (+2.76%) | 180.82 (-1.71%) | 193.47 (+5.17%) | **194.27 (+5.61%)** | 192.62 (+4.71%) | 192.86 (+4.84%) |
-| GPQA-1K | 187.91 | 192.53 (+2.46%) | 182.51 (-2.87%) | 193.53 (+2.99%) | **195.00 (+3.77%)** | 192.90 (+2.66%) | 192.71 (+2.55%) |
-| ShareGPT-1K | 192.71 | **194.88 (+1.12%)** | 189.69 (-1.57%) | 193.48 (+0.40%) | 194.42 (+0.89%) | 192.10 (-0.32%) | 192.37 (-0.18%) |
-
-In this experiment, standalone Waterfill had a positive observed difference on
-all four datasets. EPLB produced the largest differences on GSM8K, while
-EPLB + Waterfill had the highest observed throughput on MMLU and GPQA. The
-highest observed ShareGPT result used Waterfill alone. Standalone LPLB was
-below the Baseline in these four workloads; its purpose is replica routing and
-its benefit depends on the placement and request distribution.
-
-Benchmark protocol:
-
-- MLB commit `80c44ed83055ffa9332e8d7d254fa3abfa4c0f62` with SGLang commit
-  `a380a107ed705b18e1f512b03f55b3c2970e61b4`.
-- Two exclusive nodes with 8 NVIDIA H20 96 GB GPUs per node,
-  TP16/DP16/EP16; GPU clocks were not locked.
-- DeepSeek-V3 FP8 checkpoint with a 10-layer configuration overlay. These are
-  integration-benchmark results, not full-model production-serving numbers.
-- Fixed 1,024-token inputs, a disjoint 2,000-prompt benchmark set replayed in
-  the same order, concurrency 256, `max_tokens=1`, and `temperature=0`.
-- Three fresh-server groups per dataset and mode. Each group used four nominal
-  warmup rounds, an explicit convergence gate, and eight measured rounds. The
-  reported value is the median of the three group medians.
-- 672 measured rounds and 1,344,000/1,344,000 completed measured requests,
-  with zero request errors and zero invalid output-token counts.
-- Immutable, verified per-dataset EPLB artifacts; CUDA Graph enabled, DeepEP
-  auto mode, and the overlap scheduler disabled.
-- All modes passed the predefined 3% gates. The worst within-group CV was
-  2.57%, and the worst range across the three fresh-server medians was 0.72%.
-
-The relative values above are descriptive differences for this pinned
-end-to-end serving setup. Bold identifies the largest observed value, not
-statistical significance between close alternatives. These results are not a
-hardware-normalized kernel SOL measurement.
+[Architecture](#architecture) · [Supported Models](#supported-models) · [Algorithms and Integrations](#supported-algorithms-and-integrations) · [Performance](#performance) · [Quick Start](#quick-start) · [Guidance](#guidance) · [Roadmap](#roadmap)
 
 ## Architecture
 
-```text
-Serving framework Glue
-    │
-    ├── framework Adapter: native metadata/tensors → MLB requests
-    ├── collective Adapter: MLB sum payload → framework EP process group
-    │
-    ▼
-MoELoadBalancer
-    ├── L1 placement policy → uncommitted PlacementPlan
-    ├── optional Fake pre-TopK workload transform
-    └── ordered L2 policy pipeline → RoutingDecision
-            ├── Static, dynamic, or LPLB physical-replica routing
-            └── Waterfill shared-expert routing
-    │
-    ├── framework Adapter: MLB result → native values
-    │
-    ▼
-Serving framework applies the result
-```
+MLB balances work at two levels:
 
-The main source directories are:
+- **L1 — Expert placement:** chooses which logical experts occupy physical expert slots across GPUs, including redundant replicas.
+- **L2 — Token routing:** selects a physical replica for each logical routing expert selected by TopK and, when enabled, a destination GPU for shared-expert computation.
 
-| Path | Responsibility |
-|---|---|
-| `src/moe_load_balancer/core/` | Public request/result types, protocols, the policy declaration schema, and the policy-agnostic orchestrator. |
-| `src/moe_load_balancer/policies/l1/` | Framework-independent placement algorithms. |
-| `src/moe_load_balancer/policies/l2/` | Framework-independent routing policies, each with its own `RoutingPolicySpec` declaration; `policies/registry.py` lists the built-ins. |
-| `src/moe_load_balancer/kernels/` | Triton and CUDA execution implementations. |
-| `src/moe_load_balancer/adapters/sglang/` | Data translations and stateless SGLang context integration. |
-| `src/moe_load_balancer/adapters/vllm/` | Stateless translation between vLLM and MLB values. |
-| `examples/` | Executable examples used by CI. |
-| `tests/` | API, policy, adapter, orchestrator, and GPU integration tests. |
+![MoE Load Balancer architecture: framework adapters connect SGLang and vLLM to L1 expert placement and L2 token routing; the framework commits placement before routing uses it.](assets/architecture.png)
 
-## Installation
+The architecture separates framework-independent policy logic from framework-specific execution. Policies consume standardized request objects and return standardized placement or routing results, while adapters convert each serving framework’s native tensors and metadata into these common representations. The serving framework remains responsible for model execution, communication-group management, rebalance scheduling, and committing updated expert placements. MLB is responsible for computing the placement and routing decisions used by the framework. GPU-accelerated policies rely on the packaged CUDA and Triton kernels for efficient execution.
 
-Python 3.10 or newer, PyTorch 2.5 or newer, Triton, tvm-ffi, and NVIDIA
-MathDX are required. The normal installation installs these dependencies once;
-the Waterfill, LPLB, and UltraEP kernels themselves are included in the MLB
-package as sources and JIT-compiled for the current GPU on first use. There is
-no extension to build at install time.
+## Supported Models
 
-Install the complete package:
+MLB is validated on the following MoE model families for SGLang serving:
+
+| Family | Models |
+|:---|:---|
+| DeepSeek | DeepSeek-V3, DeepSeek-V3.2, DeepSeek-V4-Flash, DeepSeek-V4.1-Flash |
+| GLM | GLM-5.2, GLM-5.3 |
+| Qwen | Qwen3-235B-A22B, Qwen3.5-397B-A17B |
+| Moonshot | Kimi-K2.5 |
+
+Shared-expert routing (Waterfill) applies to models with a shared expert (DeepSeek, GLM, Kimi). Qwen MoE models have no shared expert and use EPLB / LPLB / UltraEP only.
+
+## Supported Algorithms and Integrations
+
+✅ Supported &nbsp;&nbsp; 🚧 On-going &nbsp;&nbsp; ❌ Not supported
+
+Support below refers to MLB's `main`-branch adapters; serving requires the corresponding framework-side hooks. Branch-specific launch instructions are provided in [Guidance](#guidance).
+
+| Level | Algorithm | SGLang | vLLM |
+|:---|:---|:---:|:---:|
+| **L1 · Expert placement** | EPLB | ✅ | ✅ |
+| | UltraEP | ✅ | ✅ |
+| **L2 · Token routing** | Static (deterministic replica rule) | ✅ | ✅ |
+| | LPLB | ✅ | ✅ |
+| | Waterfill | ✅ | ✅ |
+| | UltraEP | ✅ | ✅ |
+| | LPLB + Waterfill | ✅ | ✅ |
+| | UltraEP + Waterfill | ✅ | ✅ |
+
+Compose L2 policies with `+`, for example `lplb+waterfill` or `ultraep+waterfill`, subject to the framework support above.
+
+## Performance
+
+SGLang prefill throughput with **DeepSeek-V3 (FP8)** on **one node with 8 × NVIDIA Hopper GPUs** (TP8 / DP8 / EP8, DeepEP). Every MLB arm allocates **32 redundant expert replicas** (`--ep-num-redundant-experts 32`); the baseline uses none. Values are median input throughput in **K tokens/s**; percentages show the change from the baseline on the same dataset.
+
+Placement is recorded once per dataset. **Same-domain** serves the dataset its placement was recorded from; **cross-domain** serves the other dataset. UltraEP is online-adaptive, so it has no same/cross split (both columns repeat its value).
+
+| Algorithm | Same-domain GSM8K | Same-domain MMLU | Cross-domain GSM8K | Cross-domain MMLU |
+|:---|---:|---:|---:|---:|
+| Baseline | 18.0K | 18.9K | 18.0K | 18.9K |
+| EPLB | 20.5K (+13.9%) | 20.6K (+9.1%) | 18.6K (+3.6%) | 19.4K (+2.8%) |
+| EPLB + LPLB | 20.6K (+14.8%) | 20.6K (+8.9%) | 18.7K (+4.2%) | 19.5K (+3.4%) |
+| EPLB + Waterfill | 20.7K (+14.9%) | 20.7K (+9.8%) | 19.5K (+8.7%) | 20.3K (+7.3%) |
+| EPLB + LPLB + Waterfill | 20.7K (+14.9%) | 20.6K (+8.9%) | 19.6K (+8.9%) | 20.2K (+6.9%) |
+| UltraEP | 20.8K (+15.6%) | 20.7K (+9.9%) | 20.8K (+15.6%) | 20.7K (+9.9%) |
+| UltraEP + Waterfill | 20.9K (+16.6%) | 21.0K (+11.2%) | 20.9K (+16.6%) | 21.0K (+11.2%) |
+
+Each workload used 1,000 prompts with ~1K-token inputs, concurrency 256, and `max_tokens=1` (prefill-only); values are the median of three measured rounds.
+
+## Quick Start
+
+GPU kernels additionally require a compatible NVIDIA GPU and CUDA toolchain.
+
+| Dependency | Required version |
+|:---|:---|
+| Python | ≥ 3.10 |
+| PyTorch (`torch`) | ≥ 2.5 |
+| Triton (`triton`) | ≥ 3.0 |
+| TVM FFI (`apache-tvm-ffi`) | ≥ 0.1.0 |
+| NVIDIA MathDX (`nvidia-mathdx`) | 25.6.0 (exact) |
 
 ```bash
+git clone https://github.com/xutizhou/moe_load_balancer.git
+cd moe_load_balancer
 python -m pip install -e .
 ```
 
-The LPLB and UltraEP CUDA kernels require a compatible NVIDIA CUDA toolchain
-(`nvcc`) at run time. `nvidia-mathdx` is pinned to the version used by the
-packaged JIT sources. A manual MathDX installation can instead be selected with
-`MATHDX_HOME`.
+If the serving environment already provides compatible dependencies, install with `python -m pip install -e . --no-deps`.
 
-Inside an existing SGLang environment, dependency versions are normally owned
-by that environment:
+The UltraEP placement and routing kernels are compiled on first use through TVM FFI, so the runtime environment needs `nvcc` from a CUDA toolkit that matches the installed PyTorch (SM90 and SM100 are tested). No separate build step or build-time flag is required.
 
-```bash
-python -m pip install -e /path/to/moe_load_balancer --no-deps
-```
-
-## Quick Start: L1 Placement
-
-The following is also available as `examples/quickstart.py` and is executed by
-CI:
+Generate an expert placement from per-expert token counts:
 
 ```python
 import torch
@@ -169,129 +109,126 @@ request = to_placement_request(
 )
 
 plan = MoELoadBalancer().plan_placement(request)
-
-print(plan.physical_to_logical_map.shape)
-print(plan.metadata["resolved_policy"])
+print(plan.physical_to_logical_map)
 ```
 
-`PlacementPlan` is only a candidate. The serving framework must move or load
-weights first and update its live metadata before exposing the resulting
-placement to L2 as a committed `PlacementSnapshot`.
+The returned plan assigns eight physical slots per layer to four logical experts. The serving framework loads or moves the weights and commits the placement before using it for L2 routing.
 
-## Configuring the L2 Pipeline
+## Guidance
 
-The framework passes one algorithm expression to MLB. A single algorithm can
-be selected directly, and `+` composes physical-replica and shared-expert
-routing:
+Install MLB and DeepEP into the serving framework's Python environment. The examples below target the linked integration branches, not stock framework releases. Replace the model path with a compatible MoE checkpoint that fits the available GPU memory.
 
-```python
-from moe_load_balancer import MoELoadBalancer
+### SGLang
 
-mlb = MoELoadBalancer.from_algorithm(
-    "lplb+waterfill",
-    ep_size=16,
-    source_rank=0,
-    experts_per_rank=18,
-    collectives=framework_ep_collectives,
-)
-```
+Use the [SGLang `sglang-moe-lb-waterfill-dev`](https://github.com/xutizhou/sglang-moe-lb-waterfill-dev) fork (its `main` branch) with MLB installed as shown in Quick Start. Server arguments expose L1 placement (`--eplb-algorithm` / `--init-expert-location`) and L2 routing (`--moe-load-balancer-algorithm`) as separate selectors; see [Supported Algorithms](#supported-algorithms-and-integrations) for what SGLang supports.
 
-Supported expressions include `static`, `dynamic`, `fake`, `lplb`,
-`waterfill`, and combinations such as `lplb+waterfill`. Bare `waterfill`
-expands to `static+waterfill`, so redundant
-experts still receive deterministic physical routing without a second
-selection parameter. `lp` remains an input alias for `lplb`.
-
-`fake` is a pre-TopK experimental stimulus preset. Bare `fake` preserves the
-existing behavior by expanding internally to Fake stimulus plus Dynamic
-replica routing. An explicit replica policy can be composed when needed, for
-example `fake+static` or `fake+lplb`.
-
-Parsing, validation, implementation construction, and policy ordering are MLB
-responsibilities. The framework supplies logical TopK, live placement, token
-count, and a generic EP collective adapter. MLB creates algorithm-specific
-counts, packs compatible payloads, and decides when to request a sum; framework
-Glue does not branch on algorithm names.
-
-Neither does `core/`. Every L2 policy publishes one `RoutingPolicySpec` next
-to its router (`policies/l2/<name>.py`) declaring its phase, the data views it
-consumes, the capabilities it imposes on the framework, how it is built from a
-`RouterBuildContext`, and any policy it cannot be combined with. L1 placement
-policies are registered the same way, as name-to-planner factories.
-`policies/registry.py` lists the built-ins for both layers; `RoutingPipeline`
-and `MoELoadBalancer` only read that registry, so adding a policy touches no
-file under `core/`. Extra keyword arguments to `from_algorithm` are forwarded
-to every policy's builder as `RouterBuildContext.options` (for example
-`lplb_kernels=` to inject a kernel backend).
-
-`lplb+waterfill` performs one logical-count collective for LPLB; the default
-(local-view) Waterfill then counts this rank's routed load and issues no
-collective of its own.
-
-Whether a policy consumes the local or the EP-wide view of its input is the
-policy's own declaration (`RoutingPolicySpec.logical_count` /
-`RoutingPolicySpec.rank_load`); the orchestrator issues the collective only
-when a policy declares the global view. Declarations are resolved once, when
-the pipeline is built, so set the switches below before constructing
-`MoELoadBalancer`.
-
-Set `WATERFILL_USE_GLOBAL_LOAD=1` to make Waterfill declare the global view and
-collect routed-rank load and active-token count across the EP group. The
-default is local load (`0`). This mode cannot currently follow LPLB because all
-ranks are not yet guaranteed to enter the second collective.
-
-Set `LPLB_USE_LOCAL_COUNT=1` to make LPLB declare the local view, skipping
-MLB's count all-reduce and approximating the global distribution with local
-token counts. Default: `0` (global counts). Explicitly supplied
-`RoutingRequest.global_logical_count` takes precedence.
-
-After initial weight loading and after each placement update is committed, the
-framework passes its current metadata to
-`mlb.on_placement_committed(snapshot)`. MLB does not own a placement version;
-placement-derived execution state is rebuilt only at this explicit framework
-lifecycle event.
-
-The SGLang integration is responsible for:
-
-1. Reading TopK output and live placement metadata.
-2. Providing a generic EP sum adapter backed by SGLang's process group.
-3. Calling the stateless SGLang data adapters to create a
-   `PlacementRequest`, `PlacementSnapshot`, or `RoutingRequest`.
-4. Calling `MoELoadBalancer.plan_placement()`,
-   `MoELoadBalancer.on_placement_committed()`, or
-   `MoELoadBalancer.route_tokens()`.
-5. Translating the result and applying it inside SGLang.
-
-## Development
-
-Install development dependencies and run the local quality gates:
+Start **EPLB + LPLB + Waterfill** on one node with eight GPUs (Waterfill requires a shared-expert model):
 
 ```bash
-python -m pip install -e ".[dev]"
-python -m ruff check .
-python -m mypy src/moe_load_balancer
-python -m pytest -m unit
-python examples/quickstart.py
-python -m build
+python -m sglang.launch_server \
+  --model-path /path/to/moe-checkpoint \
+  --tp 8 --dp 8 --ep 8 \
+  --enable-dp-attention \
+  --moe-a2a-backend deepep \
+  --deepep-mode auto \
+  --enable-eplb \
+  --eplb-algorithm auto \
+  --ep-num-redundant-experts 32 \
+  --init-expert-location /path/to/logical_count.pt \
+  --moe-load-balancer-algorithm lplb+waterfill
 ```
 
-GPU integration tests are separate because they require a CUDA device and the
-matching CUDA toolchain:
+Keep the launch flags and change the two selectors to switch algorithms:
+
+| Algorithm | `--eplb-algorithm` | `--moe-load-balancer-algorithm` |
+|:---|:---|:---|
+| EPLB with SGLang's default replica routing | `auto` | *(omit)* |
+| Static EPLB (deterministic replica rule) | `auto` | `static` |
+| EPLB + LPLB | `auto` | `lplb` |
+| EPLB + Waterfill | `auto` | `waterfill` |
+| EPLB + LPLB + Waterfill | `auto` | `lplb+waterfill` |
+| UltraEP | `auto` | `ultraep` |
+| UltraEP + Waterfill | `auto` | `ultraep+waterfill` |
+
+LPLB requires redundant replicas (`--ep-num-redundant-experts > 0`) and a recorded placement passed via `--init-expert-location` (produced once with `--enable-eplb`). Waterfill requires a shared-expert model. To run Waterfill without periodic EPLB, drop `--enable-eplb`/`--eplb-algorithm`, select `waterfill`, and retain DeepEP.
+
+### vLLM
+
+Use [vLLM `feat/vllm_mlb`](https://github.com/yunyang1999/vllm/tree/feat/vllm_mlb) with MLB `main`. Install the fork as you would upstream vLLM, then MLB into the same environment:
 
 ```bash
-python -m pytest -m integration
+git clone https://github.com/xutizhou/moe_load_balancer.git
+python -m pip install -e ./moe_load_balancer --no-deps
 ```
 
-## Compatibility
+Start **EPLB + LPLB** on one node with eight GPUs (TP2 / DP4 / EP8):
 
-The current CUDA integration has been smoke-tested on NVIDIA H20 GPUs in the
-corresponding SGLang integration environment. GPU compatibility depends on the
-PyTorch, CUDA, Triton, tvm-ffi, and MathDX versions used by the serving
-framework; new combinations should run the integration test suite before
-deployment.
+```bash
+VLLM_MLB_L1_ALGORITHM=deepseek_hierarchical \
+VLLM_MLB_L2_ALGORITHM=lplb \
+vllm serve /path/to/moe-checkpoint \
+  --tensor-parallel-size 2 \
+  --data-parallel-size 4 \
+  --enable-expert-parallel \
+  --all2all-backend deepep_high_throughput \
+  --enable-eplb \
+  --eplb-config '{"policy":"mlb","use_async":false,"num_redundant_experts":32}' \
+  --max-num-batched-tokens 4096 \
+  --enforce-eager \
+  --numa-bind
+```
+
+Keep the launch flags and change the environment variables to select an algorithm:
+
+| Algorithm | `VLLM_MLB_L1_ALGORITHM` | `VLLM_MLB_L2_ALGORITHM` |
+|:---|:---|:---|
+| EPLB with vLLM's native uniform replica routing | `deepseek_hierarchical` | Empty (`""`) |
+| Static EPLB (deterministic replica rule) | `deepseek_hierarchical` | `static` |
+| EPLB + LPLB | `deepseek_hierarchical` | `lplb` |
+| EPLB + Waterfill | `deepseek_hierarchical` | `waterfill` |
+| EPLB + LPLB + Waterfill | `deepseek_hierarchical` | `lplb+waterfill` |
+| UltraEP | `ultraep` | `ultraep` |
+| UltraEP + Waterfill | `ultraep` | `ultraep+waterfill` |
+| UltraEP placement with static routing | `ultraep` | `static` |
+
+Waterfill requires a supported shared-expert model and an evenly divisible physical-expert layout; the branch enables shared-expert fusion when Waterfill is selected. LPLB and UltraEP require redundant experts. Keep `use_async` set to `false` and `--enforce-eager`. `--numa-bind` pins each engine to its GPU's CPU socket and is recommended on two-socket nodes. For a periodic re-fit (`"step_interval"` below 1000) also set `"window_size"` to the same value.
+
+Start **UltraEP** on the same topology, refreshing every 8 representative prefill batches:
+
+```bash
+VLLM_MLB_L1_ALGORITHM=ultraep \
+VLLM_MLB_L2_ALGORITHM=ultraep \
+MLB_ULTRAEP_REFRESH_INTERVAL=8 \
+vllm serve /path/to/moe-checkpoint \
+  --tensor-parallel-size 2 \
+  --data-parallel-size 4 \
+  --enable-expert-parallel \
+  --all2all-backend deepep_high_throughput \
+  --enable-eplb \
+  --eplb-config '{"policy":"mlb","use_async":false,"num_redundant_experts":32}' \
+  --max-num-batched-tokens 4096 \
+  --enforce-eager \
+  --numa-bind
+```
+
+UltraEP re-solves placement and replica quotas every `MLB_ULTRAEP_REFRESH_INTERVAL` representative prefill batches (default 64), moving only the replica slots that changed. `MLB_ULTRAEP_MOVER` selects the weight transfer: `direct` (default, pairwise send/recv), `symm` (one-sided puts through torch symmetric memory, for an EP group inside one NVLink domain), or `auto`. `MLB_ULTRAEP_LAGGED_APPLY=1` applies each refresh on the layer's next forward, trading one step of staleness for the per-layer device sync; off by default. The kernels compile on first use on Hopper and Blackwell.
+
+## Roadmap
+
+- [x] Extend prefill-phase algorithm support to DeepSeek-V4, GLM, and Qwen models (see [Supported Models](#supported-models)).
+- [ ] Add decode-phase support with the Metro algorithm.
+- [ ] Add more prefill-phase algorithms, including MoonEP.
+- [ ] Support MCore training.
+- [ ] Integrate with TensorRT-LLM (TRT-LLM).
+
+## Contributing
+
+Bug reports, algorithm ideas, and integration improvements are welcome through [Issues](https://github.com/xutizhou/moe_load_balancer/issues) and pull requests.
+
+## Acknowledgments
+
+We thank DeepSeek for [EPLB](https://github.com/deepseek-ai/EPLB) and [LPLB](https://github.com/deepseek-ai/LPLB), RedNote for [UltraEP](https://github.com/Dots-Infra/UltraEP), and the [SGLang](https://github.com/sgl-project/sglang) and [vLLM](https://github.com/vllm-project/vllm) teams for their inference frameworks. We appreciate these teams and their communities for sharing the algorithms, code, and infrastructure that make this work possible.
 
 ## License
 
-MoE Load Balancer is licensed under Apache-2.0. Copied and adapted DeepSeek,
-SGLang, and UltraEP components retain their original notices and licenses; see
-`THIRD_PARTY_NOTICES.md`.
+Licensed under [Apache-2.0](https://github.com/xutizhou/moe_load_balancer/blob/main/LICENSE). See [Third-Party Notices](https://github.com/xutizhou/moe_load_balancer/blob/main/THIRD_PARTY_NOTICES.md) for components adapted from DeepSeek, SGLang, and UltraEP.
