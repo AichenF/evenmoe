@@ -321,15 +321,13 @@ class MoELoadBalancer:
                 if current_physical is None:
                     current_physical = _default_physical_routing(request)
 
-                planned_rank_load = physical_decision_metadata.get("planned_rank_load")
-                if planned_rank_load is not None:
-                    routed_rank_load = planned_rank_load
-                else:
-                    routed_rank_load = self._rank_load_counter(
-                        current_physical,
-                        request.placement,
-                        policy_config,
-                    )
+                # The shared-expert policy levels this rank's own contribution,
+                # so it reads this rank's realised routed load.
+                routed_rank_load = self._rank_load_counter(
+                    current_physical,
+                    request.placement,
+                    policy_config,
+                )
 
                 spec = self._policy_spec(policy_config)
                 if spec is not None and spec.rank_load == "global":

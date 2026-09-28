@@ -362,7 +362,9 @@ def test_global_rank_load_follows_the_policy_declaration_not_its_name(monkeypatc
 
 
 @pytest.mark.unit
-def test_lplb_waterfill_reuses_planned_load_after_one_collective():
+def test_lplb_waterfill_counts_local_routed_load_not_planned_load():
+    """Local Waterfill after LPLB sees this rank's routed load, not LPLB's
+    EP-wide ``planned_rank_load`` (which stays in the decision metadata)."""
     calls = []
     shared = _SharedRouter(calls)
     collectives = _RecordingCollectives(torch.tensor([1.0, 1.0]))
@@ -386,7 +388,8 @@ def test_lplb_waterfill_reuses_planned_load_after_one_collective():
 
     assert len(collectives.payloads) == 1
     assert torch.equal(collectives.payloads[0], torch.tensor([2.0, 2.0]))
-    assert torch.equal(shared.seen_rank_load, torch.tensor([7, 1]))
+    assert not torch.equal(shared.seen_rank_load, torch.tensor([7, 1]))
+    assert int(shared.seen_rank_load.sum()) == 4
     assert shared.seen_active is None
 
 

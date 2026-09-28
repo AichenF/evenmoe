@@ -222,9 +222,9 @@ file under `core/`. Extra keyword arguments to `from_algorithm` are forwarded
 to every policy's builder as `RouterBuildContext.options` (for example
 `lplb_kernels=` to inject a kernel backend).
 
-`lplb+waterfill` performs one logical-count collective, then derives
-Waterfill's planned global rank load from the LPLB solution, so it does not
-issue a second collective.
+`lplb+waterfill` performs one logical-count collective for LPLB; the default
+(local-view) Waterfill then counts this rank's routed load and issues no
+collective of its own.
 
 Whether a policy consumes the local or the EP-wide view of its input is the
 policy's own declaration (`RoutingPolicySpec.logical_count` /
