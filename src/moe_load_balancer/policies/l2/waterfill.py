@@ -16,7 +16,7 @@ load views are distinguished by whether
   ``ALLOW_ALL_RANKS=True`` (caller asserts every rank is a valid shared-expert
   destination because EPLB already balances routed load).
 
-- Collective-backed Waterfill (``waterfill_dynamic``): the orchestrator passes
+- Collective-backed Waterfill (``WATERFILL_USE_GLOBAL_LOAD=1``): the orchestrator passes
   ``routed_rank_load`` (post-AR
   global routed counts) and ``active_rank_token_count`` (post-AR per-rank
   active token counts). The kernel uses ``rank_load = routed + active`` for
@@ -29,10 +29,14 @@ load views are distinguished by whether
 
 from __future__ import annotations
 
+import os
+from dataclasses import replace
+
 import torch
 from torch import Tensor
 
 from moe_load_balancer.core.l2 import TokenRouter
+from moe_load_balancer.core.policy import RouterBuildContext, RoutingPolicySpec
 from moe_load_balancer.core.types import (
     RoutingDecision,
     RoutingPhase,
@@ -148,3 +152,32 @@ class WaterfillL2Router(TokenRouter):
                 "allow_all_ranks": allow_all_ranks,
             },
         )
+
+
+def _configure(config: RoutingPolicyConfig) -> RoutingPolicySpec:
+    # TODO: Replace WATERFILL_USE_GLOBAL_LOAD with an explicit
+    # RoutingPolicyConfig option read from ``config``.
+    del config
+    if os.environ.get("WATERFILL_USE_GLOBAL_LOAD", "0") == "1":
+        # Global Waterfill cannot follow LPLB yet: all ranks are not guaranteed
+        # to enter the second collective.
+        return replace(ROUTING_POLICY, rank_load="global", incompatible_with=frozenset({"lplb"}))
+    return ROUTING_POLICY
+
+
+def _build_router(context: RouterBuildContext) -> WaterfillL2Router:
+    return WaterfillL2Router(
+        source_rank=context.source_rank,
+        world_size=context.ep_size,
+        experts_per_rank=context.experts_per_rank,
+    )
+
+
+ROUTING_POLICY = RoutingPolicySpec(
+    "waterfill",
+    WaterfillL2Router.phase,
+    rank_load="local",
+    requires_deepep=True,
+    configure=_configure,
+    build_router=_build_router,
+)

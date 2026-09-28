@@ -10,6 +10,7 @@ import torch
 from torch import Tensor
 
 from moe_load_balancer.core.l2 import TokenRouter
+from moe_load_balancer.core.policy import InputTransformSpec, RoutingPolicySpec
 from moe_load_balancer.core.types import (
     RoutingDecision,
     RoutingPhase,
@@ -33,20 +34,6 @@ def transform_fake_routing_inputs(
             raise TypeError("Fake routing correction_bias must be a torch.Tensor or None.")
         correction_bias = torch.zeros_like(correction_bias)
     return router_logits, correction_bias
-
-
-def transform_topk_inputs(
-    transform_name: str | None,
-    router_logits: Tensor,
-    correction_bias: Tensor | None,
-) -> tuple[Tensor, Tensor | None]:
-    """Apply an optional experimental transform before framework TopK."""
-
-    if transform_name == "fake":
-        return transform_fake_routing_inputs(router_logits, correction_bias)
-    if transform_name is None:
-        return router_logits, correction_bias
-    raise ValueError(f"Unknown pre-TopK transform {transform_name!r}.")
 
 
 def route_static_replicas(
@@ -285,3 +272,30 @@ class DynamicRandomL2Router(TokenRouter):
             topk_weights=request.topk_weights,
             metadata={"policy": policy.name},
         )
+
+
+ROUTING_POLICIES = (
+    RoutingPolicySpec(
+        "static",
+        StaticL2Router.phase,
+        requires_rank_dispatch_map=True,
+        dispatch_fixed_by_placement=True,
+        build_router=lambda context: StaticL2Router(),
+    ),
+    RoutingPolicySpec(
+        "dynamic",
+        DynamicL2Router.phase,
+        build_router=lambda context: DynamicL2Router(),
+    ),
+    RoutingPolicySpec(
+        "dynamic_random",
+        DynamicRandomL2Router.phase,
+        build_router=lambda context: DynamicRandomL2Router(),
+    ),
+)
+
+# Fake is a pre-TopK workload stimulus; its historical physical routing is
+# Dynamic when no explicit replica router is selected.
+INPUT_TRANSFORMS = (
+    InputTransformSpec("fake", transform_fake_routing_inputs, physical_routing="dynamic"),
+)

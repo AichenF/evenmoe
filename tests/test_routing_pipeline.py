@@ -10,8 +10,10 @@ from moe_load_balancer import (
     ExpertDeploymentConfig,
     MoELoadBalancer,
     PlacementSnapshot,
+    RoutingPhase,
     RoutingPipeline,
 )
+from moe_load_balancer.core.policy import PolicyRegistry, RoutingPolicySpec
 
 
 def _placement() -> PlacementSnapshot:
@@ -38,10 +40,11 @@ def _placement() -> PlacementSnapshot:
         ("fake+static", "fake+static", "static", ("static",)),
         ("fake+lplb", "fake+lplb", "lplb", ("lplb",)),
         ("lp", "lplb", "lplb", ("lplb",)),
+        ("lp+waterfill", "lplb+waterfill", "lplb", ("lplb", "waterfill")),
         ("waterfill", "static+waterfill", "static", ("static", "waterfill")),
         (
-            "dynamic+waterfill_dynamic",
-            "dynamic+waterfill_dynamic",
+            "dynamic+waterfill",
+            "dynamic+waterfill",
             "dynamic",
             ("dynamic", "waterfill"),
         ),
@@ -81,7 +84,7 @@ def test_fake_is_a_pre_topk_preset_with_dynamic_default():
     pipeline = RoutingPipeline.from_value("fake+waterfill")
 
     assert pipeline.name == "fake+waterfill"
-    assert pipeline.input_transform == "fake"
+    assert pipeline.input_transform.name == "fake"
     assert pipeline.policies[0] == "dynamic"
     assert tuple(policy.name for policy in pipeline.post_topk_policies) == (
         "dynamic",
@@ -94,8 +97,7 @@ def test_fake_is_a_pre_topk_preset_with_dynamic_default():
     "value",
     [
         "static+dynamic",
-        "waterfill+waterfill_dynamic",
-        "lplb+waterfill_dynamic",
+        "waterfill+waterfill",
         "unknown",
         "static+",
     ],
@@ -106,6 +108,8 @@ def test_routing_pipeline_rejects_invalid_composition(value):
 
 
 class _PreparingRouter:
+    phase = RoutingPhase.PHYSICAL_ROUTING
+
     def __init__(self):
         self.seen = None
 
@@ -221,3 +225,182 @@ def test_other_policies_do_not_need_placement_metadata():
     config = ExpertDeploymentConfig(num_redundant_experts=4, carries_placement_metadata=False)
     for algorithm in ("static", "dynamic", "lplb"):
         assert RoutingPipeline.from_value(algorithm).is_applicable(config) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("expression", "ordered"),
+    [
+        ("waterfill+lplb", ("lplb", "waterfill")),
+        ("waterfill+ultraep", ("ultraep", "waterfill")),
+    ],
+)
+def test_pipeline_orders_selected_policies_by_phase(expression, ordered):
+    assert RoutingPipeline.from_value(expression).policies == ordered
+
+
+@pytest.mark.unit
+def test_lplb_local_count_mode_is_declared_by_the_policy(monkeypatch):
+    monkeypatch.setenv("LPLB_USE_LOCAL_COUNT", "1")
+
+    pipeline = RoutingPipeline.from_value("lplb")
+
+    assert not pipeline.capabilities.consumes_global_logical_count
+    assert pipeline.steps[0].spec.logical_count == "local"
+
+
+@pytest.mark.unit
+def test_waterfill_global_load_mode_is_declared_by_the_policy(monkeypatch):
+    monkeypatch.setenv("WATERFILL_USE_GLOBAL_LOAD", "1")
+
+    pipeline = RoutingPipeline.from_value("waterfill")
+    waterfill = pipeline.steps[1]
+
+    assert waterfill.spec.rank_load == "global"
+
+
+@pytest.mark.unit
+def test_global_waterfill_rejects_lplb_until_collectives_are_uniform(monkeypatch):
+    monkeypatch.setenv("WATERFILL_USE_GLOBAL_LOAD", "1")
+
+    with pytest.raises(ValueError, match="waterfill cannot be combined with.*lplb"):
+        RoutingPipeline.from_value("lplb+waterfill")
+
+
+@pytest.mark.unit
+def test_composition_disables_fixed_dispatch_capability():
+    assert RoutingPipeline.from_value("static").capabilities.dispatch_fixed_by_placement
+    # A pre-TopK stimulus does not make static's dispatch batch-dependent.
+    assert RoutingPipeline.from_value("fake+static").capabilities.dispatch_fixed_by_placement
+    assert not RoutingPipeline.from_value("fake").capabilities.dispatch_fixed_by_placement
+    assert not RoutingPipeline.from_value(
+        "static+waterfill"
+    ).capabilities.dispatch_fixed_by_placement
+
+
+@pytest.mark.unit
+def test_pipeline_reads_phase_and_capabilities_from_registered_policy():
+    external = RoutingPolicySpec(
+        name="external",
+        phase=RoutingPhase.SHARED_EXPERT,
+        rank_load="local",
+        requires_deepep=True,
+    )
+    registry = PolicyRegistry(
+        physical_routers={"static": RoutingPipeline.from_value("static").steps[0].spec},
+        shared_expert_routers={"external": external},
+        default_physical_router="static",
+    )
+
+    pipeline = RoutingPipeline.from_value("external", registry=registry)
+
+    assert pipeline.policies == ("static", "external")
+    assert pipeline.capabilities.routes_shared_expert
+    assert pipeline.capabilities.requires_deepep
+
+
+@pytest.mark.unit
+def test_from_algorithm_builds_routers_from_policy_declarations():
+    """Core never names a policy: a spec registered from outside is built by its
+    own ``build_router`` and receives the deployment context and options."""
+    seen = {}
+
+    class _Router:
+        phase = RoutingPhase.PHYSICAL_ROUTING
+
+        def route_tokens(self, request, policy):
+            raise NotImplementedError
+
+    def _build(context):
+        seen["context"] = context
+        return _Router()
+
+    registry = PolicyRegistry(
+        physical_routers={
+            "external": RoutingPolicySpec(
+                "external", RoutingPhase.PHYSICAL_ROUTING, build_router=_build
+            )
+        },
+        default_physical_router="external",
+    )
+
+    mlb = MoELoadBalancer.from_algorithm(
+        "external",
+        ep_size=4,
+        source_rank=1,
+        experts_per_rank=8,
+        registry=registry,
+        backend="stub",
+    )
+
+    assert isinstance(mlb._routing_policies["external"], _Router)
+    assert (seen["context"].ep_size, seen["context"].source_rank) == (4, 1)
+    assert seen["context"].experts_per_rank == 8
+    assert seen["context"].options == {"backend": "stub"}
+
+
+@pytest.mark.unit
+def test_from_algorithm_rejects_policies_without_a_builder():
+    registry = PolicyRegistry(
+        physical_routers={"opaque": RoutingPolicySpec("opaque", RoutingPhase.PHYSICAL_ROUTING)},
+        default_physical_router="opaque",
+    )
+
+    with pytest.raises(ValueError, match="does not declare build_router"):
+        MoELoadBalancer.from_algorithm(
+            "opaque", ep_size=1, source_rank=0, experts_per_rank=1, registry=registry
+        )
+
+
+@pytest.mark.unit
+def test_registry_rejects_a_router_registered_under_the_wrong_phase():
+    shared = RoutingPolicySpec("shared", RoutingPhase.SHARED_EXPERT)
+
+    with pytest.raises(ValueError, match="SHARED_EXPERT.*PHYSICAL_ROUTING"):
+        PolicyRegistry(physical_routers={"shared": shared})
+
+
+@pytest.mark.unit
+def test_registry_rejects_a_default_that_is_not_a_physical_router():
+    with pytest.raises(ValueError, match="not registered"):
+        PolicyRegistry(default_physical_router="static")
+
+
+@pytest.mark.unit
+def test_registry_alias_must_point_at_a_registered_router():
+    physical = RoutingPolicySpec("physical", RoutingPhase.PHYSICAL_ROUTING)
+
+    with pytest.raises(ValueError, match="not a registered router"):
+        PolicyRegistry(physical_routers={"physical": physical}, aliases={"p": "missing"})
+    with pytest.raises(ValueError, match="already a registered policy name"):
+        PolicyRegistry(physical_routers={"physical": physical}, aliases={"physical": "physical"})
+
+
+@pytest.mark.unit
+def test_registry_alias_resolves_to_the_canonical_name():
+    physical = RoutingPolicySpec("physical", RoutingPhase.PHYSICAL_ROUTING)
+    registry = PolicyRegistry(physical_routers={"physical": physical}, aliases={"p": "physical"})
+
+    assert registry.lookup("p") is physical
+    assert RoutingPipeline.from_value("p", registry=registry).name == "physical"
+
+
+@pytest.mark.unit
+def test_registry_rejects_a_required_placement_that_is_not_registered():
+    coupled = RoutingPolicySpec(
+        "coupled", RoutingPhase.PHYSICAL_ROUTING, required_placement="missing_l1"
+    )
+
+    with pytest.raises(ValueError, match="requires placement policy 'missing_l1'"):
+        PolicyRegistry(physical_routers={"coupled": coupled})
+
+
+@pytest.mark.unit
+def test_default_placement_planners_come_from_the_registry():
+    from moe_load_balancer.policies.registry import builtin_registry
+
+    mlb = MoELoadBalancer()
+
+    assert set(mlb._placement_planners) == set(builtin_registry().placement_planners)
+    assert "ultraep" in mlb._placement_planners
+    assert "deepseek_hierarchical" in mlb._placement_planners

@@ -18,7 +18,7 @@ from moe_load_balancer.policies.l2.replica import (
     route_dynamic_replicas,
     route_replicas,
     route_static_replicas,
-    transform_topk_inputs,
+    transform_fake_routing_inputs,
 )
 
 
@@ -211,9 +211,7 @@ def test_production_replica_policies_leave_pre_topk_inputs_unchanged(name, route
 def test_generic_replica_entry_points_keep_dispatch_inside_mlb(name):
     placement = _placement()
     logical_ids = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
-    logits = torch.zeros((2, 4))
 
-    transformed, _ = transform_topk_inputs(None, logits, None)
     physical_ids = route_replicas(
         name,
         logical_ids,
@@ -223,14 +221,13 @@ def test_generic_replica_entry_points_keep_dispatch_inside_mlb(name):
     )
 
     assert physical_ids.shape == logical_ids.shape
-    assert transformed is logits
 
 
 @pytest.mark.unit
 def test_fake_transform_is_independent_from_replica_routing():
     logits = torch.zeros((2, 4))
 
-    transformed, _ = transform_topk_inputs("fake", logits, None)
+    transformed, _ = transform_fake_routing_inputs(logits, None)
 
     assert transformed is logits
     assert torch.all((transformed >= 5) & (transformed < 10))
