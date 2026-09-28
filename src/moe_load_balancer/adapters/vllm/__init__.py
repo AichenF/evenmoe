@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Stateless translation between vLLM values and MLB framework-neutral types.
 
 This package must not import vLLM.  Glue on the vLLM side owns every framework

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Copyright 2023-2026 SGLang Team
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 // LP prep kernel: build IPM inputs (A_full last column, b, t1) from
 // global_counts and the constant per-rank metadata (log_single,
 // log_replicated, B1, A_base_row_sum).

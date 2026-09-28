@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Copyright 2023-2026 SGLang Team
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """LPLB CUDA kernel pipeline — framework-neutral.
 
 This package owns the LPLB Linear-Programming load-balancer kernels:

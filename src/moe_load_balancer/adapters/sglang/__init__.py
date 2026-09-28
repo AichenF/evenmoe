@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """SGLang interoperability for the framework-neutral load balancer.
 
 SGLang owns lifecycle, collective transport, threshold decisions, recording,

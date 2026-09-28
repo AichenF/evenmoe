@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Copyright 2023-2026 SGLang Team
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Baseline and experimental physical-replica routing policies."""
 
 from __future__ import annotations

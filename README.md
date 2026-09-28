@@ -1,5 +1,7 @@
 # MoE Load Balancer
 
+> **Experimental.** This is an early release. Interfaces and behavior may change between versions.
+
 A framework-independent library for expert placement and token routing in Mixture-of-Experts inference aiming to solve the MoE load imbalance issue and improve the MoE model serving efficiency. MoE Load Balancer (MLB) brings placement and routing policies behind a unified Python API, with adapters for different inference backend.
 
 ![MoE Load Balancer — Expert placement. Balanced routing.](assets/banner-nvidia-green.png)
@@ -80,7 +82,7 @@ GPU kernels additionally require a compatible NVIDIA GPU and CUDA toolchain.
 | NVIDIA MathDX (`nvidia-mathdx`) | 25.6.0 (exact) |
 
 ```bash
-git clone https://github.com/xutizhou/moe_load_balancer.git
+git clone https://github.com/ai-dynamo/moe-load-balancer.git
 cd moe_load_balancer
 python -m pip install -e .
 ```
@@ -155,7 +157,7 @@ LPLB requires redundant replicas (`--ep-num-redundant-experts > 0`) and a record
 Use [vLLM `feat/vllm_mlb`](https://github.com/yunyang1999/vllm/tree/feat/vllm_mlb) with MLB `main`. Install the fork as you would upstream vLLM, then MLB into the same environment:
 
 ```bash
-git clone https://github.com/xutizhou/moe_load_balancer.git
+git clone https://github.com/ai-dynamo/moe-load-balancer.git
 python -m pip install -e ./moe_load_balancer --no-deps
 ```
 
@@ -221,7 +223,7 @@ UltraEP re-solves placement and replica quotas every `MLB_ULTRAEP_REFRESH_INTERV
 
 ## Contributing
 
-Bug reports, algorithm ideas, and integration improvements are welcome through [Issues](https://github.com/xutizhou/moe_load_balancer/issues) and pull requests.
+Bug reports, algorithm ideas, and integration improvements are welcome through [Issues](https://github.com/ai-dynamo/moe-load-balancer/issues) and pull requests.
 
 ## Acknowledgments
 
@@ -229,4 +231,4 @@ We thank DeepSeek for [EPLB](https://github.com/deepseek-ai/EPLB) and [LPLB](htt
 
 ## License
 
-Licensed under [Apache-2.0](https://github.com/xutizhou/moe_load_balancer/blob/main/LICENSE). See [Third-Party Notices](https://github.com/xutizhou/moe_load_balancer/blob/main/THIRD_PARTY_NOTICES.md) for components adapted from DeepSeek, SGLang, and UltraEP.
+Licensed under [Apache-2.0](https://github.com/ai-dynamo/moe-load-balancer/blob/main/LICENSE). See [Third-Party Notices](https://github.com/ai-dynamo/moe-load-balancer/blob/main/THIRD_PARTY_NOTICES.md) for components adapted from DeepSeek, SGLang, and UltraEP.

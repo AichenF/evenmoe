@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Declarations a routing policy publishes about itself.
 
 Everything the pipeline, the orchestrator, and framework glue need to know

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """GPU checks for the JIT-built UltraEP kernels.
 
 The placement solve is held to upstream UltraEP's own extension, bit for bit,

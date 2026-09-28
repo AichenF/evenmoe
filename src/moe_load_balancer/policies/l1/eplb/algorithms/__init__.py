@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """DeepSeek EPLB algorithm family — framework-neutral.
 
 This package owns the algorithm-side formerly implemented in SGLang's

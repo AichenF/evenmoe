@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Copyright 2023-2026 SGLang Team
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 // LP post kernel: build the final log2phy_prob tensor from the IPM output
 // `x` and the prep's `t1`.
 //

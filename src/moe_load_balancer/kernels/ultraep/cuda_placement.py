@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """JIT-compiled UltraEP placement and quota-reroute kernels.
 
 Framework-neutral. The two kernels the ``ultraep`` policy pair calls, built

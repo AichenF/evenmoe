@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Copyright 2023-2026 SGLang Team
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Execution contract implemented by an LPLB kernel backend."""
 
 from __future__ import annotations

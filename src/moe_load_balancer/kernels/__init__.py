@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Framework-neutral tensor operators and accelerated kernel backends.
 
 Callable tensor operators live in :mod:`moe_load_balancer.kernels.ops`.

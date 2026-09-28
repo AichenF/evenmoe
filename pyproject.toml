@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 [build-system]
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
@@ -9,7 +12,7 @@ description = "Framework-decoupled expert placement and token routing for Mixtur
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"]
-authors = [{ name = "MoE Load Balancer Contributors" }]
+authors = [{ name = "NVIDIA Corporation" }]
 requires-python = ">=3.10"
 keywords = [
     "mixture-of-experts",
@@ -46,9 +49,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/xutizhou/moe_load_balancer"
-Repository = "https://github.com/xutizhou/moe_load_balancer"
-Issues = "https://github.com/xutizhou/moe_load_balancer/issues"
+Homepage = "https://github.com/ai-dynamo/moe-load-balancer"
+Repository = "https://github.com/ai-dynamo/moe-load-balancer"
+Issues = "https://github.com/ai-dynamo/moe-load-balancer/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -81,3 +84,6 @@ target-version = ["py310"]
 python_version = "3.10"
 packages = ["moe_load_balancer"]
 ignore_missing_imports = true
+
+[tool.uv]
+managed = true

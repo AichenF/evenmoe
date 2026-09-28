@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Do our L2 policies decide the same thing SGLang's do?
 
 `static`, `dynamic` and `lplb` exist on both runtimes under the same names, and

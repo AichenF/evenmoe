@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """UltraEP placement algorithm behind MLB's existing planner interface.
 
 UltraEP solves placement and routing together: this L1 half publishes the

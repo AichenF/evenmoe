@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Framework-decoupled MoE load-balancing policies and adapters."""
 
 from moe_load_balancer.core.l1 import PlacementPlanner

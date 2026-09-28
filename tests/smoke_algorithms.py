@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """CPU smoke run of every L2 algorithm expression through MoELoadBalancer.
 
 Prints one JSON document describing, per expression: the resolved pipeline,
